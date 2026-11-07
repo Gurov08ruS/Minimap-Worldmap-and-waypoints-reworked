@@ -1,0 +1,48 @@
+[mod]
+id = "minimap_worldmap_waypoints_reworked"
+version = "0.1.0"
+priority = 100
+
+[compatibility]
+horizon_revision = "ba6344a59cb9e755b730dcf02285fc0d33b97d3c"
+
+[[module]]
+id = "runtime"
+file = "crates/horizon-client/src/game.rs"
+name = "minimap_worldmap_waypoints_reworked"
+source = "runtime.rs"
+
+[[injection]]
+id = "register"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_mods"
+helper = "list.rs"
+bindings = [{ name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" }, { name = "mods", ty = "&mut Vec<crate::game::native_hooks::NativeMod>", value = "mods" }]
+
+[[injection]]
+id = "settings"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_settings"
+helper = "settings.rs"
+bindings = [{ name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" }, { name = "mod_id", ty = "&str", value = "mod_id" }, { name = "buttons", ty = "&mut Vec<String>", value = "buttons" }]
+
+[[injection]]
+id = "settings-click"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_settings_click"
+helper = "click.rs"
+bindings = [{ name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" }, { name = "mod_id", ty = "&str", value = "mod_id" }, { name = "button", ty = "usize", value = "button" }]
+
+[[injection]]
+id = "minimap"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_minimap"
+helper = "minimap.rs"
+bindings = [{ name = "game", ty = "&crate::game::Game<'_>", value = "self" }, { name = "minimap", ty = "&mut Option<crate::game::native_hooks::NativeMinimap>", value = "minimap" }]
+
+[[injection]]
+id = "settings-flush"
+kind = "HEAD"
+target = "horizon_client::game::<Game<'_> as ApplicationHandler>::exiting"
+helper = "exit.rs"
+bindings = [{ name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" }]

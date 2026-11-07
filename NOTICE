@@ -1,0 +1,22 @@
+Minimap, Worldmap and waypoints reworked
+
+The project as a whole and its new contributions are licensed under the
+GNU General Public License, version 3 only (SPDX: GPL-3.0-only).
+You may redistribute and/or modify the program under the terms of GPL version 3
+as published by the Free Software Foundation. It is distributed without any
+warranty; see LICENSE for the full terms, including the disclaimer of warranty.
+
+Based on the Horizon native mod template:
+https://github.com/horizon-rust/horizon-native-mod-template
+The template's build/staging tooling is adapted from the MIT-licensed
+Horizon Veinminer port:
+https://github.com/levzzz5154/horizon-veinminer
+
+Copyright (c) 2026 Horizon Veinminer contributors
+Copyright (c) 2026 Horizon native mod contributors
+
+The original template code and tooling retain their MIT licensing.
+Their copyright notices and complete MIT permission and warranty notice
+are preserved in LICENSE-MIT. GPL-3.0-only applies to this project's new
+contributions and to distribution of the combined project; it does not
+remove the upstream authors' MIT permissions for their original code.

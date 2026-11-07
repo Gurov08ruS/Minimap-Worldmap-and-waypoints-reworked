@@ -1,0 +1,15 @@
+[package]
+name = "minimap-worldmap-waypoints-reworked"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "GPL-3.0-only"
+description = "Minimap, Worldmap and waypoints reworked — native Horizon minimap and settings"
+
+[lib]
+# This exact source is also injected as a same-crate module by horizon-mixins.
+path = "mixins/minimap_worldmap_waypoints_reworked/runtime.rs"
+
+[workspace]
+members = ["tools/audit"]
+resolver = "2"
