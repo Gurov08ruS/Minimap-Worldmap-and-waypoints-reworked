@@ -115,10 +115,27 @@ fn main() {
     for (file, tree) in trees {
         let original =
             syn::parse_file(&fs::read_to_string(Path::new(&args[1]).join(file)).unwrap()).unwrap();
-        assert!(
-            prettyplease::unparse(&original) == prettyplease::unparse(&tree),
-            "unexpected source change in {file}"
-        );
+        assert_eq!(original.shebang, tree.shebang, "changed shebang in {file}");
+        // Compare parsed tokens, including attributes and literal spellings.
+        // prettyplease is not whitespace-idempotent for every upstream method
+        // chain, so its layout alone cannot establish an AST change.
+        if quote!(#original).to_string() != quote!(#tree).to_string() {
+            let diagnostics = Path::new("target/source-audit");
+            fs::create_dir_all(diagnostics).unwrap();
+            fs::write(
+                diagnostics.join("original.rs"),
+                prettyplease::unparse(&original),
+            )
+            .unwrap();
+            fs::write(
+                diagnostics.join("restored.rs"),
+                prettyplease::unparse(&tree),
+            )
+            .unwrap();
+            panic!(
+                "unexpected source change in {file}; compare target/source-audit/{{original,restored}}.rs"
+            );
+        }
     }
     println!(
         "all original Rust sources preserved apart from planned HEAD statements and support modules"
