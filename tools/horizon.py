@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -118,8 +119,12 @@ def main():
         report = {"stage": str(output), "stage_changed": changed,
                   "horizon_revision": PIN, "staging_seconds": time.monotonic()-started}
         if args.action != "stage":
+            # After the client split, game.rs belongs to horizon-client's
+            # library; its executable is only a thin entry point with no tests.
+            library_tests = args.action == "test" and (output / "crates/horizon-client-lib/Cargo.toml").is_file()
+            cargo_target = ["--lib"] if library_tests else ["--bin", "horizon-client"]
             command = ["cargo", args.action, "--locked", "--offline", "-p", "horizon-client",
-                       "--bin", "horizon-client", "--no-default-features", "--target-dir", str(target)]
+                       *cargo_target, "--no-default-features", "--target-dir", str(target)]
             if args.action == "build":
                 command.extend(["--profile", "fast"])
             if args.action == "test":
@@ -132,6 +137,14 @@ def main():
             log = ROOT / "target" / f"horizon-{args.action}.log"
             log.write_text(result.stdout + result.stderr)
             report["cargo_log"] = str(log)
+            if args.action == "test" and not result.returncode:
+                summary = re.search(r"test result: ok\. (\d+) passed;", result.stdout)
+                passed = int(summary[1]) if summary else 0
+                report["runtime_tests_passed"] = passed
+                if not passed:
+                    report["error"] = "the native runtime test filter selected no passing tests"
+                    print(json.dumps(report), file=sys.stderr)
+                    return 1
             if result.returncode:
                 print(result.stderr[-12000:], file=sys.stderr)
                 print(json.dumps(report), file=sys.stderr)
