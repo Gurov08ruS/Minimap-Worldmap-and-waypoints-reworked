@@ -72,7 +72,7 @@ struct State {
     camera: maps::Camera,
     marker: [f64; 2],
     elapsed: f64,
-    uploaded: u64,
+    uploaded: (u64, usize),
     frame: Option<Arc<maps::Frame>>,
     dragging: bool,
     close: bool,
@@ -100,7 +100,7 @@ impl Default for State {
             camera: maps::Camera::new([0.0; 2], 2.0),
             marker: [0.0; 2],
             elapsed: 1.0,
-            uploaded: 0,
+            uploaded: (0, 0),
             frame: None,
             dragging: false,
             close: false,
@@ -708,7 +708,7 @@ fn perform_menu(
         MenuAction::DeleteWaypoint => {
             if let Some(spot) = menu.waypoint {
                 runtime::initialize(game.native_data_dir(runtime::MOD_ID))
-                    .remove_waypoint(spot.dimension, spot.x, spot.z);
+                    .remove_waypoint(&state.world, spot.dimension, spot.x, spot.z);
                 state.notice = Some(("Вейпоинт удалён".into(), Instant::now()));
             }
         }
@@ -1247,9 +1247,13 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
             runtime::set_text_input(false);
         }
     }
-    state.waypoints = controller.waypoints();
     state.portals = controller.maps.portals();
-    let world = format!("{:?}", identity.world);
+    use super::native_client_services::NativeWorldId;
+    let world = match identity.world.as_ref() {
+        Some(NativeWorldId::Singleplayer(folder)) => runtime::waypoint_world(true, folder),
+        Some(NativeWorldId::Server(address)) => runtime::waypoint_world(false, address),
+        _ => None,
+    }.unwrap_or_default();
     if state.world != world {
         let next = state.session + 1;
         *state = State {
@@ -1259,6 +1263,7 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
         };
         controller.maps.reset(next);
     }
+    state.waypoints = controller.waypoints(&state.world);
     let dimension = Dimension::from_id(player.dimension);
     if state.dimension != dimension {
         state.seen.clear();
@@ -1475,17 +1480,18 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
             }
         }
     }
+    let mut current_view = None;
     if let Some(renderer) = game.renderer.as_ref() {
         let viewport = HudBatch::new([renderer.config.width, renderer.config.height]);
         let rect = rectangle(viewport.width, viewport.height);
         let (width, height, span) = if large {
             // The HUD draws in GUI pixels, but the texture is sampled at the
-            // window's physical resolution. Render at physical size so a GUI
-            // scale of 2-4 does not stretch a GUI-sized image.
+            // window's physical resolution. Keep this coordinate space for
+            // overlays; terrain tiles are now rasterized directly by the GPU.
             let scale = viewport.scale.max(1.0);
             (
-                ((rect[2] * scale).ceil() as usize).clamp(1, 1024),
-                ((rect[3] * scale).ceil() as usize).clamp(1, 1024),
+                ((rect[2] * scale).ceil() as usize).max(1),
+                ((rect[3] * scale).ceil() as usize).max(1),
                 [
                     f64::from(rect[2]) * state.camera.zoom,
                     f64::from(rect[3]) * state.camera.zoom,
@@ -1507,7 +1513,7 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
             .get(&selected)
             .copied()
             .unwrap_or(Layer::Surface);
-        controller.maps.request(View {
+        let view = View {
             session: state.session,
             dimension: selected,
             layer: selected_layer,
@@ -1522,21 +1528,44 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
             },
             round: !large && settings.round,
             large,
-        });
+            smooth: large && settings.smooth_worldmap,
+        };
+        controller.maps.request(view.clone());
+        current_view = Some(view);
     }
     if let Some(image) = controller.maps.frame()
         && image.view.session == state.session
         && image.view.dimension == selected
         && image.view.large == large
-        && image.serial != state.uploaded
-        && game.native_mod_image(
-            image.view.width as u32,
-            image.view.height as u32,
-            &image.pixels,
-        )
     {
-        state.uploaded = image.serial;
-        state.frame = Some(image);
+        let (serial, width, height, pixels) = match &image.atlas {
+            Some(atlas) => ((atlas.serial, atlas.width), atlas.width, atlas.height, &atlas.pixels),
+            None => (
+                (image.serial, 0),
+                image.view.width,
+                image.view.height,
+                &image.pixels,
+            ),
+        };
+        if serial != state.uploaded && !game.native_mod_image(width as u32, height as u32, pixels) {
+            return;
+        }
+        state.uploaded = serial;
+        // Camera movement is independent of worker sampling/upload latency.
+        // Pointer queries and overlays use this exact same displayed view.
+        if let (Some(atlas), Some(view)) = (&image.atlas, current_view) {
+            if view.layer == image.view.layer {
+                state.frame = Some(Arc::new(maps::Frame {
+                    serial: image.serial,
+                    view,
+                    pixels: Vec::new(),
+                    known: image.known,
+                    atlas: Some(atlas.clone()),
+                }));
+            }
+        } else {
+            state.frame = Some(image);
+        }
     }
 }
 
@@ -1596,12 +1625,24 @@ fn draw(
             && f.view.session == state.session
     });
     if let Some(frame) = valid {
-        game.native_sprite(
-            batch,
-            horizon_client::hud::MOD_IMAGE_SPRITE,
-            [0.0, 0.0, frame.view.width as f32, frame.view.height as f32],
-            rect,
-        );
+        let mut terrain_visible = frame.known > 0;
+        if let Some(atlas) = &frame.atlas {
+            terrain_visible = false;
+            for (slot, chunk) in atlas.chunks.iter().enumerate() {
+                if let Some((src, dst)) = atlas.quad(&frame.view, rect, *chunk, slot)
+                {
+                    game.native_sprite(batch, horizon_client::hud::MOD_IMAGE_SPRITE, src, dst);
+                    terrain_visible = true;
+                }
+            }
+        } else {
+            game.native_sprite(
+                batch,
+                horizon_client::hud::MOD_IMAGE_SPRITE,
+                [0.0, 0.0, frame.view.width as f32, frame.view.height as f32],
+                rect,
+            );
+        }
         draw_border(game, batch, &frame.view, rect);
         let mut drawn: Vec<[i32; 2]> = Vec::new();
         for (dimension, at, kind) in &state.portals {
@@ -1650,7 +1691,7 @@ fn draw(
                 Dimension::from_id(player.dimension) == frame.view.dimension,
             );
         }
-        if frame.known > 0 {
+        if terrain_visible {
             return;
         }
     }
@@ -2024,7 +2065,7 @@ fn waypoint_press(
         && let Some(waypoint) = state.waypoints.get(index).cloned()
     {
         runtime::initialize(game.native_data_dir(runtime::MOD_ID))
-            .remove_waypoint(waypoint.dimension, waypoint.x, waypoint.z);
+            .remove_waypoint(&state.world, waypoint.dimension, waypoint.x, waypoint.z);
         state.notice = Some(("Вейпоинт удалён".into(), Instant::now()));
         state.waypoint_selected = None;
         *canceled = true;
@@ -2065,17 +2106,18 @@ fn save_name(game: &Game<'_>, state: &mut State) {
     };
     let controller = runtime::initialize(game.native_data_dir(runtime::MOD_ID));
     if let Some(rename) = form.rename {
-        controller.rename_waypoint(rename.dimension, rename.x, rename.z, &form.text);
+        controller.rename_waypoint(&state.world, rename.dimension, rename.x, rename.z, &form.text);
         state.notice = Some(("Имя вейпоинта изменено".into(), Instant::now()));
     } else if let Some(target) = form.target {
-        controller.add_waypoint(Waypoint {
+        let saved = controller.add_waypoint(Waypoint {
+            world: state.world.clone(),
             dimension: target.dimension,
             x: target.x,
             y: target.y,
             z: target.z,
             name: Waypoint::clean_name(&form.text),
         });
-        state.notice = Some(("Вейпоинт сохранён".into(), Instant::now()));
+        state.notice = Some((if saved { "Вейпоинт сохранён" } else { "Вейпоинт не изменён: дубликат, лимит или мир недоступен" }.into(), Instant::now()));
     }
     state.mode = form.background;
     runtime::set_text_input(false);
@@ -2207,5 +2249,5 @@ pub(super) fn disconnect(game: &Game<'_>) {
 }
 
 pub(super) fn atlas_invalidated() {
-    state().uploaded = 0;
+    state().uploaded = (0, 0);
 }

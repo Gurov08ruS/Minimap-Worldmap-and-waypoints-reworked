@@ -1,6 +1,47 @@
 # Validation
 
-## 0.3.1 development — 2026-11-08
+## 0.4.0 — 2026-11-08
+
+- Standalone formatting, clippy (`-D warnings`) and locked offline tests: pass,
+  36 tests plus one ignored manual benchmark.
+- Official `cargo horizon-mod check`, registry review and registry file check:
+  pass for the 68,514-byte source bundle, SHA-256
+  `5d6423a3adfe6bb7b8634d922c5569202aeb1484fff4e9e155eedaf63d53bde6`.
+- Fixture, deterministic staging, real Horizon check/test: pass (36 runtime tests, one manual benchmark ignored; source audit unchanged).
+
+New regressions cover matching coordinates in two saves and a server, independent
+rename/delete, reconnect/reload, namespace and escaped identity round-trips,
+per-world limits without cross-world eviction, and idempotent deletion of legacy
+unscoped waypoints while retaining preferences and scoped data. Legacy deletion
+is the author's requested migration policy, not a guess at world ownership.
+The release also includes the GPU map work and tests described below.
+No live-game review or macOS/Windows run was performed for this release.
+
+## GPU world-map development — 2026-11-08
+
+Local Linux, Rust 1.95.0, same pinned Horizon/Mixins revisions.
+
+- `cargo fmt --all --check`, clippy with warnings denied, and workspace tests:
+  pass (32 tests; one manual benchmark ignored by default).
+- `tools/test_template.py`: pass, including the new smoothing switch and saved
+  preference.
+- `tools/test_stage.py`: pass, deterministic AST staging and unchanged checkout.
+- Real Horizon `check` and `test`: pass (32 runtime tests, one manual benchmark
+  ignored; final test stage unchanged).
+- Release CPU comparison: pass; see [PERFORMANCE.md](PERFORMANCE.md). This is not
+  a GPU timing or game FPS measurement.
+- Source package: 66,824 bytes, SHA-256
+  `1a344896aa1245c4f7f16056de6908657a0260c6c6e1a915a5a351d70a500738`.
+
+Added regressions compare atlas sampling against the old raster at fractional
+positions, multiple zooms, negative coordinates, missing chunks, transparent
+pixels, walls and neighbour-based relief. They also exercise atlas reuse across
+camera movement, rebuilding after terrain changes, alpha-aware LOD without
+cross-slot bleeding, LOD selection, and the smoothing default/toggle/reset.
+No game window or GPU frame capture was run; live appearance/FPS and macOS/Windows
+remain unverified. The original checkout and player resources were not edited.
+
+## Earlier 0.3.1 development — 2026-11-08
 
 Local Linux checks on Rust 1.95.0 against the pinned revisions below:
 

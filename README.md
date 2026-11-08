@@ -1,8 +1,9 @@
 # Minimap, Worldmap and waypoints reworked
 
 A native Horizon mod by [daniliammo](https://github.com/daniliammo).
-Version **0.3.1** adds a world map, a rebindable map key and independent dimension
-selection for the minimap and world map. Waypoints remain planned.
+Version **0.4.0** scopes waypoints to their world/server and moves large-map
+rendering to the GPU, with optional distant smoothing enabled by default.
+Old unscoped waypoints from 0.3.x are deleted on first load; preferences remain.
 
 ## Install
 
@@ -57,7 +58,7 @@ The script does not update a published release or registry entry.
 - The menu also shows **Удалить вейпоинт** when the point is a waypoint. The
   waypoint manager (**N**) lists, renames and deletes waypoints; creation from
   there uses the player's position.
-- Waypoints are saved with the preferences (newest 64), drawn as first-letter
+- Waypoints are saved with the preferences (newest 64 per world/server), drawn as first-letter
   markers on the HUD through walls, on both maps, and their full name appears
   when hovering over the marker on the world map.
 - Nether portals, End portals and End gateways are marked on the map; clicking
@@ -108,24 +109,40 @@ history, manual Y selection, rectangle shape and world-border overlays remain
 future stages in [PLAN.md](PLAN.md).
 
 The displayed camera is eased: drag and zoom targets are approached over a few
-frames, a zoom keeps the world point under the cursor fixed, and the minimap and
-its marker interpolate the player's 20 Hz positions. The large map is rendered
-at the full physical size of its visible rectangle (GUI size times the window's
-GUI scale, up to the 1024-pixel shared atlas slot), not at GUI size or a fixed
-low resolution, so a GUI scale of 2-4 no longer stretches a small texture over
-the screen. The minimap is rendered at up to four times its GUI
-size before scaling down, so a block moves in quarter-pixel steps instead of
-jumping by whole blocks. The terrain renderer avoids per-pixel trigonometry and
-repeated chunk lookups to keep those updates cheap. Relief shading reads the
-neighbouring column's height from its own chunk tile, with a stronger
-north-west light so slopes and terrain steps stand out; chunk borders have no
-seams. The world map's pointer readout uses the frame's own mapping, so the
-highlighted block and coordinates match the drawn image, including during
-animation. Unknown terrain is left transparent instead of drawing a
-screen-aligned checkerboard that turned into moving stripes.
+frames, zoom keeps the world point under the cursor fixed, and markers interpolate
+player positions. The large map draws block-resolution chunk tiles as clipped,
+textured GPU quads through Horizon's existing HUD pipeline. Moving or zooming within a detail level
+changes only geometry: it no longer generates or uploads a screen-sized CPU
+image. Switching detail levels uploads the cached level once. The displayed camera does not wait for the sampling worker; pointer
+coordinates and overlays use that same camera.
 
-Waypoints are stored in the same `settings.ini` and are currently shared by all
-worlds of the instance; they are not yet split per save or server. Portal
+The worker prepares colours and relief shading once per block when the terrain
+repository changes. Up to 4,096 tiles fit in the existing 1024×1024 RGBA slot
+(4 MiB); the current implementation rebuilds/uploads the selected layer's atlas
+when the repository changes. Camera movement reuses it. The minimap retains its
+CPU renderer for rotation and circular masking. Nearest texture sampling keeps
+block boundaries sharp near the camera; unknown terrain is transparent. The
+**Большая карта — сглаживание вдали** setting defaults on: distant views select
+alpha-weighted, averaged levels (2×2 through 16×16 blocks per texel). Disable it
+for sharp block sampling at every scale. Cached levels cost at most about
+5.33 MiB of CPU pixel storage; only the selected level occupies the GPU slot. Relief reads neighbouring
+chunks to preserve lighting across tile edges. See [PERFORMANCE.md](PERFORMANCE.md)
+for measurements, limitations and further optimization options.
+
+Waypoints are stored in the same `settings.ini`, keyed by Horizon's stable world
+identity, dimension and X/Z. Single-player saves use the save folder (not the
+shown name); servers use the public joined address provided by `NativeWorldId`.
+Save and server identities have separate namespaces. Rejoining the same identity
+restores its points. Unknown identities cannot create or display points. A server
+address alias or a renamed save folder is a different identity; friend invites
+have Horizon's public invite identity, which can change between sharings.
+
+Migration deliberately deletes old `waypoint=` records without a world identity,
+as requested by the author; it never guesses a destination world. Valid scoped
+`waypoint_v2=` records and preferences survive. The migration is persisted even
+without joining a world or editing settings. Each world keeps its newest 64
+points; at 4,096 total points new worlds/points are refused rather than evicting
+another world's records. Portal
 destinations are computed on the client: a Nether portal prefers the nearest
 already-sampled portal in the target dimension (128 blocks), otherwise the
 vanilla ×8/÷8 coordinates are shown; an End portal shows the End platform
@@ -142,7 +159,7 @@ Preferences and waypoints load/save asynchronously in `settings.ini` under the
 mod data folder provided by Horizon. Normal exit flushes accepted changes. The
 only filesystem writes performed by the running mod are its settings file and
 its short-lived atomic-replacement file. Map history currently lives in memory,
-while waypoints are part of the settings file (bounded to the newest 64). No
+while waypoints are part of the settings file (bounded to 64 per world/server and 4,096 total). No
 network requests are made by the mod.
 
 The two views use Horizon's shared native RGBA atlas slot. Mods that independently
@@ -193,7 +210,7 @@ python3 tools/package.py
 
 Fetch the pinned Mixins checkout's dependencies with `cargo fetch --locked`
 before the offline checks. The output is
-`target/minimap_worldmap_waypoints_reworked-0.3.1.hnmod`.
+`target/minimap_worldmap_waypoints_reworked-0.4.0.hnmod`.
 Check it with `cargo horizon-mod check <file>` using Horizon's official
 `cargo-horizon-mod` tool. The [validation workflow](.github/workflows/validate.yml)
 runs the standalone tests, source audit, real client check and tests, and official

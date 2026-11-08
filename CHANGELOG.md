@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.4.0 — 2026-11-08
+
+- Waypoint storage, display, create, rename and delete now include the stable
+  save/server identity as well as dimension and coordinates. Matching positions
+  in two worlds cannot overwrite or delete each other; reconnects restore the
+  same world's list. Unknown world identities cannot access stored points.
+- Legacy unscoped waypoints are deleted on first load (author-requested migration).
+  Preferences and already-scoped points survive; no world is guessed.
+- Keep up to 64 points per world/server and 4,096 total. Reaching the total limit
+  refuses new entries instead of evicting another world's records.
+- The large map now renders chunk tiles through Horizon's GPU HUD pipeline.
+  Dragging and zooming reuse terrain textures instead of rasterizing a full
+  screen-sized image on the CPU. Camera motion no longer waits on the sampler.
+- Added default-on distant smoothing with cached, alpha-weighted detail levels,
+  and a persistent setting to return to sharp sampling at every scale.
+- Updated CI's official bundle check to the current artifact filename.
+
 ## 0.3.1 — 2026-11-08
 
 - Fixed the large map still looking pixelated at GUI scale 4: it now renders at

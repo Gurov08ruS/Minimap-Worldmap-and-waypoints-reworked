@@ -10,7 +10,7 @@ fn register(
     runtime::initialize(game.native_data_dir(runtime::MOD_ID));
     mods.push(crate::game::native_hooks::NativeMod {
         id: runtime::MOD_ID.into(),
-        title: format!("{} 0.3.1", runtime::MOD_TITLE),
+        title: format!("{} 0.4.0", runtime::MOD_TITLE),
         description: "Адаптивная миникарта. Форма, размер, положение, масштаб и вращение.".into(),
         keys: vec![
             [

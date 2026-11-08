@@ -67,7 +67,7 @@ impl Game<'_> {
         let mut mods=Vec::new();game.native_mods(&mut mods);game.native_mods(&mut mods);
         assert_eq!(mods.len(),1);assert_eq!(mods[0].keys[0],[runtime::WORLD_MAP_KEY,"Открыть большую карту",runtime::WORLD_MAP_DEFAULT].map(str::to_owned));
         let mut buttons=Vec::new();game.native_settings("foreign",&mut buttons);assert!(buttons.is_empty());
-        game.native_settings(runtime::MOD_ID,&mut buttons);assert_eq!(buttons.len(),9);
+        game.native_settings(runtime::MOD_ID,&mut buttons);assert_eq!(buttons.len(),10);
         game.native_key("key.keyboard.m",false);assert!(!game.open);
         game.native_key("key.keyboard.m",true);assert!(game.open);
         game.native_key("key.keyboard.m",false);assert!(game.open);
@@ -80,9 +80,11 @@ impl Game<'_> {
         game.binding="key.keyboard.unknown".into();game.native_key("key.keyboard.unknown",true);assert!(!game.open);
         game.native_settings_click("foreign",7);
         game.native_settings_click(runtime::MOD_ID,7);game.native_settings_click(runtime::MOD_ID,8);game.native_settings_click(runtime::MOD_ID,8);
+        game.native_settings_click(runtime::MOD_ID,9);
         game.exiting(&ActiveEventLoop);
         let saved=runtime::minimap::Settings::decode(&std::fs::read_to_string(directory.join(runtime::SETTINGS_FILE)).unwrap());
         assert_eq!(saved.mini_dimension,runtime::Dimension::Overworld);assert_eq!(saved.world_dimension,runtime::Dimension::Nether);
+        assert!(!saved.smooth_worldmap);
         assert!(game.original.iter().all(|v|v.get()>0));assert_eq!(game.original[4].get(),1);
     }
 }

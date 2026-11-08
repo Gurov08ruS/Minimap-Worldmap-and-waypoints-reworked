@@ -130,6 +130,7 @@ pub mod minimap {
         pub round: bool,
         pub mini_dimension: super::Dimension,
         pub world_dimension: super::Dimension,
+        pub smooth_worldmap: bool,
     }
 
     impl Default for Settings {
@@ -143,6 +144,7 @@ pub mod minimap {
                 round: false,
                 mini_dimension: super::Dimension::Player,
                 world_dimension: super::Dimension::Player,
+                smooth_worldmap: true,
             }
         }
     }
@@ -166,6 +168,9 @@ pub mod minimap {
                                 value.world_dimension = dimension;
                             }
                         }
+                    }
+                    "smooth_worldmap" => {
+                        value.smooth_worldmap = raw.parse().unwrap_or(value.smooth_worldmap)
                     }
                     "enabled" => value.enabled = raw.parse().unwrap_or(value.enabled),
                     "corner" => {
@@ -203,7 +208,7 @@ pub mod minimap {
 
         pub fn encode(self) -> String {
             format!(
-                "# Minimap Reworked settings\nenabled={}\ncorner={}\nsize={}\nshape={}\nzoom={}\nrotate={}\nmini_dimension={}\nworld_dimension={}\n",
+                "# Minimap Reworked settings\nenabled={}\ncorner={}\nsize={}\nshape={}\nzoom={}\nrotate={}\nmini_dimension={}\nworld_dimension={}\nsmooth_worldmap={}\n",
                 self.enabled,
                 self.corner.name(),
                 self.size_px,
@@ -212,6 +217,7 @@ pub mod minimap {
                 self.rotate_with_player,
                 self.mini_dimension.name(),
                 self.world_dimension.name(),
+                self.smooth_worldmap,
             )
         }
 
@@ -232,7 +238,7 @@ pub mod minimap {
                 5 => self.rotate_with_player = !self.rotate_with_player,
                 6 => {
                     *self = Self::default();
-                    return 0x1bf;
+                    return 0x3bf;
                 }
                 7 => {
                     self.mini_dimension = super::cycle(self.mini_dimension, &super::Dimension::ALL)
@@ -241,6 +247,7 @@ pub mod minimap {
                     self.world_dimension =
                         super::cycle(self.world_dimension, &super::Dimension::ALL)
                 }
+                9 => self.smooth_worldmap = !self.smooth_worldmap,
                 _ => return 0,
             }
             1 << button
@@ -269,6 +276,9 @@ pub mod minimap {
             if mask & 256 != 0 {
                 self.world_dimension = edited.world_dimension;
             }
+            if mask & 512 != 0 {
+                self.smooth_worldmap = edited.smooth_worldmap;
+            }
             if mask & 32 != 0 {
                 self.rotate_with_player = edited.rotate_with_player;
             }
@@ -293,6 +303,10 @@ pub mod minimap {
                 "Сбросить настройки карты".into(),
                 format!("Измерение миникарты: {}", self.mini_dimension.label()),
                 format!("Измерение большой карты: {}", self.world_dimension.label()),
+                format!(
+                    "Большая карта — сглаживание вдали: {}",
+                    on(self.smooth_worldmap)
+                ),
             ]
         }
 
@@ -319,6 +333,25 @@ fn cycle<T: Copy + PartialEq>(current: T, choices: &[T]) -> T {
 }
 
 pub const MAX_WAYPOINTS: usize = 64;
+const MAX_TOTAL_WAYPOINTS: usize = 4096;
+
+/// Stable, namespaced identity supplied by Horizon, never a session counter or
+/// Debug representation. Unknown identities must not read or mutate waypoints.
+pub fn waypoint_world(singleplayer: bool, identity: &str) -> Option<String> {
+    if identity.is_empty() || identity.len() > 1024 || identity.chars().any(char::is_control) {
+        return None;
+    }
+    Some(format!(
+        "{}:{identity}",
+        if singleplayer { "save" } else { "server" }
+    ))
+}
+fn valid_waypoint_world(world: &str) -> bool {
+    world
+        .strip_prefix("save:")
+        .or_else(|| world.strip_prefix("server:"))
+        .is_some_and(|id| !id.is_empty() && id.len() <= 1024 && !id.chars().any(char::is_control))
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ScreenRequest {
@@ -365,6 +398,7 @@ const MAX_WAYPOINT_NAME: usize = 32;
 /// the name the player gave it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Waypoint {
+    pub world: String,
     pub dimension: Dimension,
     pub x: i32,
     pub y: i32,
@@ -389,7 +423,11 @@ impl Waypoint {
     }
 
     fn decode(text: &str) -> Option<Self> {
-        let mut parts = text.strip_prefix("waypoint=")?.splitn(5, ':');
+        let mut parts = text.strip_prefix("waypoint_v2=")?.splitn(6, ':');
+        let world = unescape_name(parts.next()?);
+        if !valid_waypoint_world(&world) {
+            return None;
+        }
         let dimension = parts.next()?;
         let dimension = Dimension::ALL
             .into_iter()
@@ -398,6 +436,7 @@ impl Waypoint {
             return None;
         }
         Some(Self {
+            world,
             dimension,
             x: parts.next()?.parse().ok()?,
             y: parts.next()?.parse().ok()?,
@@ -408,7 +447,8 @@ impl Waypoint {
 
     fn encode(&self) -> String {
         format!(
-            "waypoint={}:{}:{}:{}:{}\n",
+            "waypoint_v2={}:{}:{}:{}:{}:{}\n",
+            escape_name(&self.world),
             self.dimension.name(),
             self.x,
             self.y,
@@ -471,7 +511,8 @@ fn decode_waypoints(text: &str) -> Vec<Waypoint> {
 /// duplicate with the same name. A different name at the same place renames it.
 fn push_waypoint(waypoints: &mut Vec<Waypoint>, waypoint: Waypoint) -> bool {
     if let Some(existing) = waypoints.iter_mut().find(|existing| {
-        existing.dimension == waypoint.dimension
+        existing.world == waypoint.world
+            && existing.dimension == waypoint.dimension
             && existing.x == waypoint.x
             && existing.z == waypoint.z
     }) {
@@ -481,8 +522,20 @@ fn push_waypoint(waypoints: &mut Vec<Waypoint>, waypoint: Waypoint) -> bool {
         existing.name = waypoint.name;
         return true;
     }
-    if waypoints.len() >= MAX_WAYPOINTS {
-        waypoints.remove(0);
+    if waypoints
+        .iter()
+        .filter(|w| w.world == waypoint.world)
+        .count()
+        >= MAX_WAYPOINTS
+    {
+        let oldest = waypoints
+            .iter()
+            .position(|w| w.world == waypoint.world)
+            .unwrap();
+        waypoints.remove(oldest);
+    } else if waypoints.len() >= MAX_TOTAL_WAYPOINTS {
+        // Never evict another world's data to make room in this world.
+        return false;
     }
     waypoints.push(waypoint);
     true
@@ -584,16 +637,23 @@ impl Controller {
         let _ = notify.try_send(());
     }
 
-    pub fn waypoints(&self) -> Vec<Waypoint> {
+    pub fn waypoints(&self, world: &str) -> Vec<Waypoint> {
         self.state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .waypoints
-            .clone()
+            .iter()
+            .filter(|w| w.world == world)
+            .cloned()
+            .collect()
     }
 
     /// Adds a waypoint and persists it with the settings; false for a duplicate.
-    pub fn add_waypoint(&self, waypoint: Waypoint) -> bool {
+    pub fn add_waypoint(&self, mut waypoint: Waypoint) -> bool {
+        if !valid_waypoint_world(&waypoint.world) || waypoint.dimension == Dimension::Player {
+            return false;
+        }
+        waypoint.name = Waypoint::clean_name(&waypoint.name);
         let notify = self.notify.lock().unwrap_or_else(|e| e.into_inner());
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if !push_waypoint(&mut state.waypoints, waypoint) {
@@ -610,12 +670,15 @@ impl Controller {
         true
     }
 
-    pub fn remove_waypoint(&self, dimension: Dimension, x: i32, z: i32) -> bool {
+    pub fn remove_waypoint(&self, world: &str, dimension: Dimension, x: i32, z: i32) -> bool {
         let notify = self.notify.lock().unwrap_or_else(|e| e.into_inner());
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let before = state.waypoints.len();
         state.waypoints.retain(|waypoint| {
-            !(waypoint.dimension == dimension && waypoint.x == x && waypoint.z == z)
+            !(waypoint.world == world
+                && waypoint.dimension == dimension
+                && waypoint.x == x
+                && waypoint.z == z)
         });
         if state.waypoints.len() == before {
             return false;
@@ -628,15 +691,23 @@ impl Controller {
         true
     }
 
-    pub fn rename_waypoint(&self, dimension: Dimension, x: i32, z: i32, name: &str) -> bool {
+    pub fn rename_waypoint(
+        &self,
+        world: &str,
+        dimension: Dimension,
+        x: i32,
+        z: i32,
+        name: &str,
+    ) -> bool {
         let name = Waypoint::clean_name(name);
         let notify = self.notify.lock().unwrap_or_else(|e| e.into_inner());
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(waypoint) = state
-            .waypoints
-            .iter_mut()
-            .find(|waypoint| waypoint.dimension == dimension && waypoint.x == x && waypoint.z == z)
-        else {
+        let Some(waypoint) = state.waypoints.iter_mut().find(|waypoint| {
+            waypoint.world == world
+                && waypoint.dimension == dimension
+                && waypoint.x == x
+                && waypoint.z == z
+        }) else {
             return false;
         };
         if waypoint.name == name {
@@ -671,11 +742,14 @@ impl Drop for Controller {
 
 fn settings_worker(directory: &Path, shared: &Mutex<State>, rx: mpsc::Receiver<()>) {
     let path = directory.join(SETTINGS_FILE);
-    let loaded = read_profile(&path);
+    let loaded = read_profile_migration(&path);
     {
         let mut state = shared.lock().unwrap_or_else(|e| e.into_inner());
         match loaded {
-            Ok((mut settings, loaded)) => {
+            Ok((mut settings, loaded, discarded_legacy)) => {
+                if discarded_legacy {
+                    state.revision += 1;
+                }
                 minimap::merge(&mut settings, state.settings, state.touched);
                 // Waypoints added while the file was read stay: merge them over
                 // the loaded list rather than discarding either side.
@@ -693,6 +767,7 @@ fn settings_worker(directory: &Path, shared: &Mutex<State>, rx: mpsc::Receiver<(
         }
     }
     let mut saved_revision = 0;
+    persist_latest(&path, shared, &mut saved_revision);
     while rx.recv().is_ok() {
         persist_latest(&path, shared, &mut saved_revision);
     }
@@ -718,12 +793,16 @@ fn persist_latest(path: &Path, shared: &Mutex<State>, saved_revision: &mut u64) 
     });
 }
 
+#[cfg(test)]
 fn read_profile(path: &Path) -> io::Result<(Settings, Vec<Waypoint>)> {
-    const LIMIT: usize = 16 * 1024;
+    read_profile_migration(path).map(|(settings, points, _)| (settings, points))
+}
+fn read_profile_migration(path: &Path) -> io::Result<(Settings, Vec<Waypoint>, bool)> {
+    const LIMIT: usize = 16 * 1024 * 1024;
     let file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok((Settings::default(), Vec::new()));
+            return Ok((Settings::default(), Vec::new(), false));
         }
         Err(error) => return Err(error),
     };
@@ -732,10 +811,15 @@ fn read_profile(path: &Path) -> io::Result<(Settings, Vec<Waypoint>)> {
     if text.len() > LIMIT {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "Settings file exceeds 16 KiB",
+            "Settings file exceeds 16 MiB",
         ));
     }
-    Ok((Settings::decode(&text), decode_waypoints(&text)))
+    Ok((
+        Settings::decode(&text),
+        decode_waypoints(&text),
+        text.lines()
+            .any(|line| line.trim().starts_with("waypoint=")),
+    ))
 }
 
 #[cfg(test)]
@@ -847,11 +931,115 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    fn point(world: &str, name: &str) -> Waypoint {
+        Waypoint {
+            world: world.into(),
+            dimension: Dimension::Overworld,
+            x: 10,
+            y: 64,
+            z: -5,
+            name: name.into(),
+        }
+    }
+
+    #[test]
+    fn world_and_server_waypoints_do_not_collide_and_survive_reconnect() {
+        let directory = scratch();
+        let a = waypoint_world(true, "World A").unwrap();
+        let b = waypoint_world(true, "World B").unwrap();
+        let server = waypoint_world(false, "World A").unwrap();
+        let controller = Controller::open(directory.clone());
+        for (world, name) in [(&a, "A"), (&b, "B"), (&server, "Server")] {
+            assert!(controller.add_waypoint(point(world, name)));
+        }
+        assert_eq!(controller.waypoints(&a), vec![point(&a, "A")]);
+        assert_eq!(controller.waypoints(&b), vec![point(&b, "B")]);
+        assert!(controller.rename_waypoint(&b, Dimension::Overworld, 10, -5, "B renamed"));
+        assert!(controller.remove_waypoint(&server, Dimension::Overworld, 10, -5));
+        assert_eq!(controller.waypoints(&a), vec![point(&a, "A")]);
+        assert!(controller.waypoints("").is_empty());
+        assert!(!controller.add_waypoint(point("", "unknown")));
+        controller.shutdown();
+        let reconnected = Controller::open(directory.clone());
+        reconnected.shutdown();
+        assert_eq!(reconnected.waypoints(&a), vec![point(&a, "A")]);
+        assert_eq!(reconnected.waypoints(&b), vec![point(&b, "B renamed")]);
+        assert!(reconnected.waypoints(&server).is_empty());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn waypoint_limits_never_evict_other_worlds() {
+        let mut points = vec![point("save:A", "A")];
+        for x in 0..100 {
+            push_waypoint(
+                &mut points,
+                Waypoint {
+                    x,
+                    ..point("save:B", "B")
+                },
+            );
+        }
+        assert_eq!(points[0], point("save:A", "A"));
+        assert_eq!(points.len(), MAX_WAYPOINTS + 1);
+        for i in 0..MAX_TOTAL_WAYPOINTS {
+            push_waypoint(&mut points, point(&format!("save:{i}"), "other"));
+        }
+        assert_eq!(points.len(), MAX_TOTAL_WAYPOINTS);
+        assert!(!push_waypoint(&mut points, point("save:overflow", "no")));
+        assert_eq!(points[0], point("save:A", "A"));
+    }
+
+    #[test]
+    fn scoped_identity_roundtrips_delimiters_and_rejects_unknown_kinds() {
+        let world = waypoint_world(false, "[::1]:25565% Мир").unwrap();
+        let point = point(&world, "Home: 100%");
+        assert_eq!(Waypoint::decode(point.encode().trim()), Some(point));
+        assert_ne!(waypoint_world(true, "same"), waypoint_world(false, "same"));
+        assert!(waypoint_world(false, "").is_none());
+        assert!(waypoint_world(false, "bad\naddress").is_none());
+        assert!(Waypoint::decode("waypoint_v2=unknown:overworld:1:2:3:name").is_none());
+    }
+
+    #[test]
+    fn legacy_waypoints_are_deleted_but_preferences_and_scoped_points_survive() {
+        let directory = scratch();
+        fs::create_dir_all(&directory).unwrap();
+        let scoped = point("server:example.org:25565", "Scoped");
+        fs::write(
+            directory.join(SETTINGS_FILE),
+            format!(
+                "size=192\nsmooth_worldmap=false\nwaypoint=overworld:10:64:-5:Old\n{}",
+                scoped.encode()
+            ),
+        )
+        .unwrap();
+        let controller = Controller::open(directory.clone());
+        // Migration must persist even without an edit or a world being joined.
+        controller.shutdown();
+        assert_eq!(controller.settings().size_px, 192);
+        assert!(!controller.settings().smooth_worldmap);
+        assert_eq!(controller.waypoints(&scoped.world), vec![scoped.clone()]);
+        assert!(controller.waypoints("save:A").is_empty());
+        let file = fs::read_to_string(directory.join(SETTINGS_FILE)).unwrap();
+        assert!(!file.lines().any(|l| l.starts_with("waypoint=")));
+        assert!(file.contains("waypoint_v2="));
+        let reopened = Controller::open(directory.clone());
+        reopened.shutdown();
+        assert_eq!(reopened.waypoints(&scoped.world), vec![scoped]);
+        assert_eq!(
+            fs::read_to_string(directory.join(SETTINGS_FILE)).unwrap(),
+            file
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn waypoints_persist_deduplicate_and_stay_bounded() {
         let directory = scratch();
         let controller = Controller::open(directory.clone());
         let point = Waypoint {
+            world: "save:test".into(),
             dimension: Dimension::Nether,
             x: 10,
             y: 64,
@@ -862,6 +1050,7 @@ mod tests {
         assert!(!controller.add_waypoint(point.clone()));
         for x in 0..(MAX_WAYPOINTS as i32 + 1) {
             assert!(controller.add_waypoint(Waypoint {
+                world: "save:test".into(),
                 dimension: Dimension::Overworld,
                 x,
                 y: 64,
@@ -876,7 +1065,7 @@ mod tests {
         assert_eq!(Waypoint::decode("waypoint=player:1:2:3"), None);
         let reopened = Controller::open(directory.clone());
         reopened.shutdown();
-        assert_eq!(reopened.waypoints(), saved);
+        assert_eq!(reopened.waypoints("save:test"), saved);
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -884,6 +1073,7 @@ mod tests {
     fn waypoint_names_roundtrip_and_waypoints_can_be_removed() {
         let directory = scratch();
         let waypoint = Waypoint {
+            world: "save:test".into(),
             dimension: Dimension::Overworld,
             x: 1,
             y: 2,
@@ -897,20 +1087,20 @@ mod tests {
         let controller = Controller::open(directory.clone());
         assert!(controller.add_waypoint(waypoint));
         let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while controller.waypoints().is_empty() {
+        while controller.waypoints("save:test").is_empty() {
             assert!(std::time::Instant::now() < until);
             thread::sleep(std::time::Duration::from_millis(1));
         }
-        assert!(controller.rename_waypoint(Dimension::Overworld, 1, 3, "Новое имя"));
+        assert!(controller.rename_waypoint("save:test", Dimension::Overworld, 1, 3, "Новое имя"));
         controller.shutdown();
         let reopened = Controller::open(directory.clone());
         let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while reopened.waypoints().is_empty() {
+        while reopened.waypoints("save:test").is_empty() {
             assert!(std::time::Instant::now() < until);
             thread::sleep(std::time::Duration::from_millis(1));
         }
-        assert_eq!(reopened.waypoints()[0].name, "Новое имя");
-        assert!(reopened.remove_waypoint(Dimension::Overworld, 1, 3));
+        assert_eq!(reopened.waypoints("save:test")[0].name, "Новое имя");
+        assert!(reopened.remove_waypoint("save:test", Dimension::Overworld, 1, 3));
         reopened.shutdown();
         let (_, saved) = read_profile(&directory.join(SETTINGS_FILE)).unwrap();
         assert!(saved.is_empty());
@@ -1204,8 +1394,18 @@ pub mod maps {
         pub angle: f64,
         pub round: bool,
         pub large: bool,
+        pub smooth: bool,
     }
     impl View {
+        pub fn lod(&self) -> usize {
+            if !self.smooth {
+                return 0;
+            }
+            let blocks = (self.span[0] / self.width.max(1) as f64)
+                .max(self.span[1] / self.height.max(1) as f64);
+            blocks.log2().floor().clamp(0.0, 4.0) as usize
+        }
+
         pub fn demands(&self, dimension: Dimension, layer: Layer, chunk: [i32; 2]) -> bool {
             if dimension != self.dimension || layer != self.layer {
                 return false;
@@ -1382,11 +1582,96 @@ pub mod maps {
             self.anchor.is_some() || self.zoom != self.zoom_target || self.center != self.target
         }
     }
+    /// Block-resolution terrain, uploaded only when the repository changes.
+    pub struct TerrainAtlas {
+        pub serial: u64,
+        pub pixels: Vec<u8>,
+        pub height: usize,
+        pub chunks: Vec<[i32; 2]>,
+        pub width: usize,
+        pub lod: usize,
+    }
+    impl TerrainAtlas {
+        fn levels(self) -> Vec<Arc<Self>> {
+            let mut levels = vec![Arc::new(self)];
+            for lod in 1..=4 {
+                let source = &levels[lod - 1];
+                let width = source.width / 2;
+                let height = source.height / 2;
+                let mut pixels = vec![0; width * height * 4];
+                for y in 0..height {
+                    for x in 0..width {
+                        let mut rgba = [0u32; 4];
+                        for dy in 0..2 {
+                            for dx in 0..2 {
+                                let i = ((y * 2 + dy) * source.width + x * 2 + dx) * 4;
+                                let alpha = u32::from(source.pixels[i + 3]);
+                                for (channel, sum) in rgba[..3].iter_mut().enumerate() {
+                                    *sum += u32::from(source.pixels[i + channel]) * alpha;
+                                }
+                                rgba[3] += alpha;
+                            }
+                        }
+                        let i = (y * width + x) * 4;
+                        for channel in 0..3 {
+                            pixels[i + channel] =
+                                ((rgba[channel] + rgba[3] / 2) / rgba[3].max(1)) as u8;
+                        }
+                        pixels[i + 3] = ((rgba[3] + 2) / 4) as u8;
+                    }
+                }
+                levels.push(Arc::new(Self {
+                    serial: source.serial,
+                    pixels,
+                    width,
+                    height,
+                    chunks: source.chunks.clone(),
+                    lod,
+                }));
+            }
+            levels
+        }
+
+        /// Clip in world space before converting to GUI coordinates. UVs stay
+        /// fractional so GPU nearest sampling preserves block boundaries.
+        pub fn quad(
+            &self,
+            view: &View,
+            rect: [f32; 4],
+            chunk: [i32; 2],
+            slot: usize,
+        ) -> Option<([f32; 4], [f32; 4])> {
+            let mut src = [0.0; 4];
+            let mut dst = [0.0; 4];
+            for axis in 0..2 {
+                let origin = f64::from(chunk[axis]) * 16.0;
+                let low = view.center[axis] - view.span[axis] / 2.0;
+                let start = origin.max(low);
+                let end = (origin + 16.0).min(low + view.span[axis]);
+                if end <= start {
+                    return None;
+                }
+                let atlas_origin = if axis == 0 { slot % 64 } else { slot / 64 } * 16;
+                src[axis] = atlas_origin as f32 + (start - origin) as f32;
+                src[axis + 2] = (end - start) as f32;
+                dst[axis] = rect[axis] + ((start - low) / view.span[axis]) as f32 * rect[axis + 2];
+                dst[axis + 2] = ((end - start) / view.span[axis]) as f32 * rect[axis + 2];
+            }
+            let scale = (1 << self.lod) as f32;
+            src = src.map(|v| v / scale);
+            Some((src, dst))
+        }
+    }
+    struct AtlasCache {
+        key: (u64, Dimension, Layer, u64),
+        levels: Vec<Arc<TerrainAtlas>>,
+    }
     pub struct Frame {
         pub serial: u64,
         pub view: View,
         pub pixels: Vec<u8>,
         pub known: usize,
+        pub atlas: Option<Arc<TerrainAtlas>>,
     }
     type Key = (Dimension, Layer, i32, i32);
     #[derive(Default)]
@@ -1422,6 +1707,48 @@ pub mod maps {
             self.clock += 1;
             self.tiles
                 .insert((dimension, layer, chunk[0], chunk[1]), (self.clock, tile));
+        }
+        fn terrain_atlas(&self, view: &View, serial: u64) -> TerrainAtlas {
+            let chunks: Vec<_> = self
+                .tiles
+                .keys()
+                .filter(|key| key.0 == view.dimension && key.1 == view.layer)
+                .map(|key| [key.2, key.3])
+                .collect();
+            let height = chunks.len().div_ceil(64).max(1) * 16;
+            let mut pixels = vec![0; 1024 * height * 4];
+            for (slot, chunk) in chunks.iter().enumerate() {
+                // Bake lighting once per block, including neighbouring chunks.
+                // No screen-space raster is produced for the large map.
+                let tile = self.render(
+                    View {
+                        center: [
+                            f64::from(chunk[0]) * 16.0 + 8.0,
+                            f64::from(chunk[1]) * 16.0 + 8.0,
+                        ],
+                        span: [16.0; 2],
+                        width: 16,
+                        height: 16,
+                        angle: 0.0,
+                        round: false,
+                        ..view.clone()
+                    },
+                    serial,
+                );
+                for row in 0..16 {
+                    let target = ((slot / 64 * 16 + row) * 1024 + slot % 64 * 16) * 4;
+                    pixels[target..target + 64]
+                        .copy_from_slice(&tile.pixels[row * 64..row * 64 + 64]);
+                }
+            }
+            TerrainAtlas {
+                serial,
+                pixels,
+                height,
+                chunks,
+                width: 1024,
+                lod: 0,
+            }
         }
         pub fn render(&self, view: View, serial: u64) -> Frame {
             let width = view.width.clamp(1, 1024);
@@ -1541,6 +1868,7 @@ pub mod maps {
                 view,
                 pixels,
                 known,
+                atlas: None,
             }
         }
     }
@@ -1588,6 +1916,7 @@ pub mod maps {
                     let mut cache = Cache::default();
                     let mut current = 0;
                     let mut serial = 0;
+                    let mut atlas: Option<AtlasCache> = None;
                     while let Ok(first) = rx.recv() {
                         let mut jobs = vec![first];
                         jobs.extend(rx.try_iter().take(7));
@@ -1656,7 +1985,25 @@ pub mod maps {
                             continue;
                         }
                         serial += 1;
-                        let frame = Arc::new(cache.render(view, serial));
+                        let frame = if view.large {
+                            let key = (view.session, view.dimension, view.layer, cache.clock);
+                            if atlas.as_ref().is_none_or(|a| a.key != key) {
+                                atlas = Some(AtlasCache {
+                                    key,
+                                    levels: cache.terrain_atlas(&view, serial).levels(),
+                                });
+                            }
+                            let terrain = atlas.as_ref().unwrap().levels[view.lod()].clone();
+                            Arc::new(Frame {
+                                serial,
+                                view,
+                                pixels: Vec::new(),
+                                known: terrain.chunks.len(),
+                                atlas: Some(terrain),
+                            })
+                        } else {
+                            Arc::new(cache.render(view, serial))
+                        };
                         if frame.view.session == active.load(Ordering::Acquire) {
                             *result.lock().unwrap_or_else(|e| e.into_inner()) = Some(frame);
                         }
@@ -1773,6 +2120,168 @@ pub mod maps {
                 angle: 0.0,
                 round: false,
                 large: true,
+                smooth: false,
+            }
+        }
+        fn terrain_fixture() -> Cache {
+            let mut cache = Cache::default();
+            for z in -2..=2 {
+                for x in -2..=2 {
+                    if [x, z] == [0, 0] {
+                        continue;
+                    }
+                    cache.insert(
+                        Dimension::Overworld,
+                        Layer::Surface,
+                        [x, z],
+                        Tile {
+                            pixels: (0..256)
+                                .flat_map(|i| [i as u8, 80, 120, if i % 7 == 0 { 0 } else { 255 }])
+                                .collect(),
+                            heights: std::array::from_fn(|i| (i % 19) as i32 + x + z),
+                            walls: std::array::from_fn(|i| i % 11 == 0),
+                            ..Tile::default()
+                        },
+                    );
+                }
+            }
+            cache
+        }
+        #[test]
+        fn lod_averages_alpha_without_bleeding_between_slots() {
+            let mut cache = Cache::default();
+            for (chunk, color) in [([0, 0], [240, 0, 0, 255]), ([1, 0], [0, 0, 240, 255])] {
+                let mut tile = Tile {
+                    pixels: color.repeat(256),
+                    ..Tile::default()
+                };
+                if chunk == [0, 0] {
+                    tile.pixels[0..4].copy_from_slice(&[0, 255, 0, 0]);
+                }
+                cache.insert(Dimension::Overworld, Layer::Surface, chunk, tile);
+            }
+            let mut view = view(Dimension::Overworld);
+            let levels = cache.terrain_atlas(&view, 7).levels();
+            assert_eq!(levels.len(), 5);
+            for (lod, atlas) in levels.iter().enumerate().skip(1) {
+                let size = 16 >> lod;
+                assert_eq!(atlas.width, 64 * size);
+                assert_eq!(atlas.pixels[0], 255);
+                assert_eq!(atlas.pixels[1], 0); // transparent green does not tint red
+                assert_eq!(&atlas.pixels[size * 4..size * 4 + 4], &[0, 0, 255, 255]);
+                let (uv, _) = atlas
+                    .quad(&view, [0.0, 0.0, 16.0, 16.0], [-1, 0], 1)
+                    .unwrap();
+                assert_eq!(uv, [size as f32, 0.0, size as f32, size as f32]);
+            }
+            assert_eq!(levels[1].pixels[3], 191);
+            view.width = 100;
+            view.height = 100;
+            view.smooth = true;
+            for (span, expected) in [(100.0, 0), (200.0, 1), (800.0, 3), (6400.0, 4)] {
+                view.span = [span; 2];
+                assert_eq!(view.lod(), expected);
+            }
+            view.smooth = false;
+            assert_eq!(view.lod(), 0);
+        }
+        #[test]
+        fn gpu_atlas_matches_cpu_pixels_and_clips_fractional_edges() {
+            let cache = terrain_fixture();
+            let mut view = view(Dimension::Overworld);
+            view.large = true;
+            view.width = 123;
+            view.height = 91;
+            view.center = [-3.37, 7.19];
+            let atlas = cache.terrain_atlas(&view, 1);
+            assert!(atlas.height <= 1024);
+            for span in [3.1, 27.7, 137.3] {
+                view.span = [span, span * 0.73];
+                let reference = cache.render(view.clone(), 2);
+                let mut gpu = vec![0; reference.pixels.len()];
+                let rect = [0.0, 0.0, view.width as f32, view.height as f32];
+                for (slot, chunk) in atlas.chunks.iter().enumerate() {
+                    let Some((src, dst)) = atlas.quad(&view, rect, *chunk, slot) else {
+                        continue;
+                    };
+                    assert!(dst[0] >= 0.0 && dst[1] >= 0.0);
+                    assert!(dst[0] + dst[2] <= rect[2] + 0.001);
+                    assert!(dst[1] + dst[3] <= rect[3] + 0.001);
+                    for y in 0..view.height {
+                        for x in 0..view.width {
+                            let px = x as f32 + 0.5;
+                            let py = y as f32 + 0.5;
+                            if px < dst[0]
+                                || px >= dst[0] + dst[2]
+                                || py < dst[1]
+                                || py >= dst[1] + dst[3]
+                            {
+                                continue;
+                            }
+                            let u = (src[0] + (px - dst[0]) / dst[2] * src[2]).floor() as usize;
+                            let v = (src[1] + (py - dst[1]) / dst[3] * src[3]).floor() as usize;
+                            let from = (v * 1024 + u) * 4;
+                            let to = (y * view.width + x) * 4;
+                            gpu[to..to + 4].copy_from_slice(&atlas.pixels[from..from + 4]);
+                        }
+                    }
+                }
+                assert_eq!(gpu, reference.pixels, "span {span}");
+            }
+        }
+        #[test]
+        #[ignore = "manual release CPU timing; does not measure GPU execution or game FPS"]
+        fn benchmark_worldmap_cpu_work() {
+            use std::{hint::black_box, time::Instant};
+            let mut cache = Cache::default();
+            for z in -32..32 {
+                for x in -32..32 {
+                    cache.insert(
+                        Dimension::Overworld,
+                        Layer::Surface,
+                        [x, z],
+                        Tile {
+                            pixels: [80, 120, 40, 255].repeat(256),
+                            ..Tile::default()
+                        },
+                    );
+                }
+            }
+            let mut view = view(Dimension::Overworld);
+            view.width = 1024;
+            view.height = 1024;
+            view.large = true;
+            let start = Instant::now();
+            let atlas = cache.terrain_atlas(&view, 1);
+            eprintln!(
+                "atlas preparation {:?}, {} bytes",
+                start.elapsed(),
+                atlas.pixels.len()
+            );
+            for span in [32.0, 256.0, 2048.0] {
+                view.span = [span; 2];
+                let start = Instant::now();
+                for i in 0..60 {
+                    view.center[0] = i as f64 * 0.137;
+                    black_box(cache.render(view.clone(), i));
+                }
+                let old = start.elapsed().as_secs_f64() * 1000.0 / 60.0;
+                let start = Instant::now();
+                for i in 0..60 {
+                    view.center[0] = i as f64 * 0.137;
+                    for (slot, chunk) in atlas.chunks.iter().enumerate() {
+                        black_box(atlas.quad(
+                            black_box(&view),
+                            [0.0, 0.0, 1024.0, 1024.0],
+                            *chunk,
+                            slot,
+                        ));
+                    }
+                }
+                eprintln!(
+                    "span={span}: CPU raster {old:.3} ms/frame; GPU quad preparation {:.3} ms/frame",
+                    start.elapsed().as_secs_f64() * 1000.0 / 60.0
+                );
             }
         }
         #[test]
@@ -2115,6 +2624,7 @@ mod map_regressions {
             angle: 0.0,
             round: false,
             large: true,
+            smooth: false,
         }
     }
     fn wait(service: &Service, predicate: impl Fn(&Frame) -> bool) -> Arc<Frame> {
@@ -2131,6 +2641,16 @@ mod map_regressions {
             );
             thread::sleep(std::time::Duration::from_millis(1));
         }
+    }
+    #[test]
+    fn smoothing_defaults_on_toggles_persists_and_resets() {
+        let mut settings = Settings::decode("smooth_worldmap=invalid");
+        assert!(settings.smooth_worldmap);
+        assert_eq!(minimap::apply(&mut settings, 9), 512);
+        assert!(!Settings::decode(&settings.encode()).smooth_worldmap);
+        minimap::apply(&mut settings, 6);
+        assert!(settings.smooth_worldmap);
+        assert_eq!(settings.labels().len(), 10);
     }
     #[test]
     fn dimension_preferences_roundtrip_and_are_independent() {
@@ -2200,8 +2720,29 @@ mod map_regressions {
                 ..Tile::default()
             })
         );
-        let frame = wait(&service, |f| f.known == 256);
-        assert_eq!(&frame.pixels[..4], &[0, 255, 0, 255]);
+        let frame = wait(&service, |f| f.known == 1);
+        let atlas = frame.atlas.as_ref().unwrap();
+        assert_eq!(&atlas.pixels[..4], &[0, 255, 0, 255]);
+        let mut moved = view(2);
+        moved.center = [-31.5, 17.75];
+        moved.span = [128.0; 2];
+        service.request(moved.clone());
+        let next = wait(&service, |f| f.view == moved);
+        assert!(Arc::ptr_eq(atlas, next.atlas.as_ref().unwrap()));
+        assert!(next.pixels.is_empty());
+        assert!(
+            service.submit(2, Dimension::Overworld, Layer::Surface, [0, 0], || Tile {
+                pixels: [255, 0, 0, 255].repeat(256),
+                ..Tile::default()
+            })
+        );
+        let changed = wait(&service, |f| {
+            f.atlas.as_ref().is_some_and(|a| a.serial != atlas.serial)
+        });
+        assert_eq!(
+            &changed.atlas.as_ref().unwrap().pixels[..4],
+            &[255, 0, 0, 255]
+        );
         service.shutdown();
     }
     #[test]
