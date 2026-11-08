@@ -10,8 +10,19 @@ fn register(
     runtime::initialize(game.native_data_dir(runtime::MOD_ID));
     mods.push(crate::game::native_hooks::NativeMod {
         id: runtime::MOD_ID.into(),
-        title: format!("{} 0.1.0", runtime::MOD_TITLE),
+        title: format!("{} 0.3.0", runtime::MOD_TITLE),
         description: "Адаптивная миникарта. Форма, размер, положение, масштаб и вращение.".into(),
-        keys: Vec::new(),
+        keys: vec![
+            [
+                runtime::WORLD_MAP_KEY.into(),
+                "Открыть большую карту".into(),
+                runtime::WORLD_MAP_DEFAULT.into(),
+            ],
+            [
+                runtime::WAYPOINTS_KEY.into(),
+                "Вейпоинты".into(),
+                runtime::WAYPOINTS_DEFAULT.into(),
+            ],
+        ],
     });
 }

@@ -18,7 +18,7 @@ def main():
     before = {p: (checkout/p).read_bytes() for p in horizon.COMPAT['source_sha256']}
     (horizon.ROOT/'target').mkdir(exist_ok=True)
     with horizon.lock(horizon.ROOT/'target/stage.lock'):
-        with tempfile.TemporaryDirectory(prefix='native-stage-test-', dir=horizon.ROOT/'target') as scratch:
+        with tempfile.TemporaryDirectory(prefix='native-stage-test-', dir=horizon.STAGES.parent) as scratch:
             root = Path(scratch)
             output, changed = horizon.mixin_stage(checkout, root)
             assert changed

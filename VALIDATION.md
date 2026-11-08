@@ -1,4 +1,30 @@
-# Validation — release 0.1.0
+# Validation
+
+## 0.3.0 development — 2026-11-08
+
+Local Linux checks on Rust 1.95.0 against the pinned revisions below:
+
+| Check | Result |
+| --- | --- |
+| `cargo fmt --all --check` | Pass |
+| `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` | Pass |
+| `cargo test --workspace --locked --offline` | Pass: 29 tests |
+| `python3 tools/test_template.py` | Pass |
+| `python3 tools/test_stage.py --horizon ../horizon` | Pass: plan-only AST changes, deterministic stage |
+| `python3 tools/horizon.py check --horizon ../horizon` | Pass |
+| `python3 tools/horizon.py test --horizon ../horizon` | Pass: 29 runtime tests |
+| `python3 tools/package.py` | Pass: 62,647 bytes, SHA-256 `589ab7d5465fbd3c5e689ec0217fa8a2b771a17e31a77a12224b1a44e6588297` |
+
+No game window was launched here, so interactive smoothness, the hover menu,
+biome readout, world-border and portal overlays, waypoint naming/manager screen,
+HUD letters and cross-dimension marker placement are type-checked and
+unit-tested but not verified live. The runtime tests cover translucent water and
+glass compositing, depth-dependent water tint, hidden ground cover, neighbouring
+chunk relief shading, transparent unknown terrain, portal recording, the eased
+camera, settings/waypoint naming persistence, waypoint removal and the existing
+settings failure paths.
+
+## Release 0.1.0
 
 Date: 2026-11-08. Linux, Rust 1.95.0, Python 3.12 in GitHub Actions.
 Horizon: `2ebf00a0281c592f79191e76fce0e7d522c6f425` (Nightly 2026-11-07).

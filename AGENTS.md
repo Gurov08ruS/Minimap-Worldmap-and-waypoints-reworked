@@ -5,6 +5,10 @@ separate from Horizon and horizon-mixins. Only export committed pinned Horizon
 sources into ignored target trees; never modify the original checkout or player
 resources. Do not commit binaries, exported sources or Minecraft assets.
 
+The mod must stay cross-platform and work on Linux, macOS and Windows. Keep the
+shared runtime and injected adapters free of platform-specific APIs; gate any
+unavoidable platform code behind a portable fallback instead of assuming Linux.
+
 The Cargo library and injected runtime module share runtime.rs. Keep helper
 functions small and gameplay logic testable there. All AST changes go through
 horizon-mixins plan/apply; do not add string-based Rust source rewriting.

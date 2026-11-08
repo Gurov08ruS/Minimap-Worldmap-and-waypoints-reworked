@@ -2,7 +2,6 @@
 """Export pinned sources, apply the template bundle and build a native Horizon."""
 import argparse
 import contextlib
-import fcntl
 import hashlib
 import json
 import os
@@ -15,10 +14,20 @@ import tarfile
 import tempfile
 import time
 
+try:
+    import fcntl
+except ImportError:  # Windows: no flock, use msvcrt's byte lock.
+    fcntl = None
+    import msvcrt
+
 ROOT = Path(__file__).resolve().parents[1]
+# Exported Horizon sources have no rust-toolchain.toml.
+os.environ.setdefault("RUSTUP_TOOLCHAIN", "1.95.0")
 COMPAT = json.loads((ROOT / "compatibility.json").read_text())
 PIN = COMPAT["horizon_revision"]
 MIXINS = Path(os.environ.get("HORIZON_MIXINS", ROOT.parent / "horizon-mixins")).resolve()
+MIXINS_TARGET = Path(os.environ.get("HORIZON_MIXINS_TARGET", MIXINS / "target")).resolve()
+STAGES = Path(os.environ.get("HORIZON_STAGE_DIR", ROOT / "target/mixins")).resolve()
 
 
 def digest(data):
@@ -82,8 +91,8 @@ def mixin_stage(horizon, stages):
         raise ValueError(f"horizon-mixins must be pinned at {COMPAT['horizon_mixins_revision']}, got {revision}")
     subprocess.run(["git", "-C", str(MIXINS), "diff", "--quiet", "HEAD", "--", "Cargo.toml", "Cargo.lock", "crates"], check=True)
     original, _ = stage(horizon, stages / "original")
-    subprocess.run(["cargo", "build", "--locked", "--offline", "--target-dir", str(MIXINS / "target"), "-p", "horizon-mixins-cli"], cwd=MIXINS, check=True, stdout=sys.stderr)
-    cli = MIXINS / "target/debug/horizon-mixins"
+    subprocess.run(["cargo", "build", "--locked", "--offline", "--target-dir", str(MIXINS_TARGET), "-p", "horizon-mixins-cli"], cwd=MIXINS, check=True, stdout=sys.stderr)
+    cli = MIXINS_TARGET / "debug/horizon-mixins"
     output = stages / "modded"
     plan = stages / "plan.json"
     base = ["--workspace", str(original), "--mods", str(ROOT / "mixins")]
@@ -96,9 +105,29 @@ def mixin_stage(horizon, stages):
 @contextlib.contextmanager
 def lock(path):
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
-        yield
+    with path.open("a+b") as handle:
+        if fcntl is not None:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+        else:
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+            while True:
+                handle.seek(0)
+                try:
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    time.sleep(0.1)
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+            else:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 def main():
@@ -113,7 +142,7 @@ def main():
         parser.error("Cargo target must be outside the original Horizon checkout")
     started = time.monotonic()
     with lock(ROOT / "target/stage.lock"):
-        output, changed = mixin_stage(horizon, ROOT / "target/mixins")
+        output, changed = mixin_stage(horizon, STAGES)
         if target.is_relative_to(output) or output.is_relative_to(target):
             parser.error("Cargo target and generated source stage must be separate")
         report = {"stage": str(output), "stage_changed": changed,
@@ -128,7 +157,7 @@ def main():
             if args.action == "build":
                 command.extend(["--profile", "fast"])
             if args.action == "test":
-                command.extend(["game::minimap_worldmap_waypoints_reworked::tests", "--", "--nocapture"])
+                command.extend(["game::minimap_worldmap_waypoints_reworked::", "--", "--nocapture"])
             with lock(target.parent / (target.name + ".mod-template.lock")):
                 run_start = time.monotonic()
                 result = subprocess.run(command, cwd=output, capture_output=True, text=True)

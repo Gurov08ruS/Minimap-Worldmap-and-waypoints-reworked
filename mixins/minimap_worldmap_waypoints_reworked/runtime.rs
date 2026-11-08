@@ -6,15 +6,83 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock, mpsc},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicU8, Ordering},
+        mpsc,
+    },
     thread::{self, JoinHandle},
 };
 
 pub const MOD_ID: &str = "minimap_worldmap_waypoints_reworked";
 pub const MOD_TITLE: &str = "Minimap, Worldmap and waypoints reworked";
+pub const WORLD_MAP_KEY: &str = "world_map";
+pub const WORLD_MAP_DEFAULT: &str = "key.keyboard.m";
+pub const WAYPOINTS_KEY: &str = "waypoints";
+pub const WAYPOINTS_DEFAULT: &str = "key.keyboard.n";
 pub const SETTINGS_FILE: &str = "settings.ini";
 const SIZES: [u16; 7] = [64, 96, 128, 160, 192, 224, 256];
 const ZOOMS: [f32; 7] = [0.1, 0.25, 0.5, 0.75, 1.0, 2.0, 4.0];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Dimension {
+    Player,
+    Overworld,
+    Nether,
+    End,
+}
+impl Dimension {
+    pub const ALL: [Self; 4] = [Self::Player, Self::Overworld, Self::Nether, Self::End];
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Player => "player",
+            Self::Overworld => "overworld",
+            Self::Nether => "nether",
+            Self::End => "end",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Player => "Игрок",
+            Self::Overworld => "Верхний мир",
+            Self::Nether => "Незер",
+            Self::End => "Энд",
+        }
+    }
+    pub fn from_id(id: &str) -> Self {
+        match id {
+            "minecraft:the_nether" => Self::Nether,
+            "minecraft:the_end" => Self::End,
+            _ => Self::Overworld,
+        }
+    }
+    /// The level id a command uses. Resolve `Player` before asking.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Nether => "minecraft:the_nether",
+            Self::End => "minecraft:the_end",
+            Self::Player | Self::Overworld => "minecraft:overworld",
+        }
+    }
+    pub fn resolve(self, player: Self) -> Self {
+        if self == Self::Player { player } else { self }
+    }
+    /// The same position as another dimension shows it. The Nether's
+    /// horizontal coordinates are one eighth of the Overworld's; the End and
+    /// the Overworld share one scale. `Player` is not a place: resolve it
+    /// before converting.
+    pub fn convert(self, to: Self, position: [f64; 2]) -> [f64; 2] {
+        if self == Self::Player || to == Self::Player {
+            return position;
+        }
+        let nether = |dimension: Self| dimension == Self::Nether;
+        match (nether(self), nether(to)) {
+            (false, true) => [position[0] / 8.0, position[1] / 8.0],
+            (true, false) => [position[0] * 8.0, position[1] * 8.0],
+            _ => position,
+        }
+    }
+}
 
 pub mod minimap {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +128,8 @@ pub mod minimap {
         pub blocks_per_pixel: f32,
         pub rotate_with_player: bool,
         pub round: bool,
+        pub mini_dimension: super::Dimension,
+        pub world_dimension: super::Dimension,
     }
 
     impl Default for Settings {
@@ -71,6 +141,8 @@ pub mod minimap {
                 blocks_per_pixel: 1.0,
                 rotate_with_player: false,
                 round: false,
+                mini_dimension: super::Dimension::Player,
+                world_dimension: super::Dimension::Player,
             }
         }
     }
@@ -84,6 +156,17 @@ pub mod minimap {
                 };
                 let raw = raw.trim();
                 match key.trim() {
+                    "mini_dimension" | "world_dimension" => {
+                        if let Some(dimension) =
+                            super::Dimension::ALL.into_iter().find(|d| d.name() == raw)
+                        {
+                            if key.trim() == "mini_dimension" {
+                                value.mini_dimension = dimension;
+                            } else {
+                                value.world_dimension = dimension;
+                            }
+                        }
+                    }
                     "enabled" => value.enabled = raw.parse().unwrap_or(value.enabled),
                     "corner" => {
                         if let Some(corner) = Corner::ALL.into_iter().find(|c| c.name() == raw) {
@@ -120,18 +203,20 @@ pub mod minimap {
 
         pub fn encode(self) -> String {
             format!(
-                "# Minimap Reworked settings\nenabled={}\ncorner={}\nsize={}\nshape={}\nzoom={}\nrotate={}\n",
+                "# Minimap Reworked settings\nenabled={}\ncorner={}\nsize={}\nshape={}\nzoom={}\nrotate={}\nmini_dimension={}\nworld_dimension={}\n",
                 self.enabled,
                 self.corner.name(),
                 self.size_px,
                 if self.round { "round" } else { "square" },
                 self.blocks_per_pixel,
                 self.rotate_with_player,
+                self.mini_dimension.name(),
+                self.world_dimension.name(),
             )
         }
 
         // Returns the changed field mask. Unknown buttons are harmless.
-        fn click(&mut self, button: usize) -> u8 {
+        fn click(&mut self, button: usize) -> u16 {
             match button {
                 0 => self.enabled = !self.enabled,
                 1 => {
@@ -147,7 +232,14 @@ pub mod minimap {
                 5 => self.rotate_with_player = !self.rotate_with_player,
                 6 => {
                     *self = Self::default();
-                    return 0x3f;
+                    return 0x1bf;
+                }
+                7 => {
+                    self.mini_dimension = super::cycle(self.mini_dimension, &super::Dimension::ALL)
+                }
+                8 => {
+                    self.world_dimension =
+                        super::cycle(self.world_dimension, &super::Dimension::ALL)
                 }
                 _ => return 0,
             }
@@ -155,7 +247,7 @@ pub mod minimap {
         }
 
         // Only locally edited fields override settings loaded asynchronously.
-        fn overlay(&mut self, edited: Self, mask: u8) {
+        fn overlay(&mut self, edited: Self, mask: u16) {
             if mask & 1 != 0 {
                 self.enabled = edited.enabled;
             }
@@ -170,6 +262,12 @@ pub mod minimap {
             }
             if mask & 16 != 0 {
                 self.blocks_per_pixel = edited.blocks_per_pixel;
+            }
+            if mask & 128 != 0 {
+                self.mini_dimension = edited.mini_dimension;
+            }
+            if mask & 256 != 0 {
+                self.world_dimension = edited.world_dimension;
             }
             if mask & 32 != 0 {
                 self.rotate_with_player = edited.rotate_with_player;
@@ -192,7 +290,9 @@ pub mod minimap {
                 ),
                 format!("Масштаб: {} бл./пикс.", self.blocks_per_pixel),
                 format!("Вращение: {}", on(self.rotate_with_player)),
-                "Сбросить настройки миникарты".into(),
+                "Сбросить настройки карты".into(),
+                format!("Измерение миникарты: {}", self.mini_dimension.label()),
+                format!("Измерение большой карты: {}", self.world_dimension.label()),
             ]
         }
 
@@ -203,10 +303,10 @@ pub mod minimap {
         }
     }
 
-    pub(super) fn apply(settings: &mut Settings, button: usize) -> u8 {
+    pub(super) fn apply(settings: &mut Settings, button: usize) -> u16 {
         settings.click(button)
     }
-    pub(super) fn merge(settings: &mut Settings, edited: Settings, mask: u8) {
+    pub(super) fn merge(settings: &mut Settings, edited: Settings, mask: u16) {
         settings.overlay(edited, mask);
     }
 }
@@ -218,10 +318,170 @@ fn cycle<T: Copy + PartialEq>(current: T, choices: &[T]) -> T {
     choices[(index + 1) % choices.len()]
 }
 
+pub const MAX_WAYPOINTS: usize = 64;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ScreenRequest {
+    Map,
+    Waypoints,
+}
+
+static SCREEN_REQUEST: AtomicU8 = AtomicU8::new(0);
+
+/// The key hooks only set a request; the client module, which owns the
+/// screen mode, consumes it on the next frame. This also keeps the key helper
+/// usable in a bundle without the client module.
+pub fn request_screen(request: ScreenRequest) {
+    SCREEN_REQUEST.store(
+        match request {
+            ScreenRequest::Map => 1,
+            ScreenRequest::Waypoints => 2,
+        },
+        Ordering::Release,
+    );
+}
+
+pub fn take_screen_request() -> Option<ScreenRequest> {
+    match SCREEN_REQUEST.swap(0, Ordering::AcqRel) {
+        1 => Some(ScreenRequest::Map),
+        2 => Some(ScreenRequest::Waypoints),
+        _ => None,
+    }
+}
+const MAX_WAYPOINT_NAME: usize = 32;
+
+/// A point on a map: the dimension it belongs to, its block coordinates and
+/// the name the player gave it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Waypoint {
+    pub dimension: Dimension,
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+    pub name: String,
+}
+
+impl Waypoint {
+    /// Trims and shortens a name for the settings file and the markers.
+    pub fn clean_name(name: &str) -> String {
+        let name: String = name
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(MAX_WAYPOINT_NAME)
+            .collect();
+        let name = name.trim();
+        if name.is_empty() {
+            "Вейпоинт".into()
+        } else {
+            name.to_owned()
+        }
+    }
+
+    fn decode(text: &str) -> Option<Self> {
+        let mut parts = text.strip_prefix("waypoint=")?.splitn(5, ':');
+        let dimension = parts.next()?;
+        let dimension = Dimension::ALL
+            .into_iter()
+            .find(|candidate| candidate.name() == dimension)?;
+        if dimension == Dimension::Player {
+            return None;
+        }
+        Some(Self {
+            dimension,
+            x: parts.next()?.parse().ok()?,
+            y: parts.next()?.parse().ok()?,
+            z: parts.next()?.parse().ok()?,
+            name: Self::clean_name(&unescape_name(parts.next().unwrap_or(""))),
+        })
+    }
+
+    fn encode(&self) -> String {
+        format!(
+            "waypoint={}:{}:{}:{}:{}\n",
+            self.dimension.name(),
+            self.x,
+            self.y,
+            self.z,
+            escape_name(&self.name)
+        )
+    }
+}
+
+// The file is one line per waypoint: `%`, `:`, CR and LF are escaped so the
+// name can hold spaces, Cyrillic and most punctuation.
+fn escape_name(name: &str) -> String {
+    let mut out = String::new();
+    for c in name.chars() {
+        match c {
+            '%' => out.push_str("%25"),
+            ':' => out.push_str("%3A"),
+            '\n' => out.push_str("%0A"),
+            '\r' => out.push_str("%0D"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+fn unescape_name(name: &str) -> String {
+    let mut out = String::new();
+    let mut chars = name.chars();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            out.push(c);
+            continue;
+        }
+        let hex: String = chars.by_ref().take(2).collect();
+        match hex.as_str() {
+            "25" => out.push('%'),
+            "3A" => out.push(':'),
+            "0A" => out.push('\n'),
+            "0D" => out.push('\r'),
+            _ => {
+                out.push('%');
+                out.push_str(&hex);
+            }
+        }
+    }
+    out
+}
+
+fn decode_waypoints(text: &str) -> Vec<Waypoint> {
+    let mut waypoints = Vec::new();
+    for line in text.lines() {
+        if let Some(waypoint) = Waypoint::decode(line.trim()) {
+            push_waypoint(&mut waypoints, waypoint);
+        }
+    }
+    waypoints
+}
+
+/// Adds a waypoint once and keeps the list bounded; false when it was a
+/// duplicate with the same name. A different name at the same place renames it.
+fn push_waypoint(waypoints: &mut Vec<Waypoint>, waypoint: Waypoint) -> bool {
+    if let Some(existing) = waypoints.iter_mut().find(|existing| {
+        existing.dimension == waypoint.dimension
+            && existing.x == waypoint.x
+            && existing.z == waypoint.z
+    }) {
+        if existing.name == waypoint.name {
+            return false;
+        }
+        existing.name = waypoint.name;
+        return true;
+    }
+    if waypoints.len() >= MAX_WAYPOINTS {
+        waypoints.remove(0);
+    }
+    waypoints.push(waypoint);
+    true
+}
+
 #[derive(Default)]
 struct State {
     settings: Settings,
-    touched: u8,
+    waypoints: Vec<Waypoint>,
+    touched: u16,
     revision: u64,
     error: Option<String>,
 }
@@ -231,6 +491,7 @@ pub struct Controller {
     state: Arc<Mutex<State>>,
     notify: Mutex<Option<mpsc::SyncSender<()>>>,
     worker: Mutex<Option<JoinHandle<()>>>,
+    pub maps: maps::Service,
 }
 
 impl Controller {
@@ -254,6 +515,7 @@ impl Controller {
             state,
             notify: Mutex::new(notify),
             worker: Mutex::new(worker),
+            maps: maps::Service::new(),
         }
     }
 
@@ -293,8 +555,94 @@ impl Controller {
         }
     }
 
+    pub fn choose_dimension(&self, large: bool, dimension: Dimension) {
+        let notify = self.notify.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(notify) = notify.as_ref() else {
+            return;
+        };
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if large {
+            state.settings.world_dimension = dimension;
+            state.touched |= 256;
+        } else {
+            state.settings.mini_dimension = dimension;
+            state.touched |= 128;
+        }
+        state.revision += 1;
+        drop(state);
+        let _ = notify.try_send(());
+    }
+
+    pub fn waypoints(&self) -> Vec<Waypoint> {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .waypoints
+            .clone()
+    }
+
+    /// Adds a waypoint and persists it with the settings; false for a duplicate.
+    pub fn add_waypoint(&self, waypoint: Waypoint) -> bool {
+        let notify = self.notify.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if !push_waypoint(&mut state.waypoints, waypoint) {
+            return false;
+        }
+        state.revision += 1;
+        drop(state);
+        if let Some(notify) = notify.as_ref()
+            && let Err(mpsc::TrySendError::Disconnected(_)) = notify.try_send(())
+        {
+            self.state.lock().unwrap_or_else(|e| e.into_inner()).error =
+                Some("Settings worker stopped".into());
+        }
+        true
+    }
+
+    pub fn remove_waypoint(&self, dimension: Dimension, x: i32, z: i32) -> bool {
+        let notify = self.notify.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let before = state.waypoints.len();
+        state.waypoints.retain(|waypoint| {
+            !(waypoint.dimension == dimension && waypoint.x == x && waypoint.z == z)
+        });
+        if state.waypoints.len() == before {
+            return false;
+        }
+        state.revision += 1;
+        drop(state);
+        if let Some(notify) = notify.as_ref() {
+            let _ = notify.try_send(());
+        }
+        true
+    }
+
+    pub fn rename_waypoint(&self, dimension: Dimension, x: i32, z: i32, name: &str) -> bool {
+        let name = Waypoint::clean_name(name);
+        let notify = self.notify.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(waypoint) = state
+            .waypoints
+            .iter_mut()
+            .find(|waypoint| waypoint.dimension == dimension && waypoint.x == x && waypoint.z == z)
+        else {
+            return false;
+        };
+        if waypoint.name == name {
+            return false;
+        }
+        waypoint.name = name;
+        state.revision += 1;
+        drop(state);
+        if let Some(notify) = notify.as_ref() {
+            let _ = notify.try_send(());
+        }
+        true
+    }
+
     // Called on application exit, never during drawing. Drain accepted edits before returning.
     pub fn shutdown(&self) {
+        self.maps.shutdown();
         self.notify.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(worker) = self.worker.lock().unwrap_or_else(|e| e.into_inner()).take()
             && worker.join().is_err()
@@ -312,12 +660,19 @@ impl Drop for Controller {
 
 fn settings_worker(directory: &Path, shared: &Mutex<State>, rx: mpsc::Receiver<()>) {
     let path = directory.join(SETTINGS_FILE);
-    let loaded = read_settings(&path);
+    let loaded = read_profile(&path);
     {
         let mut state = shared.lock().unwrap_or_else(|e| e.into_inner());
         match loaded {
-            Ok(mut settings) => {
+            Ok((mut settings, loaded)) => {
                 minimap::merge(&mut settings, state.settings, state.touched);
+                // Waypoints added while the file was read stay: merge them over
+                // the loaded list rather than discarding either side.
+                let early = std::mem::take(&mut state.waypoints);
+                state.waypoints = loaded;
+                for waypoint in early {
+                    push_waypoint(&mut state.waypoints, waypoint);
+                }
                 state.settings = settings;
             }
             Err(error) => {
@@ -335,14 +690,14 @@ fn settings_worker(directory: &Path, shared: &Mutex<State>, rx: mpsc::Receiver<(
 }
 
 fn persist_latest(path: &Path, shared: &Mutex<State>, saved_revision: &mut u64) {
-    let (settings, revision) = {
+    let (settings, waypoints, revision) = {
         let state = shared.lock().unwrap_or_else(|e| e.into_inner());
-        (state.settings, state.revision)
+        (state.settings, state.waypoints.clone(), state.revision)
     };
     if revision <= *saved_revision {
         return;
     }
-    let result = write_settings(path, settings, revision);
+    let result = write_profile(path, settings, &waypoints, revision);
     if result.is_ok() {
         *saved_revision = revision;
     }
@@ -352,24 +707,37 @@ fn persist_latest(path: &Path, shared: &Mutex<State>, saved_revision: &mut u64) 
     });
 }
 
-fn read_settings(path: &Path) -> io::Result<Settings> {
+fn read_profile(path: &Path) -> io::Result<(Settings, Vec<Waypoint>)> {
+    const LIMIT: usize = 16 * 1024;
     let file = match File::open(path) {
         Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Settings::default()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok((Settings::default(), Vec::new()));
+        }
         Err(error) => return Err(error),
     };
     let mut text = String::new();
-    file.take(4097).read_to_string(&mut text)?;
-    if text.len() > 4096 {
+    file.take(LIMIT as u64 + 1).read_to_string(&mut text)?;
+    if text.len() > LIMIT {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "Settings file exceeds 4 KiB",
+            "Settings file exceeds 16 KiB",
         ));
     }
-    Ok(Settings::decode(&text))
+    Ok((Settings::decode(&text), decode_waypoints(&text)))
 }
 
-fn write_settings(path: &Path, settings: Settings, revision: u64) -> io::Result<()> {
+#[cfg(test)]
+fn read_settings(path: &Path) -> io::Result<Settings> {
+    read_profile(path).map(|profile| profile.0)
+}
+
+fn write_profile(
+    path: &Path,
+    settings: Settings,
+    waypoints: &[Waypoint],
+    revision: u64,
+) -> io::Result<()> {
     let directory = path
         .parent()
         .ok_or_else(|| io::Error::other("No settings directory"))?;
@@ -381,7 +749,11 @@ fn write_settings(path: &Path, settings: Settings, revision: u64) -> io::Result<
         .create_new(true)
         .open(&temporary)?;
     let result = (|| {
-        file.write_all(settings.encode().as_bytes())?;
+        let mut text = settings.encode();
+        for waypoint in waypoints {
+            text.push_str(&waypoint.encode());
+        }
+        file.write_all(text.as_bytes())?;
         file.sync_all()?;
         drop(file);
         fs::rename(&temporary, path)
@@ -465,6 +837,76 @@ mod tests {
     }
 
     #[test]
+    fn waypoints_persist_deduplicate_and_stay_bounded() {
+        let directory = scratch();
+        let controller = Controller::open(directory.clone());
+        let point = Waypoint {
+            dimension: Dimension::Nether,
+            x: 10,
+            y: 64,
+            z: -5,
+            name: "База".into(),
+        };
+        assert!(controller.add_waypoint(point.clone()));
+        assert!(!controller.add_waypoint(point.clone()));
+        for x in 0..(MAX_WAYPOINTS as i32 + 1) {
+            assert!(controller.add_waypoint(Waypoint {
+                dimension: Dimension::Overworld,
+                x,
+                y: 64,
+                z: 0,
+                name: format!("Точка {x}"),
+            }));
+        }
+        controller.shutdown();
+        let (_, saved) = read_profile(&directory.join(SETTINGS_FILE)).unwrap();
+        assert_eq!(saved.len(), MAX_WAYPOINTS);
+        assert!(!saved.contains(&point));
+        assert_eq!(Waypoint::decode("waypoint=player:1:2:3"), None);
+        let reopened = Controller::open(directory.clone());
+        reopened.shutdown();
+        assert_eq!(reopened.waypoints(), saved);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn waypoint_names_roundtrip_and_waypoints_can_be_removed() {
+        let directory = scratch();
+        let waypoint = Waypoint {
+            dimension: Dimension::Overworld,
+            x: 1,
+            y: 2,
+            z: 3,
+            name: "Дом: у % реки".into(),
+        };
+        assert_eq!(
+            Waypoint::decode(waypoint.encode().trim()).unwrap(),
+            waypoint
+        );
+        let controller = Controller::open(directory.clone());
+        assert!(controller.add_waypoint(waypoint));
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while controller.waypoints().is_empty() {
+            assert!(std::time::Instant::now() < until);
+            thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(controller.rename_waypoint(Dimension::Overworld, 1, 3, "Новое имя"));
+        controller.shutdown();
+        let reopened = Controller::open(directory.clone());
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while reopened.waypoints().is_empty() {
+            assert!(std::time::Instant::now() < until);
+            thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(reopened.waypoints()[0].name, "Новое имя");
+        assert!(reopened.remove_waypoint(Dimension::Overworld, 1, 3));
+        reopened.shutdown();
+        let (_, saved) = read_profile(&directory.join(SETTINGS_FILE)).unwrap();
+        assert!(saved.is_empty());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn bounded_notification_queue_persists_latest_edit_after_a_burst() {
         let directory = scratch();
         let controller = Controller::open(directory.clone());
@@ -540,5 +982,1293 @@ mod tests {
         assert_eq!(settings.fitted_size(100.0, 80.0), Some(16.0));
         assert_eq!(settings.fitted_size(1.0, 1.0), None);
         assert_eq!(settings.size_px, 128);
+    }
+}
+
+// Shared, bounded in-memory terrain repository. No game objects cross the worker boundary.
+pub mod maps {
+    use super::Dimension;
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicU64, Ordering},
+            mpsc,
+        },
+        thread::{self, JoinHandle},
+    };
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    pub enum Layer {
+        Surface,
+        Below(i32),
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    pub enum Portal {
+        Nether,
+        End,
+        Gateway,
+    }
+    #[derive(Clone, Copy, Debug, Default, PartialEq)]
+    pub struct Block {
+        pub rgb: u32,
+        pub air: bool,
+        /// How much this block's colour covers what is below it, 0..=255.
+        /// 0 is an ordinary opaque block; water and glass carry their tint
+        /// over the block underneath instead of hiding it.
+        pub alpha: u8,
+        /// Ground cover that the map leaves out, such as grass and ferns:
+        /// the terrain below it is shown instead.
+        pub hidden: bool,
+        /// A water block, whose tint thickens with the depth of the column.
+        pub water: bool,
+        /// A portal block, recorded as a point on the map.
+        pub portal: Option<Portal>,
+    }
+    #[derive(Clone)]
+    pub struct Tile {
+        pub pixels: Vec<u8>,
+        /// The visible surface height of each column, for relief shading
+        /// across chunk edges.
+        pub heights: [i32; 256],
+        /// Whether the column's visible block is the cut plane of an
+        /// underground layer (`Layer::Below`).
+        pub walls: [bool; 256],
+        /// Portal blocks met while scanning the columns.
+        pub portals: Vec<([i32; 3], Portal)>,
+    }
+    impl Default for Tile {
+        fn default() -> Self {
+            Self {
+                pixels: Vec::new(),
+                heights: [0; 256],
+                walls: [false; 256],
+                portals: Vec::new(),
+            }
+        }
+    }
+    /// The most translucent layers one column composites. A deep ocean is one
+    /// water layer, not one per block, but glass above water above ice still
+    /// blends in order.
+    const TRANSLUCENT_LAYERS: usize = 8;
+
+    fn blend(base: u32, overlay: u32, alpha: u8) -> u32 {
+        let alpha = u32::from(alpha);
+        let channel = |shift: u32| {
+            ((((base >> shift) & 255) * (255 - alpha) + ((overlay >> shift) & 255) * alpha) / 255)
+                & 255
+        };
+        (channel(16) << 16) | (channel(8) << 8) | channel(0)
+    }
+
+    /// A shallow seabed keeps most of its colour; deep water darkens it in
+    /// steps instead of looking one block deep everywhere.
+    fn water_alpha(depth: u32) -> u8 {
+        (70 + depth.saturating_mul(10)).min(190) as u8
+    }
+
+    pub fn sample(
+        mut block: impl FnMut(i32, i32, i32) -> Block,
+        top: impl Fn(i32, i32) -> i32,
+        chunk: [i32; 2],
+        minimum: i32,
+        layer: Layer,
+    ) -> Tile {
+        let mut tile = Tile {
+            pixels: vec![0; 16 * 16 * 4],
+            heights: [minimum; 256],
+            walls: [false; 256],
+            portals: Vec::new(),
+        };
+        for z in 0..16 {
+            for x in 0..16 {
+                let wx = chunk[0] * 16 + x;
+                let wz = chunk[1] * 16 + z;
+                let ceiling = match layer {
+                    Layer::Surface => top(wx, wz) - 1,
+                    Layer::Below(y) => y.min(top(wx, wz) - 1),
+                };
+                let i = (z * 16 + x) as usize;
+                let mut top_y = None;
+                let mut overlays: [Option<(u32, u8)>; TRANSLUCENT_LAYERS] =
+                    [None; TRANSLUCENT_LAYERS];
+                let mut layer_count = 0;
+                let mut base = None;
+                let mut base_y = None;
+                let mut water_depth = 0u32;
+                let mut water_layer = None;
+                for y in (minimum..=ceiling).rev() {
+                    let b = block(wx, y, wz);
+                    if b.air || b.hidden {
+                        continue;
+                    }
+                    if let Some(kind) = b.portal
+                        && !tile
+                            .portals
+                            .iter()
+                            .any(|(at, existing)| at[0] == wx && at[2] == wz && *existing == kind)
+                    {
+                        tile.portals.push(([wx, y, wz], kind));
+                    }
+                    if top_y.is_none() {
+                        top_y = Some(y);
+                    }
+                    if b.water {
+                        water_depth += 1;
+                    }
+                    if b.alpha > 0 && b.rgb != 0 {
+                        // One layer per colour in a row: consecutive water
+                        // blocks are the same surface, not stacked tints.
+                        let distinct = layer_count == 0
+                            || (layer_count < TRANSLUCENT_LAYERS
+                                && overlays[layer_count - 1].is_some_and(|(rgb, _)| rgb != b.rgb));
+                        if distinct && layer_count < TRANSLUCENT_LAYERS {
+                            if b.water && water_layer.is_none() {
+                                water_layer = Some(layer_count);
+                            }
+                            overlays[layer_count] = Some((b.rgb, b.alpha));
+                            layer_count += 1;
+                        } else if b.water && water_layer.is_none() && layer_count > 0 {
+                            water_layer = Some(layer_count - 1);
+                        }
+                        continue;
+                    }
+                    if b.rgb == 0 {
+                        continue;
+                    }
+                    base = Some(b.rgb);
+                    base_y = Some(y);
+                    break;
+                }
+                // Deep water covers the floor more than shallow water, so a
+                // seabed is not flattened to "one block deep" everywhere.
+                if let Some(index) = water_layer
+                    && water_depth > 0
+                    && let Some((rgb, _)) = overlays[index]
+                {
+                    overlays[index] = Some((rgb, water_alpha(water_depth)));
+                }
+                let color = match base {
+                    Some(base) => overlays[..layer_count]
+                        .iter()
+                        .rev()
+                        .flatten()
+                        .fold(base, |color, (rgb, alpha)| blend(color, *rgb, *alpha)),
+                    // No floor in the sampled column (open ocean): the lowest
+                    // overlay is the surface instead of an unknown pixel.
+                    None if layer_count > 0 => overlays[layer_count - 1]
+                        .map(|(rgb, _)| rgb)
+                        .unwrap_or_default(),
+                    None => continue,
+                };
+                // Relief follows the visible floor, not a flat water surface:
+                // the seabed keeps its shape under the tinted water.
+                let visible_y = base_y.or(top_y).unwrap_or(minimum);
+                tile.heights[i] = visible_y;
+                tile.walls[i] = matches!(
+                    (layer, base_y.or(top_y)),
+                    (Layer::Below(c), Some(y)) if c == y
+                );
+                let rgb = ((color >> 16) & 255) as u8;
+                let green = ((color >> 8) & 255) as u8;
+                let blue = (color & 255) as u8;
+                tile.pixels[i * 4] = rgb;
+                tile.pixels[i * 4 + 1] = green;
+                tile.pixels[i * 4 + 2] = blue;
+                tile.pixels[i * 4 + 3] = 255;
+            }
+        }
+        tile
+    }
+
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct View {
+        pub session: u64,
+        pub dimension: Dimension,
+        pub layer: Layer,
+        pub center: [f64; 2],
+        pub span: [f64; 2],
+        pub width: usize,
+        pub height: usize,
+        pub angle: f64,
+        pub round: bool,
+        pub large: bool,
+    }
+    impl View {
+        pub fn demands(&self, dimension: Dimension, layer: Layer, chunk: [i32; 2]) -> bool {
+            if dimension != self.dimension || layer != self.layer {
+                return false;
+            }
+            let cx = (self.center[0].floor() as i32).div_euclid(16);
+            let cz = (self.center[1].floor() as i32).div_euclid(16);
+            if !(cx - 32..cx + 32).contains(&chunk[0]) || !(cz - 32..cz + 32).contains(&chunk[1]) {
+                return false;
+            }
+            let dx = f64::from(chunk[0]) * 16.0 + 8.0 - self.center[0];
+            let dz = f64::from(chunk[1]) * 16.0 + 8.0 - self.center[1];
+            let (sn, cs) = self.angle.sin_cos();
+            let margin = 8.0 * (sn.abs() + cs.abs());
+            (dx * cs + dz * sn).abs() <= self.span[0] / 2.0 + margin
+                && (-dx * sn + dz * cs).abs() <= self.span[1] / 2.0 + margin
+        }
+        pub fn world_at(&self, x: f64, y: f64) -> [f64; 2] {
+            let dx = (x / self.width as f64 - 0.5) * self.span[0];
+            let dz = (y / self.height as f64 - 0.5) * self.span[1];
+            let (s, c) = self.angle.sin_cos();
+            [
+                self.center[0] + dx * c - dz * s,
+                self.center[1] + dx * s + dz * c,
+            ]
+        }
+        /// The block under pixel `(x, y)` of the frame (`world_at`'s inverse,
+        /// rounded down).
+        pub fn block_at(&self, x: f64, y: f64) -> [i32; 2] {
+            let world = self.world_at(x, y);
+            [world[0].floor() as i32, world[1].floor() as i32]
+        }
+        /// The frame pixel of a world position: `world_at`'s inverse.
+        pub fn screen_at(&self, [world_x, world_z]: [f64; 2]) -> [f64; 2] {
+            let (s, c) = self.angle.sin_cos();
+            let dx = world_x - self.center[0];
+            let dz = world_z - self.center[1];
+            let flat_x = dx * c + dz * s;
+            let flat_z = -dx * s + dz * c;
+            [
+                (flat_x / self.span[0] + 0.5) * self.width as f64,
+                (flat_z / self.span[1] + 0.5) * self.height as f64,
+            ]
+        }
+    }
+    const EASE_RATE: f64 = 24.0;
+    const ZOOM_RATE: f64 = 18.0;
+    const EASE_EPSILON: f64 = 0.01;
+    const ZOOM_EPSILON: f64 = 0.0005;
+    const SNAP_DISTANCE: f64 = 48.0;
+    const MIN_ZOOM: f64 = 0.1;
+    const MAX_ZOOM: f64 = 64.0;
+
+    fn ease(current: f64, target: f64, dt: f64, rate: f64, epsilon: f64) -> f64 {
+        let next = current + (target - current) * (1.0 - (-dt * rate).exp());
+        if (target - next).abs() <= epsilon {
+            target
+        } else {
+            next
+        }
+    }
+    fn distance(a: [f64; 2], b: [f64; 2]) -> f64 {
+        ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt()
+    }
+    /// Eases a displayed point toward a target at the same rate as [`Camera`].
+    pub fn follow_point(current: [f64; 2], target: [f64; 2], dt: f64) -> [f64; 2] {
+        if distance(current, target) > SNAP_DISTANCE {
+            return target;
+        }
+        [
+            ease(current[0], target[0], dt, EASE_RATE, EASE_EPSILON),
+            ease(current[1], target[1], dt, EASE_RATE, EASE_EPSILON),
+        ]
+    }
+    /// A zoom step of `delta` notches, clamped to the map's usable range.
+    pub fn zoom_step(zoom: f64, delta: f64) -> f64 {
+        if !delta.is_finite() {
+            return zoom;
+        }
+        (zoom * 2f64.powf(-delta.clamp(-4.0, 4.0))).clamp(MIN_ZOOM, MAX_ZOOM)
+    }
+
+    /// The displayed camera of one map. Panning, zooming and following ease
+    /// toward their target every frame, so mouse steps and the player's 20 Hz
+    /// ticks do not jump. A zoom keeps the world point under the cursor fixed
+    /// for the whole animation.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct Camera {
+        pub center: [f64; 2],
+        pub target: [f64; 2],
+        pub zoom: f64,
+        pub zoom_target: f64,
+        anchor: Option<([f64; 2], [f64; 2])>,
+    }
+    impl Camera {
+        pub fn new(center: [f64; 2], zoom: f64) -> Self {
+            Self {
+                center,
+                target: center,
+                zoom: zoom.clamp(MIN_ZOOM, MAX_ZOOM),
+                zoom_target: zoom.clamp(MIN_ZOOM, MAX_ZOOM),
+                anchor: None,
+            }
+        }
+        /// Jumps to a position: a world change, a dimension switch or a
+        /// teleport, where easing would slide across the map.
+        pub fn snap(&mut self, center: [f64; 2]) {
+            self.center = center;
+            self.target = center;
+            self.anchor = None;
+        }
+        pub fn follow(&mut self, point: [f64; 2]) {
+            if distance(self.center, point) > SNAP_DISTANCE {
+                self.snap(point);
+            } else {
+                self.target = point;
+            }
+        }
+        /// Drags the map by `delta` GUI pixels, one world pixel per GUI pixel.
+        pub fn pan(&mut self, delta: [f64; 2]) {
+            let shift = [delta[0] * self.zoom, delta[1] * self.zoom];
+            match self.anchor.as_mut() {
+                Some((_, anchor)) => {
+                    anchor[0] -= shift[0];
+                    anchor[1] -= shift[1];
+                }
+                None => {
+                    self.target[0] -= shift[0];
+                    self.target[1] -= shift[1];
+                }
+            }
+        }
+        /// Scrolls `delta` notches at `offset` GUI pixels from the map centre.
+        pub fn zoom_at(&mut self, delta: f64, offset: [f64; 2]) {
+            let next = zoom_step(self.zoom_target, delta);
+            if next == self.zoom_target {
+                return;
+            }
+            self.zoom_target = next;
+            self.anchor = Some((
+                offset,
+                [
+                    self.center[0] + offset[0] * self.zoom,
+                    self.center[1] + offset[1] * self.zoom,
+                ],
+            ));
+        }
+        /// Advances the ease by `dt` seconds.
+        pub fn advance(&mut self, dt: f64) {
+            let dt = dt.clamp(0.0, 0.25);
+            self.zoom = ease(self.zoom, self.zoom_target, dt, ZOOM_RATE, ZOOM_EPSILON);
+            match self.anchor {
+                Some((offset, anchor)) => {
+                    self.center = [
+                        anchor[0] - offset[0] * self.zoom,
+                        anchor[1] - offset[1] * self.zoom,
+                    ];
+                    self.target = self.center;
+                    if self.zoom == self.zoom_target {
+                        self.anchor = None;
+                    }
+                }
+                None => {
+                    self.center = [
+                        ease(self.center[0], self.target[0], dt, EASE_RATE, EASE_EPSILON),
+                        ease(self.center[1], self.target[1], dt, EASE_RATE, EASE_EPSILON),
+                    ];
+                }
+            }
+        }
+        /// Whether the view still has to move: a zoom or a pan in flight.
+        /// Only the tests read it; a release build would warn it is unused.
+        #[cfg(test)]
+        pub fn moving(&self) -> bool {
+            self.anchor.is_some() || self.zoom != self.zoom_target || self.center != self.target
+        }
+    }
+    pub struct Frame {
+        pub serial: u64,
+        pub view: View,
+        pub pixels: Vec<u8>,
+        pub known: usize,
+    }
+    type Key = (Dimension, Layer, i32, i32);
+    #[derive(Default)]
+    pub struct Cache {
+        tiles: BTreeMap<Key, (u64, Tile)>,
+        clock: u64,
+        view: Option<View>,
+    }
+    impl Cache {
+        pub fn insert(&mut self, dimension: Dimension, layer: Layer, chunk: [i32; 2], tile: Tile) {
+            if self.tiles.len() >= 4096
+                && !self
+                    .tiles
+                    .contains_key(&(dimension, layer, chunk[0], chunk[1]))
+            {
+                let victim = self
+                    .tiles
+                    .iter()
+                    .filter(|(key, _)| {
+                        !self
+                            .view
+                            .as_ref()
+                            .is_some_and(|view| view.demands(key.0, key.1, [key.2, key.3]))
+                    })
+                    .min_by_key(|(_, value)| value.0)
+                    .map(|(key, _)| *key);
+                if let Some(key) = victim {
+                    self.tiles.remove(&key);
+                } else {
+                    return;
+                }
+            }
+            self.clock += 1;
+            self.tiles
+                .insert((dimension, layer, chunk[0], chunk[1]), (self.clock, tile));
+        }
+        pub fn render(&self, view: View, serial: u64) -> Frame {
+            let width = view.width.clamp(1, 768);
+            let height = view.height.clamp(1, 768);
+            let mut pixels = vec![0; width * height * 4];
+            let mut known = 0;
+            let (sin, cos) = view.angle.sin_cos();
+            let step_x = view.span[0] / width as f64;
+            let step_z = view.span[1] / height as f64;
+            let (half_x, half_z) = (width as f64 / 2.0, height as f64 / 2.0);
+            // The tile a pixel reads changes once per 16-block cell, not per
+            // pixel: look it up again only when the chunk changes. The north
+            // and west neighbours are separate chunks only at a chunk's edge.
+            let mut tile: Option<((i32, i32), Option<&Tile>)> = None;
+            let mut north: Option<((i32, i32), Option<&Tile>)> = None;
+            let mut west: Option<((i32, i32), Option<&Tile>)> = None;
+            for y in 0..height {
+                let dz = (y as f64 + 0.5 - half_z) * step_z;
+                let (tilt_x, tilt_z) = (dz * sin, dz * cos);
+                for x in 0..width {
+                    if view.round {
+                        let nx = (x as f64 + 0.5) / width as f64 - 0.5;
+                        let ny = (y as f64 + 0.5) / height as f64 - 0.5;
+                        if nx * nx + ny * ny > 0.25 {
+                            continue;
+                        }
+                    }
+                    let dx = (x as f64 + 0.5 - half_x) * step_x;
+                    let bx = (view.center[0] + dx * cos - tilt_x).floor() as i32;
+                    let bz = (view.center[1] + dx * sin + tilt_z).floor() as i32;
+                    let chunk = (bx.div_euclid(16), bz.div_euclid(16));
+                    if tile.is_none_or(|(key, _)| key != chunk) {
+                        tile = Some((
+                            chunk,
+                            self.tiles
+                                .get(&(view.dimension, view.layer, chunk.0, chunk.1))
+                                .map(|(_, tile)| tile),
+                        ));
+                    }
+                    let current = tile.and_then(|(_, tile)| tile);
+                    let i = (y * width + x) * 4;
+                    let local = (bz.rem_euclid(16) * 16 + bx.rem_euclid(16)) as usize;
+                    let Some(current) = current else {
+                        // Unknown terrain stays transparent; no screen-space
+                        // checkerboard that turns into stripes while moving.
+                        continue;
+                    };
+                    let Some(color) = current.pixels.get(local * 4..local * 4 + 4) else {
+                        continue;
+                    };
+                    // Relief shading reads the column north and west of this
+                    // one from their own tiles, so chunk borders have no seam
+                    // and slopes stay readable at every zoom.
+                    let north_z = bz - 1;
+                    let north_chunk = (bx.div_euclid(16), north_z.div_euclid(16));
+                    let neighbour = if north_chunk == chunk {
+                        Some(current)
+                    } else {
+                        if north.is_none_or(|(key, _)| key != north_chunk) {
+                            north = Some((
+                                north_chunk,
+                                self.tiles
+                                    .get(&(
+                                        view.dimension,
+                                        view.layer,
+                                        north_chunk.0,
+                                        north_chunk.1,
+                                    ))
+                                    .map(|(_, tile)| tile),
+                            ));
+                        }
+                        north.and_then(|(_, tile)| tile)
+                    };
+                    let west_x = bx - 1;
+                    let west_chunk = (west_x.div_euclid(16), bz.div_euclid(16));
+                    let west_tile = if west_chunk == chunk {
+                        Some(current)
+                    } else {
+                        if west.is_none_or(|(key, _)| key != west_chunk) {
+                            west = Some((
+                                west_chunk,
+                                self.tiles
+                                    .get(&(view.dimension, view.layer, west_chunk.0, west_chunk.1))
+                                    .map(|(_, tile)| tile),
+                            ));
+                        }
+                        west.and_then(|(_, tile)| tile)
+                    };
+                    let height = current.heights[local];
+                    let north_height = neighbour.map_or(height, |tile| {
+                        let index = (north_z.rem_euclid(16) * 16 + bx.rem_euclid(16)) as usize;
+                        tile.heights[index]
+                    });
+                    let west_height = west_tile.map_or(height, |tile| {
+                        let index = (bz.rem_euclid(16) * 16 + west_x.rem_euclid(16)) as usize;
+                        tile.heights[index]
+                    });
+                    // Light from the north-west: a rise towards it is darker,
+                    // a slope away from it is brighter. The base keeps the map
+                    // readable instead of the old flat 0.8 step.
+                    let relief = f32::from((north_height - height).clamp(-64, 64) as i8) * -0.075
+                        + f32::from((west_height - height).clamp(-64, 64) as i8) * -0.04;
+                    let shade = if current.walls[local] {
+                        0.55
+                    } else {
+                        (1.08 + relief).clamp(0.70, 1.34)
+                    };
+                    for channel in 0..3 {
+                        pixels[i + channel] = (f32::from(color[channel]) * shade).round() as u8;
+                    }
+                    pixels[i + 3] = color[3];
+                    known += 1;
+                }
+            }
+            Frame {
+                serial,
+                view,
+                pixels,
+                known,
+            }
+        }
+    }
+    enum Job {
+        Chunk {
+            session: u64,
+            dimension: Dimension,
+            layer: Layer,
+            chunk: [i32; 2],
+            sample: Box<dyn FnOnce() -> Tile + Send>,
+        },
+        Wake,
+    }
+    type PortalKey = (Dimension, i32, i32, Portal);
+    type PortalMap = BTreeMap<PortalKey, [i32; 3]>;
+
+    pub struct Service {
+        tx: Mutex<Option<mpsc::SyncSender<Job>>>,
+        worker: Mutex<Option<JoinHandle<()>>>,
+        latest: Arc<Mutex<Option<View>>>,
+        output: Arc<Mutex<Option<Arc<Frame>>>>,
+        session: Arc<AtomicU64>,
+        resident: Arc<Mutex<BTreeSet<Key>>>,
+        portals: Arc<Mutex<PortalMap>>,
+    }
+    impl Default for Service {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+    impl Service {
+        pub fn new() -> Self {
+            let (tx, rx) = mpsc::sync_channel(8);
+            let latest = Arc::new(Mutex::new(None::<View>));
+            let output = Arc::new(Mutex::new(None));
+            let session = Arc::new(AtomicU64::new(0));
+            let resident = Arc::new(Mutex::new(BTreeSet::new()));
+            let portals = Arc::new(Mutex::new(BTreeMap::new()));
+            let residency = resident.clone();
+            let portal_points = portals.clone();
+            let (input, result, active) = (latest.clone(), output.clone(), session.clone());
+            let worker = thread::Builder::new()
+                .name("map-terrain".into())
+                .spawn(move || {
+                    let mut cache = Cache::default();
+                    let mut current = 0;
+                    let mut serial = 0;
+                    while let Ok(first) = rx.recv() {
+                        let mut jobs = vec![first];
+                        jobs.extend(rx.try_iter().take(7));
+                        let mut changed = false;
+                        let requested = input.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                        if current != active.load(Ordering::Acquire) {
+                            cache = Cache::default();
+                            current = active.load(Ordering::Acquire);
+                        }
+                        cache.view = requested;
+                        for job in jobs {
+                            if let Job::Chunk {
+                                session,
+                                dimension,
+                                layer,
+                                chunk,
+                                sample,
+                            } = job
+                            {
+                                if session != active.load(Ordering::Acquire) {
+                                    continue;
+                                }
+                                if current != session {
+                                    cache = Cache::default();
+                                    current = session;
+                                }
+                                let tile = sample();
+                                if session == active.load(Ordering::Acquire) {
+                                    let points = tile.portals.clone();
+                                    cache.insert(dimension, layer, chunk, tile);
+                                    if !points.is_empty() {
+                                        let mut portals =
+                                            portal_points.lock().unwrap_or_else(|e| e.into_inner());
+                                        for (at, kind) in points {
+                                            portals.insert((dimension, at[0], at[2], kind), at);
+                                        }
+                                    }
+                                    changed = true;
+                                }
+                            }
+                        }
+                        if changed {
+                            let mut entries = residency.lock().unwrap_or_else(|e| e.into_inner());
+                            if current == active.load(Ordering::Acquire) {
+                                *entries = cache.tiles.keys().copied().collect();
+                            }
+                        }
+                        let Some(view) = input.lock().unwrap_or_else(|e| e.into_inner()).clone()
+                        else {
+                            continue;
+                        };
+                        if view.session != active.load(Ordering::Acquire) {
+                            continue;
+                        }
+                        if current != view.session {
+                            cache = Cache::default();
+                            current = view.session;
+                            changed = true;
+                        }
+                        let same = result
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .as_ref()
+                            .is_some_and(|f: &Arc<Frame>| f.view == view);
+                        if same && !changed {
+                            continue;
+                        }
+                        serial += 1;
+                        let frame = Arc::new(cache.render(view, serial));
+                        if frame.view.session == active.load(Ordering::Acquire) {
+                            *result.lock().unwrap_or_else(|e| e.into_inner()) = Some(frame);
+                        }
+                    }
+                })
+                .map_err(|error| eprintln!("Map worker failed: {error}"))
+                .ok();
+            Self {
+                tx: Mutex::new(Some(tx)),
+                worker: Mutex::new(worker),
+                latest,
+                output,
+                session,
+                resident,
+                portals,
+            }
+        }
+        pub fn reset(&self, session: u64) {
+            self.session.store(session, Ordering::Release);
+            self.resident
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
+            self.portals
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
+            *self.output.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
+        pub fn portals(&self) -> Vec<(Dimension, [i32; 3], Portal)> {
+            self.portals
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .map(|((dimension, _, _, kind), at)| (*dimension, *at, *kind))
+                .collect()
+        }
+        pub fn requested(&self) -> Option<View> {
+            self.latest
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        }
+        pub fn contains(&self, dimension: Dimension, layer: Layer, chunk: [i32; 2]) -> bool {
+            self.resident
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(&(dimension, layer, chunk[0], chunk[1]))
+        }
+        pub fn submit(
+            &self,
+            session: u64,
+            dimension: Dimension,
+            layer: Layer,
+            chunk: [i32; 2],
+            sample: impl FnOnce() -> Tile + Send + 'static,
+        ) -> bool {
+            self.tx
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .is_some_and(|tx| {
+                    tx.try_send(Job::Chunk {
+                        session,
+                        dimension,
+                        layer,
+                        chunk,
+                        sample: Box::new(sample),
+                    })
+                    .is_ok()
+                })
+        }
+        pub fn request(&self, view: View) {
+            let mut latest = self.latest.lock().unwrap_or_else(|e| e.into_inner());
+            if latest.as_ref() == Some(&view) {
+                return;
+            }
+            *latest = Some(view);
+            drop(latest);
+            if let Some(tx) = self.tx.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+                let _ = tx.try_send(Job::Wake);
+            }
+        }
+        pub fn frame(&self) -> Option<Arc<Frame>> {
+            self.output
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        }
+        pub fn shutdown(&self) {
+            self.tx.lock().unwrap_or_else(|e| e.into_inner()).take();
+            if let Some(worker) = self.worker.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                let _ = worker.join();
+            }
+        }
+    }
+    impl Drop for Service {
+        fn drop(&mut self) {
+            self.shutdown();
+        }
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        fn view(d: Dimension) -> View {
+            View {
+                session: 1,
+                dimension: d,
+                layer: Layer::Surface,
+                center: [-8.0, 8.0],
+                span: [16.0, 16.0],
+                width: 16,
+                height: 16,
+                angle: 0.0,
+                round: false,
+                large: true,
+            }
+        }
+        #[test]
+        fn a_stationary_view_is_not_evicted_by_background_terrain() {
+            let mut cache = Cache {
+                view: Some(view(Dimension::Overworld)),
+                ..Cache::default()
+            };
+            cache.insert(
+                Dimension::Overworld,
+                Layer::Surface,
+                [-1, 0],
+                Tile {
+                    pixels: [10, 20, 30, 255].repeat(256),
+                    ..Tile::default()
+                },
+            );
+            for x in 1000..6000 {
+                cache.insert(
+                    Dimension::Overworld,
+                    Layer::Surface,
+                    [x, 0],
+                    Tile {
+                        pixels: [1, 2, 3, 255].repeat(256),
+                        ..Tile::default()
+                    },
+                );
+            }
+            assert_eq!(cache.render(view(Dimension::Overworld), 1).known, 256);
+            assert!(!view(Dimension::Overworld).demands(
+                Dimension::Overworld,
+                Layer::Surface,
+                [10, 0]
+            ));
+        }
+        #[test]
+        fn dimensions_layers_and_negative_chunks_are_isolated() {
+            let mut cache = Cache::default();
+            cache.insert(
+                Dimension::Overworld,
+                Layer::Surface,
+                [-1, 0],
+                Tile {
+                    pixels: [10, 20, 30, 255].repeat(256),
+                    ..Tile::default()
+                },
+            );
+            assert_eq!(cache.render(view(Dimension::Overworld), 1).known, 256);
+            assert_eq!(cache.render(view(Dimension::Nether), 2).known, 0);
+            let mut below = view(Dimension::Overworld);
+            below.layer = Layer::Below(40);
+            assert_eq!(cache.render(below, 3).known, 0);
+        }
+        #[test]
+        fn eased_zoom_keeps_the_world_point_under_the_cursor() {
+            let mut camera = Camera::new([12.0, -8.0], 4.0);
+            let offset = [-50.0, 75.0];
+            let anchor = [
+                camera.center[0] + offset[0] * camera.zoom,
+                camera.center[1] + offset[1] * camera.zoom,
+            ];
+            camera.zoom_at(1.0, offset);
+            for _ in 0..120 {
+                camera.advance(1.0 / 60.0);
+            }
+            assert_eq!(camera.zoom, 2.0);
+            for axis in 0..2 {
+                let under = camera.center[axis] + offset[axis] * camera.zoom;
+                assert!((under - anchor[axis]).abs() < 1e-9, "axis {axis}");
+            }
+            assert!(!camera.moving());
+        }
+        #[test]
+        fn camera_eases_instead_of_jumping_and_snaps_on_a_teleport() {
+            let mut camera = Camera::new([0.0; 2], 2.0);
+            camera.follow([32.0, 0.0]);
+            camera.advance(1.0 / 60.0);
+            assert!(camera.center[0] > 0.0 && camera.center[0] < 32.0);
+            for _ in 0..240 {
+                camera.advance(1.0 / 60.0);
+            }
+            assert!((camera.center[0] - 32.0).abs() < 0.01);
+            camera.follow([1000.0, 0.0]);
+            assert_eq!(camera.center, [1000.0, 0.0]);
+            assert!(!camera.moving());
+        }
+        #[test]
+        fn dragging_shifts_the_target_by_one_world_pixel_per_gui_pixel() {
+            let mut camera = Camera::new([100.0, 0.0], 2.0);
+            camera.pan([10.0, -5.0]);
+            assert_eq!(camera.target, [80.0, 10.0]);
+            for _ in 0..240 {
+                camera.advance(1.0 / 60.0);
+            }
+            assert_eq!(camera.center, [80.0, 10.0]);
+        }
+        #[test]
+        fn frame_pixels_map_back_to_their_world_position_at_any_angle() {
+            let mut frame = view(Dimension::Overworld);
+            frame.center = [100.25, -42.5];
+            frame.angle = 0.7;
+            for world in [[100.25, -42.5], [103.5, -40.0], [97.0, -45.75]] {
+                let pixel = frame.screen_at(world);
+                let back = frame.world_at(pixel[0], pixel[1]);
+                assert!((back[0] - world[0]).abs() < 1e-9);
+                assert!((back[1] - world[1]).abs() < 1e-9);
+            }
+            assert_eq!(frame.block_at(8.0, 8.0), [100, -43]);
+        }
+        #[test]
+        fn an_underground_slice_does_not_sample_the_bedrock_roof() {
+            let tile = sample(
+                |_, y, _| Block {
+                    rgb: if y == 127 {
+                        0x222222
+                    } else if y == 32 {
+                        0xaa3300
+                    } else {
+                        0
+                    },
+                    air: y != 127 && y != 32,
+                    alpha: 0,
+                    hidden: false,
+                    water: false,
+                    portal: None,
+                },
+                |_, _| 128,
+                [0, 0],
+                0,
+                Layer::Below(40),
+            );
+            assert_eq!(&tile.pixels[..4], &[170, 51, 0, 255]);
+        }
+        #[test]
+        fn water_is_translucent_and_reveals_the_seabed() {
+            let tile = sample(
+                |_, y, _| match y {
+                    40 => Block {
+                        rgb: 0xff0000,
+                        air: false,
+                        alpha: 0,
+                        hidden: false,
+                        water: false,
+                        portal: None,
+                    },
+                    41..=60 => Block {
+                        rgb: 0x0000ff,
+                        air: false,
+                        alpha: 128,
+                        hidden: false,
+                        water: false,
+                        portal: None,
+                    },
+                    _ => Block::default(),
+                },
+                |_, _| 64,
+                [0, 0],
+                0,
+                Layer::Surface,
+            );
+            assert_eq!(tile.pixels[3], 255);
+            assert_eq!(tile.pixels[0], 127);
+            assert_eq!(tile.pixels[2], 128);
+        }
+        #[test]
+        fn deeper_water_covers_the_seabed_more() {
+            let tile = |depth: i32| {
+                sample(
+                    |_, y, _| match y {
+                        40 => Block {
+                            rgb: 0x00ff00,
+                            air: false,
+                            alpha: 0,
+                            hidden: false,
+                            water: false,
+                            portal: None,
+                        },
+                        41..=60 if y <= 40 + depth => Block {
+                            rgb: 0x0000ff,
+                            air: false,
+                            alpha: 128,
+                            hidden: false,
+                            water: true,
+                            portal: None,
+                        },
+                        _ => Block::default(),
+                    },
+                    |_, _| 64,
+                    [0, 0],
+                    0,
+                    Layer::Surface,
+                )
+            };
+            let shallow = tile(1);
+            let deep = tile(20);
+            assert_eq!(shallow.heights[0], 40);
+            assert_eq!(deep.heights[0], 40);
+            assert!(deep.pixels[1] < shallow.pixels[1]);
+        }
+        #[test]
+        fn portals_are_recorded_with_their_block_height() {
+            let tile = sample(
+                |x, y, z| {
+                    if x == 0 && z == 0 && y == 40 {
+                        Block {
+                            rgb: 0x8a2be2,
+                            air: false,
+                            alpha: 140,
+                            hidden: false,
+                            water: false,
+                            portal: Some(Portal::Nether),
+                        }
+                    } else {
+                        Block::default()
+                    }
+                },
+                |_, _| 64,
+                [0, 0],
+                0,
+                Layer::Surface,
+            );
+            assert_eq!(tile.portals, vec![([0, 40, 0], Portal::Nether)]);
+        }
+        #[test]
+        fn stacked_glass_and_water_blend_in_drawing_order() {
+            let tile = sample(
+                |_, y, _| match y {
+                    40 => Block {
+                        rgb: 0x102030,
+                        air: false,
+                        alpha: 0,
+                        hidden: false,
+                        water: false,
+                        portal: None,
+                    },
+                    41 => Block {
+                        rgb: 0x0000ff,
+                        air: false,
+                        alpha: 128,
+                        hidden: false,
+                        water: false,
+                        portal: None,
+                    },
+                    42 => Block {
+                        rgb: 0xffffff,
+                        air: false,
+                        alpha: 64,
+                        hidden: false,
+                        water: false,
+                        portal: None,
+                    },
+                    _ => Block::default(),
+                },
+                |_, _| 64,
+                [0, 0],
+                0,
+                Layer::Surface,
+            );
+            let expected = blend(blend(0x102030, 0x0000ff, 128), 0xffffff, 64);
+            assert_eq!(
+                &tile.pixels[..3],
+                &[
+                    (expected >> 16) as u8,
+                    (expected >> 8) as u8,
+                    expected as u8
+                ]
+            );
+        }
+        #[test]
+        fn a_water_column_without_a_floor_is_not_an_unknown_pixel() {
+            let tile = sample(
+                |_, y, _| {
+                    if (0..=5).contains(&y) {
+                        Block {
+                            rgb: 0x4040ff,
+                            air: false,
+                            alpha: 150,
+                            hidden: false,
+                            water: false,
+                            portal: None,
+                        }
+                    } else {
+                        Block::default()
+                    }
+                },
+                |_, _| 6,
+                [0, 0],
+                0,
+                Layer::Surface,
+            );
+            assert_eq!(tile.pixels[3], 255);
+            assert_eq!(&tile.pixels[..3], &[0x40, 0x40, 0xff]);
+        }
+        #[test]
+        fn hidden_ground_cover_does_not_hide_the_terrain() {
+            let tile = sample(
+                |_, y, _| match y {
+                    40 => Block {
+                        rgb: 0x8b5a2b,
+                        air: false,
+                        alpha: 0,
+                        hidden: false,
+                        water: false,
+                        portal: None,
+                    },
+                    41 => Block {
+                        rgb: 0x00ff00,
+                        air: false,
+                        alpha: 0,
+                        hidden: true,
+                        water: false,
+                        portal: None,
+                    },
+                    _ => Block::default(),
+                },
+                |_, _| 42,
+                [0, 0],
+                0,
+                Layer::Surface,
+            );
+            assert_eq!(&tile.pixels[..3], &[0x8b, 0x5a, 0x2b]);
+            assert_eq!(tile.heights[0], 40);
+        }
+    }
+}
+
+#[cfg(test)]
+mod map_regressions {
+    use super::*;
+    use maps::{Cache, Frame, Layer, Service, Tile, View};
+    fn view(session: u64) -> View {
+        View {
+            session,
+            dimension: Dimension::Overworld,
+            layer: Layer::Surface,
+            center: [8.0, 8.0],
+            span: [16.0; 2],
+            width: 16,
+            height: 16,
+            angle: 0.0,
+            round: false,
+            large: true,
+        }
+    }
+    fn wait(service: &Service, predicate: impl Fn(&Frame) -> bool) -> Arc<Frame> {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Some(frame) = service.frame()
+                && predicate(&frame)
+            {
+                return frame;
+            }
+            assert!(
+                std::time::Instant::now() < until,
+                "terrain worker did not publish expected frame"
+            );
+            thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+    #[test]
+    fn dimension_preferences_roundtrip_and_are_independent() {
+        let settings = Settings::decode("mini_dimension=nether\nworld_dimension=end");
+        assert_eq!(settings.mini_dimension, Dimension::Nether);
+        assert_eq!(settings.world_dimension, Dimension::End);
+        assert_eq!(Settings::decode(&settings.encode()), settings);
+        assert_eq!(Dimension::Player.resolve(Dimension::End), Dimension::End);
+        assert_eq!(Dimension::Nether.resolve(Dimension::End), Dimension::Nether);
+    }
+    #[test]
+    fn nether_scale_converts_both_ways_for_every_dimension() {
+        let position = [800.0, -1200.0];
+        assert_eq!(
+            Dimension::Overworld.convert(Dimension::Nether, position),
+            [100.0, -150.0]
+        );
+        assert_eq!(
+            Dimension::Nether.convert(Dimension::Overworld, position),
+            [6400.0, -9600.0]
+        );
+        assert_eq!(
+            Dimension::Nether.convert(Dimension::End, position),
+            [6400.0, -9600.0]
+        );
+        assert_eq!(
+            Dimension::End.convert(Dimension::Nether, position),
+            [100.0, -150.0]
+        );
+        assert_eq!(
+            Dimension::End.convert(Dimension::Overworld, position),
+            position
+        );
+        assert_eq!(
+            Dimension::Player.convert(Dimension::Nether, position),
+            position
+        );
+    }
+    #[test]
+    fn a_stale_connection_job_cannot_repopulate_a_new_session() {
+        let service = Service::new();
+        service.reset(1);
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        assert!(
+            service.submit(1, Dimension::Overworld, Layer::Surface, [0, 0], move || {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Tile {
+                    pixels: [255, 0, 0, 255].repeat(256),
+                    ..Tile::default()
+                }
+            })
+        );
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        service.reset(2);
+        service.request(view(2));
+        release_tx.send(()).unwrap();
+        let frame = wait(&service, |f| f.view.session == 2);
+        assert_eq!(frame.known, 0);
+        assert!(!service.contains(Dimension::Overworld, Layer::Surface, [0, 0]));
+        assert!(
+            service.submit(2, Dimension::Overworld, Layer::Surface, [0, 0], || Tile {
+                pixels: [0, 255, 0, 255].repeat(256),
+                ..Tile::default()
+            })
+        );
+        let frame = wait(&service, |f| f.known == 256);
+        assert_eq!(&frame.pixels[..4], &[0, 255, 0, 255]);
+        service.shutdown();
+    }
+    #[test]
+    fn circle_pixels_are_transparent_and_loaded_void_is_known() {
+        let mut cache = Cache::default();
+        cache.insert(
+            Dimension::Overworld,
+            Layer::Surface,
+            [0, 0],
+            Tile {
+                pixels: vec![0; 1024],
+                ..Tile::default()
+            },
+        );
+        let mut request = view(1);
+        request.round = true;
+        let frame = cache.render(request, 1);
+        assert_eq!(frame.pixels[3], 0);
+        assert!(frame.known > 0);
+    }
+    #[test]
+    fn evicted_terrain_can_be_inserted_again_without_source_edits() {
+        let mut cache = Cache::default();
+        for x in 0..4097 {
+            cache.insert(
+                Dimension::Overworld,
+                Layer::Surface,
+                [x, 0],
+                Tile {
+                    pixels: [1, 2, 3, 255].repeat(256),
+                    ..Tile::default()
+                },
+            );
+        }
+        assert_eq!(cache.render(view(1), 1).known, 0);
+        cache.insert(
+            Dimension::Overworld,
+            Layer::Surface,
+            [0, 0],
+            Tile {
+                pixels: [1, 2, 3, 255].repeat(256),
+                ..Tile::default()
+            },
+        );
+        assert_eq!(cache.render(view(1), 2).known, 256);
+    }
+    #[test]
+    fn relief_shading_reads_the_neighbour_chunk_without_a_seam() {
+        let mut cache = Cache::default();
+        let mut south = Tile {
+            pixels: [200, 200, 200, 255].repeat(256),
+            ..Tile::default()
+        };
+        south.heights = [10; 256];
+        cache.insert(Dimension::Overworld, Layer::Surface, [0, 0], south);
+        let mut north = Tile {
+            pixels: [200, 200, 200, 255].repeat(256),
+            ..Tile::default()
+        };
+        north.heights = [13; 256];
+        cache.insert(Dimension::Overworld, Layer::Surface, [0, -1], north);
+        let mut request = view(1);
+        request.center = [8.0, 0.0];
+        request.span = [16.0, 32.0];
+        request.height = 32;
+        let frame = cache.render(request, 1);
+        // Block (8, 0) is three blocks below (8, -1), in the neighbouring tile.
+        let shaded = (16 * 16 + 8) * 4;
+        assert_eq!(&frame.pixels[shaded..shaded + 3], &[171, 171, 171]);
+        // Inside the north chunk, equal heights keep the base brightness.
+        let plain = (15 * 16 + 8) * 4;
+        assert_eq!(&frame.pixels[plain..plain + 3], &[216, 216, 216]);
+    }
+    #[test]
+    fn unknown_terrain_is_transparent_instead_of_a_screen_checkerboard() {
+        let cache = Cache::default();
+        let frame = cache.render(view(1), 1);
+        assert_eq!(&frame.pixels[..4], &[0, 0, 0, 0]);
+        assert_eq!(frame.known, 0);
     }
 }

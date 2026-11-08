@@ -1,6 +1,6 @@
 [mod]
 id = "minimap_worldmap_waypoints_reworked"
-version = "0.1.0"
+version = "0.3.0"
 priority = 100
 
 [compatibility]
@@ -34,15 +34,134 @@ helper = "click.rs"
 bindings = [{ name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" }, { name = "mod_id", ty = "&str", value = "mod_id" }, { name = "button", ty = "usize", value = "button" }]
 
 [[injection]]
-id = "minimap"
-kind = "HEAD"
-target = "horizon_client::game::native_hooks::Game<'_>::native_minimap"
-helper = "minimap.rs"
-bindings = [{ name = "game", ty = "&crate::game::Game<'_>", value = "self" }, { name = "minimap", ty = "&mut Option<crate::game::native_hooks::NativeMinimap>", value = "minimap" }]
-
-[[injection]]
 id = "settings-flush"
 kind = "HEAD"
 target = "horizon_client::game::<Game<'_> as ApplicationHandler>::exiting"
 helper = "exit.rs"
 bindings = [{ name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" }]
+
+[[module]]
+id = "client"
+file = "crates/horizon-client/src/game.rs"
+name = "reworked_maps"
+source = "client.rs"
+
+[[injection]]
+id = "map-key"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_key"
+helper = "key.rs"
+bindings = [{ name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" }, { name = "key", ty = "&str", value = "key" }, { name = "pressed", ty = "bool", value = "pressed" }]
+
+[[injection]]
+id = "map-frame"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_frame"
+helper = "frame.rs"
+bindings = [{ name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" }, { name = "elapsed", ty = "std::time::Duration", value = "elapsed" }]
+
+[[injection]]
+id = "map-hud"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_hud"
+helper = "hud.rs"
+bindings = [{ name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" }, { name = "batch", ty = "&mut horizon_client::hud::HudBatch", value = "batch" }, { name = "corners", ty = "&mut horizon_client::extras_hud::Corners", value = "corners" }]
+
+[[injection]]
+id = "map-screen"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_screen_render_post"
+helper = "screen.rs"
+bindings = [{ name = "game", ty = "&crate::game::Game<'_>", value = "self" }, { name = "batch", ty = "&mut horizon_client::hud::HudBatch", value = "batch" }]
+
+[[injection]]
+id = "map-press"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_screen_mouse_button_pressed_pre"
+helper = "press.rs"
+bindings = [{ name = "game", ty = "&crate::game::Game<'_>", value = "self" }, { name = "screen", ty = "&crate::mod_api::NativeScreenView<'_>", value = "screen" }, { name = "button", ty = "i32", value = "button" }, { name = "canceled", ty = "&mut bool", value = "canceled" }]
+
+[[injection]]
+id = "map-drag"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_screen_mouse_dragged_pre"
+helper = "drag.rs"
+bindings = [{ name = "game", ty = "&crate::game::Game<'_>", value = "self" }, { name = "delta", ty = "[f32;2]", value = "delta" }, { name = "button", ty = "i32", value = "button" }, { name = "canceled", ty = "&mut bool", value = "canceled" }]
+
+[[injection]]
+id = "map-scroll"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_screen_mouse_scrolled_pre"
+helper = "scroll.rs"
+bindings = [{ name = "game", ty = "&crate::game::Game<'_>", value = "self" }, { name = "screen", ty = "&crate::mod_api::NativeScreenView<'_>", value = "screen" }, { name = "scroll", ty = "[f64;2]", value = "scroll" }, { name = "canceled", ty = "&mut bool", value = "canceled" }]
+
+[[injection]]
+id = "map-screen-key"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_screen_key_pressed_pre"
+helper = "screen_key.rs"
+bindings = [{ name = "game", ty = "&crate::game::Game<'_>", value = "self" }, { name = "screen", ty = "&crate::mod_api::NativeScreenView<'_>", value = "screen" }, { name = "key", ty = "&str", value = "key" }, { name = "repeat", ty = "bool", value = "repeat" }, { name = "modifiers", ty = "u32", value = "modifiers" }, { name = "canceled", ty = "&mut bool", value = "canceled" }]
+
+[[injection]]
+id = "map-screen-char"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_screen_char_typed_pre"
+helper = "screen_char.rs"
+bindings = [{ name = "game", ty = "&crate::game::Game<'_>", value = "self" }, { name = "screen", ty = "&crate::mod_api::NativeScreenView<'_>", value = "screen" }, { name = "c", ty = "char", value = "c" }, { name = "modifiers", ty = "u32", value = "modifiers" }, { name = "canceled", ty = "&mut bool", value = "canceled" }]
+
+[[module]]
+id = "keybindings"
+file = "crates/horizon-client-render/src/options_ui.rs"
+name = "minimap_binding_ui"
+source = "binding_ui.rs"
+
+[[injection]]
+id = "binding-rows"
+kind = "HEAD"
+cancellable = true
+target = "horizon_client_render::options_ui::OptionsUi::native_rows"
+helper = "binding_rows.rs"
+bindings = [
+  { name = "ui", ty = "&crate::options_ui::OptionsUi", value = "self" },
+  { name = "settings", ty = "&crate::settings::Settings", value = "s" },
+  { name = "index", ty = "usize", value = "i" },
+]
+
+[[injection]]
+id = "binding-tooltip"
+kind = "HEAD"
+cancellable = true
+target = "horizon_client_render::options_ui::tooltip_text"
+helper = "binding_tooltip.rs"
+bindings = [
+  { name = "settings", ty = "&crate::settings::Settings", value = "s" },
+  { name = "widget", ty = "&crate::options_ui::Widget", value = "wd" },
+]
+
+[[injection]]
+id="map-disconnect"
+kind="HEAD"
+target="horizon_client::game::native_hooks::Game<'_>::native_client_disconnecting"
+helper="disconnect.rs"
+bindings=[{name="game", ty="&crate::game::Game<'_>", value="self"}]
+
+[[injection]]
+id="map-login"
+kind="HEAD"
+target="horizon_client::game::native_hooks::Game<'_>::native_client_player_network_logging_in"
+helper="disconnect.rs"
+bindings=[{name="game", ty="&crate::game::Game<'_>", value="self"}]
+
+[[injection]]
+id="map-resources"
+kind="HEAD"
+target="horizon_client::game::native_hooks::Game<'_>::native_client_resources_reloaded"
+helper="atlas.rs"
+bindings=[]
+
+[[injection]]
+id="map-atlas"
+kind="HEAD"
+target="horizon_client::game::Game<'_>::forget_atlas_slots"
+helper="atlas.rs"
+bindings=[]
