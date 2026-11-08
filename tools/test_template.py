@@ -108,7 +108,7 @@ mod tests {
         let mut map = None;
         game.native_minimap(&mut map);
         let baseline = map.unwrap();
-        assert_eq!(baseline.size, 96.0);
+        assert_eq!(baseline.size, 128.0);
         assert_eq!(baseline.corner, Corner::TopRight);
         assert!(!baseline.round);
         game.native_settings_click("foreign", 3);

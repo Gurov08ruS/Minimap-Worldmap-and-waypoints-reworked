@@ -13,8 +13,8 @@ use std::{
 pub const MOD_ID: &str = "minimap_worldmap_waypoints_reworked";
 pub const MOD_TITLE: &str = "Minimap, Worldmap and waypoints reworked";
 pub const SETTINGS_FILE: &str = "settings.ini";
-const SIZES: [u16; 3] = [64, 96, 128];
-const ZOOMS: [f32; 4] = [0.5, 1.0, 2.0, 4.0];
+const SIZES: [u16; 7] = [64, 96, 128, 160, 192, 224, 256];
+const ZOOMS: [f32; 7] = [0.1, 0.25, 0.5, 0.75, 1.0, 2.0, 4.0];
 
 pub mod minimap {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,7 +67,7 @@ pub mod minimap {
             Self {
                 enabled: true,
                 corner: Corner::TopRight,
-                size_px: 96,
+                size_px: 128,
                 blocks_per_pixel: 1.0,
                 rotate_with_player: false,
                 round: false,

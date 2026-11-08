@@ -1,0 +1,99 @@
+name: Validate native mod
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      HORIZON_MIXINS: ${{ github.workspace }}/target/ci/mixins
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Rust and Linux build dependencies
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal --component rustfmt --component clippy
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev pkg-config
+      - name: Read compatibility pins
+        id: pins
+        run: |
+          python3 - <<'PY'
+          import json, os
+          pins = json.load(open('compatibility.json'))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              for name in ('horizon_revision', 'horizon_mixins_revision'):
+                  print(f'{name}={pins[name]}', file=output)
+          PY
+      - uses: actions/checkout@v4
+        with:
+          repository: horizon-rust/horizon
+          ref: ${{ steps.pins.outputs.horizon_revision }}
+          path: target/ci/horizon
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: horizon-rust/horizon-mixins
+          ref: ${{ steps.pins.outputs.horizon_mixins_revision }}
+          path: target/ci/mixins
+          persist-credentials: false
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/horizon-cargo
+            target/ci/mixins/target
+          key: native-linux-${{ runner.arch }}-${{ steps.pins.outputs.horizon_revision }}-${{ steps.pins.outputs.horizon_mixins_revision }}-v1
+      - name: Fetch dependencies and check standalone runtime
+        run: |
+          cargo fetch --locked
+          cargo fetch --locked --manifest-path "$HORIZON_MIXINS/Cargo.toml"
+          cargo fmt --all --check
+          cargo clippy --workspace --all-targets --locked --offline -- -D warnings
+          cargo test --workspace --locked --offline
+      - name: Test hooks and audit pinned sources
+        run: |
+          python3 tools/test_template.py
+          python3 tools/test_stage.py --horizon target/ci/horizon
+          python3 tools/horizon.py stage --horizon target/ci/horizon
+      - name: Check and test the actual Horizon client
+        run: |
+          cargo fetch --locked --manifest-path target/mixins/modded/Cargo.toml
+          python3 tools/horizon.py check --horizon target/ci/horizon
+          python3 tools/horizon.py test --horizon target/ci/horizon
+      - name: Package reproducibly and check with the official tool
+        run: |
+          python3 tools/package.py > target/package-first.json
+          python3 tools/package.py > target/package-second.json
+          cmp target/package-first.json target/package-second.json
+          cargo build --locked --offline --manifest-path target/mixins/modded/Cargo.toml -p cargo-horizon-mod --target-dir target/horizon-cargo
+          export PATH="$PWD/target/horizon-cargo/debug:$PATH"
+          cargo horizon-mod check target/minimap_worldmap_waypoints_reworked-0.1.0.hnmod --json | tee target/package-check.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-mod-validation
+          path: |
+            target/*.hnmod
+            target/horizon-*.log
+            target/package-*.json
+          if-no-files-found: warn

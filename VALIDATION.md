@@ -1,4 +1,10 @@
-# Validation — first minimap implementation
+# Historical validation — first minimap implementation
+
+This report records the 2026-11-07 build on Horizon `ba6344a`. The 0.1.0 release
+preparation updates the pin to Nightly 2026-11-07 (`2ebf00a`) and expands size and
+zoom choices. Its checks are recorded in the repository's **Validate native mod**
+GitHub Actions workflow; the older results and artifact hash below do not
+validate the updated bundle.
 
 Date: 2026-11-07. Linux, Rust 1.95.0. Horizon and horizon-mixins revisions are
 pinned in `compatibility.json`; the runtime and five native adapters are the

@@ -37,7 +37,7 @@ def package():
         if path.is_file() and path.suffix in ('.rs', '.toml'):
             files[path.relative_to(ROOT).as_posix()] = path.read_bytes()
     # Carry both the project license and upstream notices with distributed sources.
-    for name in ('LICENSE', 'LICENSE-MIT', 'NOTICE'):
+    for name in ('LICENSE', 'LICENSE-MIT', 'NOTICE', 'NOTICE-REVIEW-PERMISSION.md'):
         files[f"mixins/{mod['id']}/{name}"] = (ROOT / name).read_bytes()
     out = ROOT / 'target' / f"{mod['id']}-{mod['version']}.hnmod"
     out.parent.mkdir(parents=True, exist_ok=True)
