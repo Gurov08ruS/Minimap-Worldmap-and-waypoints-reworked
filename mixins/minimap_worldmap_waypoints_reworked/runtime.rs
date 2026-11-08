@@ -327,6 +327,7 @@ pub enum ScreenRequest {
 }
 
 static SCREEN_REQUEST: AtomicU8 = AtomicU8::new(0);
+static TEXT_INPUT: AtomicU8 = AtomicU8::new(0);
 
 /// The key hooks only set a request; the client module, which owns the
 /// screen mode, consumes it on the next frame. This also keeps the key helper
@@ -347,6 +348,16 @@ pub fn take_screen_request() -> Option<ScreenRequest> {
         2 => Some(ScreenRequest::Waypoints),
         _ => None,
     }
+}
+
+/// While a waypoint name is being typed, the global map/waypoint keys must
+/// not close the screen when the name contains that letter.
+pub fn set_text_input(active: bool) {
+    TEXT_INPUT.store(u8::from(active), Ordering::Release);
+}
+
+pub fn text_input_active() -> bool {
+    TEXT_INPUT.load(Ordering::Acquire) != 0
 }
 const MAX_WAYPOINT_NAME: usize = 32;
 

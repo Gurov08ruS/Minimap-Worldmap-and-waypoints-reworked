@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-only
 fn on_map_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool) {
     use crate::game::minimap_worldmap_waypoints_reworked as runtime;
-    if !pressed || !game.native_window() || !game.native_on(runtime::MOD_ID) {
+    if !pressed
+        || !game.native_window()
+        || !game.native_on(runtime::MOD_ID)
+        || runtime::text_input_active()
+    {
         return;
     }
     let map = game.native_mod_key(

@@ -673,6 +673,7 @@ fn perform_menu(
                 background: Mode::Map,
             });
             state.mode = Mode::Name;
+            runtime::set_text_input(true);
         }
         MenuAction::CopyDestination => {
             if let Some(PortalTarget::Exact { at, .. }) = target {
@@ -1222,7 +1223,15 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
     let mut state = state();
     if state.close {
         state.close = false;
+        runtime::set_text_input(false);
         game.native_mod_screen_close(runtime::MOD_ID);
+    }
+    if game.native_mod_screen() != Some(runtime::MOD_ID) {
+        runtime::set_text_input(false);
+        if state.mode == Mode::Name {
+            state.mode = Mode::Map;
+            state.name_form = None;
+        }
     }
     if let Some(request) = runtime::take_screen_request() {
         let desired = match request {
@@ -1235,6 +1244,7 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
             state.name_form = None;
             state.menu = None;
             state.waypoint_selected = None;
+            runtime::set_text_input(false);
         }
     }
     state.waypoints = controller.waypoints();
@@ -1965,6 +1975,7 @@ fn waypoint_press(
             background: Mode::Waypoints,
         });
         state.mode = Mode::Name;
+        runtime::set_text_input(true);
         *canceled = true;
         return;
     }
@@ -2000,6 +2011,7 @@ fn waypoint_press(
             background: Mode::Waypoints,
         });
         state.mode = Mode::Name;
+        runtime::set_text_input(true);
         *canceled = true;
         return;
     }
@@ -2062,12 +2074,14 @@ fn save_name(game: &Game<'_>, state: &mut State) {
         state.notice = Some(("Вейпоинт сохранён".into(), Instant::now()));
     }
     state.mode = form.background;
+    runtime::set_text_input(false);
 }
 
 fn cancel_name(state: &mut State) {
     if let Some(form) = state.name_form.take() {
         state.mode = form.background;
     }
+    runtime::set_text_input(false);
 }
 
 pub(super) fn drag(game: &Game<'_>, delta: [f32; 2], button: i32, canceled: &mut bool) {
@@ -2147,6 +2161,7 @@ pub(super) fn screen_key(game: &Game<'_>, key: &str, canceled: &mut bool) {
         return;
     }
     if key == "key.keyboard.escape" {
+        runtime::set_text_input(false);
         state.close = true;
         *canceled = true;
     }
@@ -2175,6 +2190,7 @@ pub(super) fn disconnect(game: &Game<'_>) {
     if !game.native_window() {
         return;
     }
+    runtime::set_text_input(false);
     let mut s = state();
     let next = s.session + 1;
     *s = State {

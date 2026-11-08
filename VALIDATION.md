@@ -13,7 +13,7 @@ Local Linux checks on Rust 1.95.0 against the pinned revisions below:
 | `python3 tools/test_stage.py --horizon ../horizon` | Pass: plan-only AST changes, deterministic stage |
 | `python3 tools/horizon.py check --horizon ../horizon` | Pass |
 | `python3 tools/horizon.py test --horizon ../horizon` | Pass: 29 runtime tests |
-| `python3 tools/package.py` | Pass: 62,647 bytes, SHA-256 `589ab7d5465fbd3c5e689ec0217fa8a2b771a17e31a77a12224b1a44e6588297` |
+| `python3 tools/package.py` | Pass: 62,925 bytes, SHA-256 `f333a6b3d8078bdfc42707b99d6de799622b793c45563715aed8dde937ee5a1f` |
 
 No game window was launched here, so interactive smoothness, the hover menu,
 biome readout, world-border and portal overlays, waypoint naming/manager screen,
