@@ -20,6 +20,10 @@ fn canonical(items: &[Item]) -> String {
         items: items.to_vec(),
     })
 }
+fn canonical_file_tokens(file: &syn::File) -> String {
+    let formatted = syn::parse_file(&prettyplease::unparse(file)).unwrap();
+    quote!(#formatted).to_string()
+}
 fn main() {
     let args: Vec<_> = env::args().collect();
     let plan: serde_json::Value = serde_json::from_slice(&fs::read(&args[3]).unwrap()).unwrap();
@@ -116,10 +120,10 @@ fn main() {
         let original =
             syn::parse_file(&fs::read_to_string(Path::new(&args[1]).join(file)).unwrap()).unwrap();
         assert_eq!(original.shebang, tree.shebang, "changed shebang in {file}");
-        // Compare parsed tokens, including attributes and literal spellings.
-        // prettyplease is not whitespace-idempotent for every upstream method
-        // chain, so its layout alone cannot establish an AST change.
-        if quote!(#original).to_string() != quote!(#tree).to_string() {
+        // Normalize optional punctuation and match-arm braces with the same
+        // formatter as the transformer, then ignore layout. prettyplease is
+        // not whitespace-idempotent for every upstream method chain.
+        if canonical_file_tokens(&original) != canonical_file_tokens(&tree) {
             let diagnostics = Path::new("target/source-audit");
             fs::create_dir_all(diagnostics).unwrap();
             fs::write(
