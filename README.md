@@ -1,7 +1,7 @@
 # Minimap, Worldmap and waypoints reworked
 
 A native Horizon mod by [daniliammo](https://github.com/daniliammo).
-Version **0.3.0** adds a world map, a rebindable map key and independent dimension
+Version **0.3.1** adds a world map, a rebindable map key and independent dimension
 selection for the minimap and world map. Waypoints remain planned.
 
 ## Install
@@ -110,9 +110,10 @@ future stages in [PLAN.md](PLAN.md).
 The displayed camera is eased: drag and zoom targets are approached over a few
 frames, a zoom keeps the world point under the cursor fixed, and the minimap and
 its marker interpolate the player's 20 Hz positions. The large map is rendered
-at the full size of its visible rectangle (up to the 1024-pixel shared atlas
-slot), not at a fixed low resolution, so zooming out no longer stretches a small
-texture over the screen. The minimap is rendered at up to four times its GUI
+at the full physical size of its visible rectangle (GUI size times the window's
+GUI scale, up to the 1024-pixel shared atlas slot), not at GUI size or a fixed
+low resolution, so a GUI scale of 2-4 no longer stretches a small texture over
+the screen. The minimap is rendered at up to four times its GUI
 size before scaling down, so a block moves in quarter-pixel steps instead of
 jumping by whole blocks. The terrain renderer avoids per-pixel trigonometry and
 repeated chunk lookups to keep those updates cheap. Relief shading reads the
@@ -192,7 +193,7 @@ python3 tools/package.py
 
 Fetch the pinned Mixins checkout's dependencies with `cargo fetch --locked`
 before the offline checks. The output is
-`target/minimap_worldmap_waypoints_reworked-0.3.0.hnmod`.
+`target/minimap_worldmap_waypoints_reworked-0.3.1.hnmod`.
 Check it with `cargo horizon-mod check <file>` using Horizon's official
 `cargo-horizon-mod` tool. The [validation workflow](.github/workflows/validate.yml)
 runs the standalone tests, source audit, real client check and tests, and official

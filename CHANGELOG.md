@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.1 — 2026-11-08
+
+- Fixed the large map still looking pixelated at GUI scale 4: it now renders at
+  the visible rectangle's physical resolution (GUI size × GUI scale, up to the
+  1024-pixel shared atlas slot) instead of GUI size. The previous 512-pixel cap
+  was not the only cause; the texture was also only as large as the GUI
+  rectangle before the GPU scaled it up.
+- Slightly stronger landscape relief (north-west light) so terrain steps are
+  easier to see.
+
 ## 0.3.0 — 2026-11-08
 
 - World map opened by a rebindable key, with independent dimension tabs and
@@ -18,9 +28,10 @@
   real petal/crop colours, stained glass panes use their dye colour, and
   scaffolding/cobweb render semi-transparent. Render-invisible blocks (barriers,
   light blocks, moving pistons) no longer draw false pixels.
-- The large map renders at the full visible-rectangle resolution (up to the
-  1024-pixel shared atlas slot) instead of a fixed 512-pixel texture, so zooming
-  out no longer stretches a low-resolution image.
+- The large map renders at the visible rectangle's physical resolution (GUI
+  size × GUI scale, up to the 1024-pixel shared atlas slot), not at GUI size or
+  a fixed 512-pixel texture, so GUI scale 2-4 and zooming out no longer stretch
+  a low-resolution image.
 - Relief shading is stronger and reads neighbouring chunks; it follows the
   seabed under water; unknown terrain is transparent, removing per-chunk seams
   and moving stripes.

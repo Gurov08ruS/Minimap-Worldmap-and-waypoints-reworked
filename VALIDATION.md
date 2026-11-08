@@ -1,6 +1,6 @@
 # Validation
 
-## 0.3.0 development — 2026-11-08
+## 0.3.1 development — 2026-11-08
 
 Local Linux checks on Rust 1.95.0 against the pinned revisions below:
 
@@ -13,7 +13,7 @@ Local Linux checks on Rust 1.95.0 against the pinned revisions below:
 | `python3 tools/test_stage.py --horizon ../horizon` | Pass: plan-only AST changes, deterministic stage |
 | `python3 tools/horizon.py check --horizon ../horizon` | Pass |
 | `python3 tools/horizon.py test --horizon ../horizon` | Pass: 29 runtime tests |
-| `python3 tools/package.py` | Pass: 62,929 bytes, SHA-256 `573bc00c9a9396ca3cfbcde0d6624deee65a6e651c1ea79c61504d03144ab54d` |
+| `python3 tools/package.py` | Pass: 63,055 bytes, SHA-256 `94e1028027bc2eda334528dab6422ab67c9bcd9ebf43a6eae434c1b7e0724197` |
 
 No game window was launched here, so interactive smoothness, the hover menu,
 biome readout, world-border and portal overlays, waypoint naming/manager screen,

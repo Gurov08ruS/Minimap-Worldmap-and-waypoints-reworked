@@ -1479,9 +1479,13 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
         let viewport = HudBatch::new([renderer.config.width, renderer.config.height]);
         let rect = rectangle(viewport.width, viewport.height);
         let (width, height, span) = if large {
+            // The HUD draws in GUI pixels, but the texture is sampled at the
+            // window's physical resolution. Render at physical size so a GUI
+            // scale of 2-4 does not stretch a GUI-sized image.
+            let scale = viewport.scale.max(1.0);
             (
-                (rect[2].ceil() as usize).clamp(1, 1024),
-                (rect[3].ceil() as usize).clamp(1, 1024),
+                ((rect[2] * scale).ceil() as usize).clamp(1, 1024),
+                ((rect[3] * scale).ceil() as usize).clamp(1, 1024),
                 [
                     f64::from(rect[2]) * state.camera.zoom,
                     f64::from(rect[3]) * state.camera.zoom,
