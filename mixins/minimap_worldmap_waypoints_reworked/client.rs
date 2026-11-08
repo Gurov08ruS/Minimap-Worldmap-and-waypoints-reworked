@@ -1480,8 +1480,8 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
         let rect = rectangle(viewport.width, viewport.height);
         let (width, height, span) = if large {
             (
-                (rect[2].ceil() as usize).clamp(1, 512),
-                (rect[3].ceil() as usize).clamp(1, 512),
+                (rect[2].ceil() as usize).clamp(1, 1024),
+                (rect[3].ceil() as usize).clamp(1, 1024),
                 [
                     f64::from(rect[2]) * state.camera.zoom,
                     f64::from(rect[3]) * state.camera.zoom,
@@ -1491,7 +1491,7 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
             let size = settings
                 .fitted_size(viewport.width, viewport.height)
                 .unwrap_or(128.0);
-            let texture = (size * 4.0).round().clamp(64.0, 512.0) as usize;
+            let texture = (size * 4.0).round().clamp(64.0, 1024.0) as usize;
             (
                 texture,
                 texture,

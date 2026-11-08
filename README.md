@@ -109,16 +109,19 @@ future stages in [PLAN.md](PLAN.md).
 
 The displayed camera is eased: drag and zoom targets are approached over a few
 frames, a zoom keeps the world point under the cursor fixed, and the minimap and
-its marker interpolate the player's 20 Hz positions. The minimap is rendered at
-up to four times its GUI size before scaling down, so a block moves in
-quarter-pixel steps instead of jumping by whole blocks. The terrain renderer
-avoids per-pixel trigonometry and repeated chunk lookups to keep those updates
-cheap. Relief shading reads the neighbouring column's height from its own chunk
-tile, so there are no dark seams along chunk borders while the map moves. The
-world map's pointer readout uses the frame's own mapping, so the highlighted
-block and coordinates match the drawn image, including during animation.
-Unknown terrain is left transparent instead of drawing a screen-aligned
-checkerboard that turned into moving stripes.
+its marker interpolate the player's 20 Hz positions. The large map is rendered
+at the full size of its visible rectangle (up to the 1024-pixel shared atlas
+slot), not at a fixed low resolution, so zooming out no longer stretches a small
+texture over the screen. The minimap is rendered at up to four times its GUI
+size before scaling down, so a block moves in quarter-pixel steps instead of
+jumping by whole blocks. The terrain renderer avoids per-pixel trigonometry and
+repeated chunk lookups to keep those updates cheap. Relief shading reads the
+neighbouring column's height from its own chunk tile, with a stronger
+north-west light so slopes and terrain steps stand out; chunk borders have no
+seams. The world map's pointer readout uses the frame's own mapping, so the
+highlighted block and coordinates match the drawn image, including during
+animation. Unknown terrain is left transparent instead of drawing a
+screen-aligned checkerboard that turned into moving stripes.
 
 Waypoints are stored in the same `settings.ini` and are currently shared by all
 worlds of the instance; they are not yet split per save or server. Portal

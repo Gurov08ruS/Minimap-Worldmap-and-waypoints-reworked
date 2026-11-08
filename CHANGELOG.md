@@ -18,8 +18,12 @@
   real petal/crop colours, stained glass panes use their dye colour, and
   scaffolding/cobweb render semi-transparent. Render-invisible blocks (barriers,
   light blocks, moving pistons) no longer draw false pixels.
-- Relief shading reads neighbouring chunks and follows the seabed under water;
-  unknown terrain is transparent, removing per-chunk seams and moving stripes.
+- The large map renders at the full visible-rectangle resolution (up to the
+  1024-pixel shared atlas slot) instead of a fixed 512-pixel texture, so zooming
+  out no longer stretches a low-resolution image.
+- Relief shading is stronger and reads neighbouring chunks; it follows the
+  seabed under water; unknown terrain is transparent, removing per-chunk seams
+  and moving stripes.
 - World borders are drawn on the Overworld and Nether maps (the Nether uses the
   same physical area, ÷8).
 - Nether portals, End portals and End gateways are marked on the map and open a

@@ -1424,8 +1424,8 @@ pub mod maps {
                 .insert((dimension, layer, chunk[0], chunk[1]), (self.clock, tile));
         }
         pub fn render(&self, view: View, serial: u64) -> Frame {
-            let width = view.width.clamp(1, 768);
-            let height = view.height.clamp(1, 768);
+            let width = view.width.clamp(1, 1024);
+            let height = view.height.clamp(1, 1024);
             let mut pixels = vec![0; width * height * 4];
             let mut known = 0;
             let (sin, cos) = view.angle.sin_cos();
@@ -1522,12 +1522,12 @@ pub mod maps {
                     // Light from the north-west: a rise towards it is darker,
                     // a slope away from it is brighter. The base keeps the map
                     // readable instead of the old flat 0.8 step.
-                    let relief = f32::from((north_height - height).clamp(-64, 64) as i8) * -0.075
-                        + f32::from((west_height - height).clamp(-64, 64) as i8) * -0.04;
+                    let relief = f32::from((north_height - height).clamp(-64, 64) as i8) * -0.085
+                        + f32::from((west_height - height).clamp(-64, 64) as i8) * -0.05;
                     let shade = if current.walls[local] {
                         0.55
                     } else {
-                        (1.08 + relief).clamp(0.70, 1.34)
+                        (1.09 + relief).clamp(0.65, 1.38)
                     };
                     for channel in 0..3 {
                         pixels[i + channel] = (f32::from(color[channel]) * shade).round() as u8;
@@ -2270,10 +2270,10 @@ mod map_regressions {
         let frame = cache.render(request, 1);
         // Block (8, 0) is three blocks below (8, -1), in the neighbouring tile.
         let shaded = (16 * 16 + 8) * 4;
-        assert_eq!(&frame.pixels[shaded..shaded + 3], &[171, 171, 171]);
+        assert_eq!(&frame.pixels[shaded..shaded + 3], &[167, 167, 167]);
         // Inside the north chunk, equal heights keep the base brightness.
         let plain = (15 * 16 + 8) * 4;
-        assert_eq!(&frame.pixels[plain..plain + 3], &[216, 216, 216]);
+        assert_eq!(&frame.pixels[plain..plain + 3], &[218, 218, 218]);
     }
     #[test]
     fn unknown_terrain_is_transparent_instead_of_a_screen_checkerboard() {
