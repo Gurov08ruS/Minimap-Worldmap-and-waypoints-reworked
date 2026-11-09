@@ -32,6 +32,7 @@ pub enum Language {
     Russian,
     French,
     Spanish,
+    German,
 }
 
 impl Language {
@@ -43,6 +44,8 @@ impl Language {
             Self::French
         } else if prefix.eq_ignore_ascii_case("es") {
             Self::Spanish
+        } else if prefix.eq_ignore_ascii_case("de") {
+            Self::German
         } else {
             Self::English
         }
@@ -60,6 +63,7 @@ pub fn language() -> Language {
         1 => Language::Russian,
         2 => Language::French,
         3 => Language::Spanish,
+        4 => Language::German,
         _ => Language::English,
     }
 }
@@ -69,21 +73,24 @@ pub fn tr(
     russian: &'static str,
     french: &'static str,
     spanish: &'static str,
+    german: &'static str,
 ) -> &'static str {
     match language() {
         Language::English => english,
         Language::Russian => russian,
         Language::French => french,
         Language::Spanish => spanish,
+        Language::German => german,
     }
 }
 
 macro_rules! localized_format {
-    ($en:literal, $ru:literal, $fr:literal, $es:literal $(, $arg:expr)* $(,)?) => {
+    ($en:literal, $ru:literal, $fr:literal, $es:literal, $de:literal $(, $arg:expr)* $(,)?) => {
         match language() {
             Language::Russian => format!($ru $(, $arg)*),
             Language::French => format!($fr $(, $arg)*),
             Language::Spanish => format!($es $(, $arg)*),
+            Language::German => format!($de $(, $arg)*),
             Language::English => format!($en $(, $arg)*),
         }
     };
@@ -108,10 +115,16 @@ impl Dimension {
     }
     pub fn label(self) -> &'static str {
         match self {
-            Self::Player => tr("Player", "Игрок", "Joueur", "Jugador"),
-            Self::Overworld => tr("Overworld", "Верхний мир", "Surface", "Mundo normal"),
-            Self::Nether => tr("Nether", "Незер", "Nether", "Nether"),
-            Self::End => tr("End", "Энд", "End", "End"),
+            Self::Player => tr("Player", "Игрок", "Joueur", "Jugador", "Spieler"),
+            Self::Overworld => tr(
+                "Overworld",
+                "Верхний мир",
+                "Surface",
+                "Mundo normal",
+                "Oberwelt",
+            ),
+            Self::Nether => tr("Nether", "Незер", "Nether", "Nether", "Nether"),
+            Self::End => tr("End", "Энд", "End", "End", "Ende"),
         }
     }
     pub fn from_id(id: &str) -> Self {
@@ -183,24 +196,28 @@ pub mod minimap {
                     "Слева сверху",
                     "En haut à gauche",
                     "Arriba a la izquierda",
+                    "Oben links",
                 ),
                 Self::TopRight => tr(
                     "Top right",
                     "Справа сверху",
                     "En haut à droite",
                     "Arriba a la derecha",
+                    "Oben rechts",
                 ),
                 Self::BottomLeft => tr(
                     "Bottom left",
                     "Слева снизу",
                     "En bas à gauche",
                     "Abajo a la izquierda",
+                    "Unten links",
                 ),
                 Self::BottomRight => tr(
                     "Bottom right",
                     "Справа снизу",
                     "En bas à droite",
                     "Abajo a la derecha",
+                    "Unten rechts",
                 ),
             }
         }
@@ -217,6 +234,8 @@ pub mod minimap {
         pub mini_dimension: super::Dimension,
         pub world_dimension: super::Dimension,
         pub smooth_worldmap: bool,
+        pub overworld_coordinates: bool,
+        pub nether_coordinates: bool,
     }
 
     impl Default for Settings {
@@ -231,6 +250,8 @@ pub mod minimap {
                 mini_dimension: super::Dimension::Player,
                 world_dimension: super::Dimension::Player,
                 smooth_worldmap: true,
+                overworld_coordinates: true,
+                nether_coordinates: true,
             }
         }
     }
@@ -254,6 +275,13 @@ pub mod minimap {
                                 value.world_dimension = dimension;
                             }
                         }
+                    }
+                    "overworld_coordinates" => {
+                        value.overworld_coordinates =
+                            raw.parse().unwrap_or(value.overworld_coordinates)
+                    }
+                    "nether_coordinates" => {
+                        value.nether_coordinates = raw.parse().unwrap_or(value.nether_coordinates)
                     }
                     "smooth_worldmap" => {
                         value.smooth_worldmap = raw.parse().unwrap_or(value.smooth_worldmap)
@@ -294,7 +322,7 @@ pub mod minimap {
 
         pub fn encode(self) -> String {
             format!(
-                "# Minimap Reworked settings\nenabled={}\ncorner={}\nsize={}\nshape={}\nzoom={}\nrotate={}\nmini_dimension={}\nworld_dimension={}\nsmooth_worldmap={}\n",
+                "# Minimap Reworked settings\nenabled={}\ncorner={}\nsize={}\nshape={}\nzoom={}\nrotate={}\nmini_dimension={}\nworld_dimension={}\nsmooth_worldmap={}\noverworld_coordinates={}\nnether_coordinates={}\n",
                 self.enabled,
                 self.corner.name(),
                 self.size_px,
@@ -304,6 +332,8 @@ pub mod minimap {
                 self.mini_dimension.name(),
                 self.world_dimension.name(),
                 self.smooth_worldmap,
+                self.overworld_coordinates,
+                self.nether_coordinates,
             )
         }
 
@@ -324,7 +354,7 @@ pub mod minimap {
                 5 => self.rotate_with_player = !self.rotate_with_player,
                 6 => {
                     *self = Self::default();
-                    return 0x3bf;
+                    return 0xfbf;
                 }
                 7 => {
                     self.mini_dimension = super::cycle(self.mini_dimension, &super::Dimension::ALL)
@@ -334,6 +364,8 @@ pub mod minimap {
                         super::cycle(self.world_dimension, &super::Dimension::ALL)
                 }
                 9 => self.smooth_worldmap = !self.smooth_worldmap,
+                10 => self.overworld_coordinates = !self.overworld_coordinates,
+                11 => self.nether_coordinates = !self.nether_coordinates,
                 _ => return 0,
             }
             1 << button
@@ -365,6 +397,12 @@ pub mod minimap {
             if mask & 512 != 0 {
                 self.smooth_worldmap = edited.smooth_worldmap;
             }
+            if mask & 1024 != 0 {
+                self.overworld_coordinates = edited.overworld_coordinates;
+            }
+            if mask & 2048 != 0 {
+                self.nether_coordinates = edited.nether_coordinates;
+            }
             if mask & 32 != 0 {
                 self.rotate_with_player = edited.rotate_with_player;
             }
@@ -373,9 +411,9 @@ pub mod minimap {
         pub fn labels(self) -> Vec<String> {
             let on = |v| {
                 if v {
-                    tr("On", "Вкл", "Activé", "Activado")
+                    tr("On", "Вкл", "Activé", "Activado", "Ein")
                 } else {
-                    tr("Off", "Выкл", "Désactivé", "Desactivado")
+                    tr("Off", "Выкл", "Désactivé", "Desactivado", "Aus")
                 }
             };
             vec![
@@ -384,6 +422,7 @@ pub mod minimap {
                     "Миникарта: {}",
                     "Minicarte : {}",
                     "Minimapa: {}",
+                    "Minikarte: {}",
                     on(self.enabled)
                 ),
                 localized_format!(
@@ -391,6 +430,7 @@ pub mod minimap {
                     "Положение: {}",
                     "Position : {}",
                     "Posición: {}",
+                    "Position: {}",
                     self.corner.label()
                 ),
                 localized_format!(
@@ -398,6 +438,7 @@ pub mod minimap {
                     "Размер: {} GUI px",
                     "Taille : {} px d’interface",
                     "Tamaño: {} px de interfaz",
+                    "Größe: {} GUI-Pixel",
                     self.size_px
                 ),
                 localized_format!(
@@ -405,10 +446,11 @@ pub mod minimap {
                     "Форма: {}",
                     "Forme : {}",
                     "Forma: {}",
+                    "Form: {}",
                     if self.round {
-                        tr("Circle", "Круг", "Cercle", "Círculo")
+                        tr("Circle", "Круг", "Cercle", "Círculo", "Kreis")
                     } else {
-                        tr("Square", "Квадрат", "Carré", "Cuadrado")
+                        tr("Square", "Квадрат", "Carré", "Cuadrado", "Quadrat")
                     }
                 ),
                 localized_format!(
@@ -416,6 +458,7 @@ pub mod minimap {
                     "Масштаб: {} бл./пикс.",
                     "Échelle : {} blocs/pixel",
                     "Escala: {} bloques/píxel",
+                    "Maßstab: {} Blöcke/Pixel",
                     self.blocks_per_pixel
                 ),
                 localized_format!(
@@ -423,6 +466,7 @@ pub mod minimap {
                     "Вращение: {}",
                     "Rotation : {}",
                     "Rotación: {}",
+                    "Drehung: {}",
                     on(self.rotate_with_player)
                 ),
                 tr(
@@ -430,6 +474,7 @@ pub mod minimap {
                     "Сбросить настройки карты",
                     "Réinitialiser les réglages de la carte",
                     "Restablecer ajustes del mapa",
+                    "Karteneinstellungen zurücksetzen",
                 )
                 .into(),
                 localized_format!(
@@ -437,6 +482,7 @@ pub mod minimap {
                     "Измерение миникарты: {}",
                     "Dimension de la minicarte : {}",
                     "Dimensión del minimapa: {}",
+                    "Minikarten-Dimension: {}",
                     self.mini_dimension.label()
                 ),
                 localized_format!(
@@ -444,6 +490,7 @@ pub mod minimap {
                     "Измерение большой карты: {}",
                     "Dimension de la carte du monde : {}",
                     "Dimensión del mapa del mundo: {}",
+                    "Weltkarten-Dimension: {}",
                     self.world_dimension.label()
                 ),
                 localized_format!(
@@ -451,7 +498,24 @@ pub mod minimap {
                     "Большая карта — сглаживание вдали: {}",
                     "Carte du monde — lissage à distance : {}",
                     "Mapa del mundo — suavizado a distancia: {}",
+                    "Weltkarte — Glättung in der Ferne: {}",
                     on(self.smooth_worldmap)
+                ),
+                localized_format!(
+                    "Overworld coordinates: {}",
+                    "Координаты Верхнего мира: {}",
+                    "Coordonnées de la Surface : {}",
+                    "Coordenadas del mundo normal: {}",
+                    "Oberwelt-Koordinaten: {}",
+                    on(self.overworld_coordinates)
+                ),
+                localized_format!(
+                    "Nether coordinates: {}",
+                    "Координаты Незера: {}",
+                    "Coordonnées du Nether : {}",
+                    "Coordenadas del Nether: {}",
+                    "Nether-Koordinaten: {}",
+                    on(self.nether_coordinates)
                 ),
             ]
         }
@@ -472,6 +536,112 @@ pub mod minimap {
 }
 
 use minimap::Settings;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BiomeSymbol {
+    Unknown,
+    Water,
+    Desert,
+    Snow,
+    Forest,
+    Swamp,
+    Mushroom,
+    Cave,
+    Badlands,
+    Nether,
+    End,
+    Plains,
+}
+
+/// Built-in biome families use original pictograms; unknown/custom biomes stay explicit.
+pub fn biome_symbol(id: Option<&str>) -> BiomeSymbol {
+    use BiomeSymbol::*;
+    let Some(name) = id.and_then(|id| id.strip_prefix("minecraft:")) else {
+        return Unknown;
+    };
+    if name.contains("ocean") || name.contains("river") || name.contains("beach") {
+        Water
+    } else if name.contains("snow")
+        || name.contains("frozen")
+        || name.contains("ice")
+        || name.contains("peaks")
+        || name == "grove"
+    {
+        Snow
+    } else if name.contains("swamp") {
+        Swamp
+    } else if name.contains("mushroom") {
+        Mushroom
+    } else if name.contains("badlands") {
+        Badlands
+    } else if name.contains("desert") {
+        Desert
+    } else if [
+        "nether_wastes",
+        "soul_sand_valley",
+        "basalt_deltas",
+        "crimson_forest",
+        "warped_forest",
+    ]
+    .contains(&name)
+    {
+        Nether
+    } else if name == "the_end" || name.starts_with("end_") || name == "small_end_islands" {
+        End
+    } else if name.contains("forest")
+        || name.contains("taiga")
+        || name.contains("jungle")
+        || name.contains("cherry")
+        || name == "pale_garden"
+    {
+        Forest
+    } else if ["dripstone_caves", "lush_caves", "deep_dark"].contains(&name) {
+        Cave
+    } else if [
+        "plains",
+        "sunflower_plains",
+        "savanna",
+        "savanna_plateau",
+        "windswept_savanna",
+        "meadow",
+        "windswept_hills",
+        "windswept_gravelly_hills",
+        "stony_shore",
+    ]
+    .contains(&name)
+    {
+        Plains
+    } else {
+        Unknown
+    }
+}
+
+/// Portal-scale coordinates. Scale continuous X/Z before flooring, including
+/// negative coordinates; Y is unchanged. The End has no such portal mapping.
+pub fn portal_coordinates(from: Dimension, to: Dimension, at: [f64; 3]) -> Option<[i64; 3]> {
+    if !matches!(from, Dimension::Overworld | Dimension::Nether)
+        || !matches!(to, Dimension::Overworld | Dimension::Nether)
+        || !at.iter().all(|v| v.is_finite())
+    {
+        return None;
+    }
+    let [x, z] = from.convert(to, [at[0], at[2]]);
+    Some([x.floor() as i64, at[1].floor() as i64, z.floor() as i64])
+}
+
+pub fn coordinate_lines(settings: Settings, dimension: Dimension, at: [f64; 3]) -> Vec<String> {
+    [
+        (settings.overworld_coordinates, Dimension::Overworld),
+        (settings.nether_coordinates, Dimension::Nether),
+    ]
+    .into_iter()
+    .filter(|(enabled, _)| *enabled)
+    .filter_map(|(_, target)| {
+        portal_coordinates(dimension, target, at)
+            .map(|[x, y, z]| format!("{}: {x} {y} {z}", target.label()))
+    })
+    .collect()
+}
 
 fn cycle<T: Copy + PartialEq>(current: T, choices: &[T]) -> T {
     let index = choices.iter().position(|v| *v == current).unwrap_or(0);
@@ -562,7 +732,7 @@ impl Waypoint {
             .collect();
         let name = name.trim();
         if name.is_empty() {
-            tr("Waypoint", "Вейпоинт", "Repère", "Marcador").into()
+            tr("Waypoint", "Вейпоинт", "Repère", "Marcador", "Wegpunkt").into()
         } else {
             name.to_owned()
         }
@@ -746,6 +916,7 @@ impl Controller {
                     "Ошибка сохранения настроек: см. журнал клиента",
                     "Échec de l’enregistrement des réglages : voir le journal du client",
                     "Error al guardar los ajustes: consulta el registro del cliente",
+                    "Einstellungen konnten nicht gespeichert werden: siehe Client-Protokoll",
                 )
                 .into(),
             );
@@ -1289,7 +1460,8 @@ mod tests {
             "Failed",
             "Ошибка",
             "Échec",
-            "Error"
+            "Error",
+            "Fehler"
         )));
         assert_eq!(fs::read(&directory).unwrap(), b"not a directory");
         fs::remove_file(directory).unwrap();
@@ -2834,6 +3006,74 @@ mod map_regressions {
         }
     }
     #[test]
+    fn biome_pictograms_classify_ids_without_guessing_unknown_names() {
+        assert_eq!(biome_symbol(None), BiomeSymbol::Unknown);
+        assert_eq!(biome_symbol(Some("custom:forest")), BiomeSymbol::Unknown);
+        assert_eq!(
+            biome_symbol(Some("minecraft:crimson_forest")),
+            BiomeSymbol::Nether
+        );
+        assert_eq!(
+            biome_symbol(Some("minecraft:snowy_taiga")),
+            BiomeSymbol::Snow
+        );
+        assert_eq!(
+            biome_symbol(Some("minecraft:end_highlands")),
+            BiomeSymbol::End
+        );
+        assert_eq!(
+            biome_symbol(Some("minecraft:birch_forest")),
+            BiomeSymbol::Forest
+        );
+    }
+
+    #[test]
+    fn coordinate_toggles_persist_merge_and_reset_independently() {
+        let mut settings = Settings::default();
+        let mut edited = settings;
+        let mask = minimap::apply(&mut edited, 10);
+        minimap::merge(&mut settings, edited, mask);
+        assert!(!settings.overworld_coordinates && settings.nether_coordinates);
+        minimap::apply(&mut settings, 11);
+        assert_eq!(Settings::decode(&settings.encode()), settings);
+        assert!(coordinate_lines(settings, Dimension::Overworld, [0.0; 3]).is_empty());
+        let mask = minimap::apply(&mut edited, 6);
+        minimap::merge(&mut settings, edited, mask);
+        assert!(settings.overworld_coordinates && settings.nether_coordinates);
+        assert_eq!(
+            coordinate_lines(settings, Dimension::Nether, [0.0; 3]).len(),
+            2
+        );
+    }
+    #[test]
+    fn portal_coordinates_convert_before_flooring_and_never_scale_height() {
+        assert_eq!(
+            portal_coordinates(Dimension::Overworld, Dimension::Nether, [-0.5, 63.9, -8.1]),
+            Some([-1, 63, -2])
+        );
+        assert_eq!(
+            portal_coordinates(Dimension::Nether, Dimension::Overworld, [-0.5, -0.5, 1.25]),
+            Some([-4, -1, 10])
+        );
+        assert_eq!(
+            portal_coordinates(
+                Dimension::Overworld,
+                Dimension::Overworld,
+                [1.9, 64.0, -1.1]
+            ),
+            Some([1, 64, -2])
+        );
+        assert_eq!(
+            portal_coordinates(Dimension::End, Dimension::Overworld, [0.0; 3]),
+            None
+        );
+        assert_eq!(
+            portal_coordinates(Dimension::Overworld, Dimension::Nether, [f64::NAN; 3]),
+            None
+        );
+    }
+
+    #[test]
     fn smoothing_defaults_on_toggles_persists_and_resets() {
         let mut settings = Settings::decode("smooth_worldmap=invalid");
         assert!(settings.smooth_worldmap);
@@ -2841,7 +3081,7 @@ mod map_regressions {
         assert!(!Settings::decode(&settings.encode()).smooth_worldmap);
         minimap::apply(&mut settings, 6);
         assert!(settings.smooth_worldmap);
-        assert_eq!(settings.labels().len(), 10);
+        assert_eq!(settings.labels().len(), 12);
     }
     #[test]
     fn dimension_preferences_roundtrip_and_are_independent() {

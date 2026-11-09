@@ -65,9 +65,9 @@ impl Game<'_> {
         let directory=PathBuf::from(std::env::var("MINIMAP_FIXTURE_DATA").unwrap());
         let mut game=Game{original:std::array::from_fn(|_|Cell::new(0)),enabled:true,window:true,directory:directory.clone(),open:false,playing:true,binding:"key.keyboard.m".into(),lifetime:PhantomData};
         let mut mods=Vec::new();game.native_mods(&mut mods);game.native_mods(&mut mods);
-        assert_eq!(mods.len(),1);assert_eq!(mods[0].keys[0],[runtime::WORLD_MAP_KEY,runtime::tr("Open world map", "Открыть большую карту", "Ouvrir la carte du monde", "Abrir mapa del mundo"),runtime::WORLD_MAP_DEFAULT].map(str::to_owned));
+        assert_eq!(mods.len(),1);assert_eq!(mods[0].keys[0],[runtime::WORLD_MAP_KEY,runtime::tr("Open world map", "Открыть большую карту", "Ouvrir la carte du monde", "Abrir mapa del mundo", "Weltkarte öffnen"),runtime::WORLD_MAP_DEFAULT].map(str::to_owned));
         let mut buttons=Vec::new();game.native_settings("foreign",&mut buttons);assert!(buttons.is_empty());
-        game.native_settings(runtime::MOD_ID,&mut buttons);assert_eq!(buttons.len(),10);
+        game.native_settings(runtime::MOD_ID,&mut buttons);assert_eq!(buttons.len(),12);
         // The same controller changes labels without altering saved preferences.
         let original=runtime::initialize(directory.clone()).settings();
         runtime::set_language("ru_ru");
@@ -77,12 +77,12 @@ impl Game<'_> {
         assert_eq!(runtime::Dimension::Overworld.label(), "Overworld");
         assert!(runtime::initialize(directory.clone()).labels()[0].starts_with("Minimap:"));
         runtime::set_language("en_ca");
-        assert_eq!(runtime::tr("Waypoint", "Вейпоинт", "Repère", "Marcador"), "Waypoint");
+        assert_eq!(runtime::tr("Waypoint", "Вейпоинт", "Repère", "Marcador", "Wegpunkt"), "Waypoint");
         for code in ["en_us", "en_ca", "en_gb", "en_au", "EN-NZ"] {
             runtime::set_language(code);
             assert_eq!(runtime::Dimension::Player.label(), "Player");
         }
-        for (code, label, setting) in [("fr_fr", "Joueur", "Minicarte :"), ("fr_ca", "Joueur", "Minicarte :"), ("es_es", "Jugador", "Minimapa:"), ("es_mx", "Jugador", "Minimapa:")] {
+        for (code, label, setting) in [("fr_fr", "Joueur", "Minicarte :"), ("fr_ca", "Joueur", "Minicarte :"), ("es_es", "Jugador", "Minimapa:"), ("es_mx", "Jugador", "Minimapa:"), ("de_de", "Spieler", "Minikarte:"), ("de_at", "Spieler", "Minikarte:"), ("de_ch", "Spieler", "Minikarte:")] {
             runtime::set_language(code);
             assert_eq!(runtime::Dimension::Player.label(), label);
             assert!(runtime::initialize(directory.clone()).labels()[0].starts_with(setting));

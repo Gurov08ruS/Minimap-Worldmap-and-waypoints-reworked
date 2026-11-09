@@ -1,10 +1,37 @@
 # Minimap, Worldmap and waypoints reworked
 
 A native Horizon mod by [daniliammo](https://github.com/daniliammo).
-Version **0.4.1** adds English, Russian, French and Spanish interface translations
-and a directional player arrow on both maps. Regional language variants share
-their language’s translation.
+Version **0.5.0** adds German localization, dimension and biome pictograms,
+converted coordinates at the top of the world map, and a Show on map action for
+waypoints. The waypoint manager is translucent without blur; the full-screen
+map skips rendering the 3D world behind it.
 Old unscoped waypoints from 0.3.x are deleted on first load; preferences remain.
+
+## Screenshots
+
+### Minimap
+
+> Screenshot placeholder: minimap during gameplay, with the player arrow and waypoints.
+
+<!-- Add assets/screenshots/minimap.png, then replace the placeholder above with:
+![Minimap with player direction and waypoints](assets/screenshots/minimap.png)
+-->
+
+### World map
+
+> Screenshot placeholder: full-screen world map with terrain, dimension tabs and waypoints.
+
+<!-- Add assets/screenshots/world-map.png, then replace the placeholder above with:
+![Full-screen world map](assets/screenshots/world-map.png)
+-->
+
+### Waypoint manager
+
+> Screenshot placeholder: waypoint list with the Show on map action.
+
+<!-- Add assets/screenshots/waypoints.png, then replace the placeholder above with:
+![Waypoint manager](assets/screenshots/waypoints.png)
+-->
 
 ## Install
 
@@ -34,14 +61,29 @@ The script does not update a published release or registry entry.
 
 ## Language
 
-The interface follows the game language: Russian (`ru_*`), French (`fr_*`) and
-Spanish (`es_*`) use their respective translations, including regional variants.
+The interface follows the game language: Russian (`ru_*`), French (`fr_*`),
+Spanish (`es_*`) and German (`de_*`) use their respective translations, including regional variants.
 All English variants (`en_*`, including Canadian, British, US and Australian
 English) share the English translation. Other languages fall back to English. Change the game
 language in its language settings. Saved waypoint names are preserved as entered.
 
 ## Controls
 
+- The world map always shows the player's Overworld and Nether coordinates at
+  the top, independently of the minimap coordinate toggles. Unsupported portal
+  conversions are shown as unavailable. Coordinates under the mouse remain
+  separate from the player's coordinates.
+- Dimension tabs and map status use original pictograms. Biome icons represent
+  biome families; hover over a waypoint's biome icon for its localized name.
+  Waypoint biome samples are kept for the current connection when their chunks
+  are loaded. Unavailable or unrecognized biome data uses a question mark;
+  no terrain is requested from the server to fill it in.
+- The waypoint manager has a translucent background with menu blur disabled.
+- **Overworld coordinates** and **Nether coordinates** independently toggle the
+  coordinate lines below the minimap (both default on). X/Z convert by ×8/÷8
+  from the player’s actual dimension before rounding down; Y stays unchanged.
+  These lines are hidden in the End and custom dimensions, which have no such
+  portal mapping. The standalone dimension label below the minimap is removed.
 - **N** opens the waypoint manager; **M** opens the world map. **Escape** closes
   the open screen (a name prompt cancels first).
 - Rebind **Open world map** and **Waypoints** under **Options → Mods →
@@ -53,6 +95,12 @@ language in its language settings. Saved waypoint names are preserved as entered
   including built-in controls and other enabled native mods. Unbound and disabled
   native actions do not create warnings. Built-in binding tooltips also include
   native conflicts.
+- While the full-screen map (or its waypoint name prompt) is open, the client
+  skips preparing and drawing the 3D world and presents the map interface alone.
+  Network traffic, game updates and terrain sampling continue; this does not
+  pause the game. Closing the map restores world rendering on the next frame.
+  Loading/resource-reload screens and screenshot sequences keep Horizon’s normal
+  rendering path.
 - Drag the world map with the left mouse button; scroll to zoom at the cursor.
   Panning, zooming, the minimap's follow and the player marker ease between
   frames instead of snapping to mouse steps or server ticks.
@@ -66,7 +114,8 @@ language in its language settings. Saved waypoint names are preserved as entered
   Teleporting to another selected dimension uses `/execute in … run tp`.
 - The menu also shows **Delete waypoint** when the point is a waypoint. The
   waypoint manager (**N**) lists, renames and deletes waypoints; creation from
-  there uses the player's position.
+  there uses the player's position. Select a waypoint and choose **Show on map**
+  to open its dimension and center the map on it without teleporting.
 - Waypoints are saved with the preferences (newest 64 per world/server), drawn as first-letter
   markers on the HUD through walls, on both maps, and their full name appears
   when hovering over the marker on the world map.
@@ -116,7 +165,7 @@ blocks and moving pistons leave no map pixel. Nether portals, End portals and En
 gateways are recorded as map features and get their own markers.
 
 Unknown dimensions are not fetched from the server. Distant LOD, persistent
-history, manual Y selection, rectangle shape and world-border overlays remain
+history, manual Y selection and rectangle shape remain
 future stages in [PLAN.md](PLAN.md).
 
 The displayed camera is eased: drag and zoom targets are approached over a few
@@ -221,7 +270,7 @@ python3 tools/package.py
 
 Fetch the pinned Mixins checkout's dependencies with `cargo fetch --locked`
 before the offline checks. The output is
-`target/minimap_worldmap_waypoints_reworked-0.4.1.hnmod`.
+`target/minimap_worldmap_waypoints_reworked-0.5.0.hnmod`.
 Check it with `cargo horizon-mod check <file>` using Horizon's official
 `cargo-horizon-mod` tool. The [validation workflow](.github/workflows/validate.yml)
 runs the standalone tests, source audit, real client check and tests, and official

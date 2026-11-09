@@ -12,17 +12,38 @@ fn register(
     runtime::initialize(game.native_data_dir(runtime::MOD_ID));
     mods.push(crate::game::native_hooks::NativeMod {
         id: runtime::MOD_ID.into(),
-        title: format!("{} 0.4.1", runtime::MOD_TITLE),
-        description: tr("Adaptive minimap. Shape, size, position, scale and rotation.", "Адаптивная миникарта. Форма, размер, положение, масштаб и вращение.", "Minicarte adaptative. Forme, taille, position, échelle et rotation.", "Minimapa adaptable. Forma, tamaño, posición, escala y rotación.").into(),
+        title: format!("{} 0.5.0", runtime::MOD_TITLE),
+        description: tr(
+            "Adaptive minimap. Shape, size, position, scale and rotation.",
+            "Адаптивная миникарта. Форма, размер, положение, масштаб и вращение.",
+            "Minicarte adaptative. Forme, taille, position, échelle et rotation.",
+            "Minimapa adaptable. Forma, tamaño, posición, escala y rotación.",
+            "Anpassbare Minikarte. Form, Größe, Position, Maßstab und Drehung.",
+        )
+        .into(),
         keys: vec![
             [
                 runtime::WORLD_MAP_KEY.into(),
-                tr("Open world map", "Открыть большую карту", "Ouvrir la carte du monde", "Abrir mapa del mundo").into(),
+                tr(
+                    "Open world map",
+                    "Открыть большую карту",
+                    "Ouvrir la carte du monde",
+                    "Abrir mapa del mundo",
+                    "Weltkarte öffnen",
+                )
+                .into(),
                 runtime::WORLD_MAP_DEFAULT.into(),
             ],
             [
                 runtime::WAYPOINTS_KEY.into(),
-                tr("Waypoints", "Вейпоинты", "Repères", "Marcadores").into(),
+                tr(
+                    "Waypoints",
+                    "Вейпоинты",
+                    "Repères",
+                    "Marcadores",
+                    "Wegpunkte",
+                )
+                .into(),
                 runtime::WAYPOINTS_DEFAULT.into(),
             ],
         ],

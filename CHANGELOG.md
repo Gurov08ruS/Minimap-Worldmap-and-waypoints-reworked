@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.5.0 — 2026-11-09
+
+- Added German localization, including regional German variants.
+- Show both Overworld and Nether player coordinates above the world map;
+  removed mouse-drag and scroll navigation hints from the map interface.
+- Added original dimension and biome-family pictograms to the map and waypoint
+  manager, with localized biome tooltips and explicit unknown-data icons.
+- Added Show on map for selected waypoints, preserving zoom and centering on the
+  point in its dimension; adapted waypoint rows and controls to small viewports.
+- Made the waypoint manager translucent and disabled its background blur.
+- Added independent Overworld/Nether coordinate toggles below the minimap,
+  replacing the standalone dimension label, with correct negative rounding.
+- Skip world geometry preparation and rendering behind the full-screen map,
+  keeping game/network updates, texture uploads and interface rendering active.
+- Added README screenshot placeholders and documented the new interface.
+
 ## 0.4.1 — 2026-11-09
 
 - Added complete English, French and Spanish interface translations while keeping

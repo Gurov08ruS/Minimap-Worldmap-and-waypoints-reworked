@@ -4,11 +4,12 @@ use super::Game;
 use runtime::{Language, language, tr};
 
 macro_rules! localized_format {
-    ($en:literal, $ru:literal, $fr:literal, $es:literal $(, $arg:expr)* $(,)?) => {
+    ($en:literal, $ru:literal, $fr:literal, $es:literal, $de:literal $(, $arg:expr)* $(,)?) => {
         match language() {
             Language::Russian => format!($ru $(, $arg)*),
             Language::French => format!($fr $(, $arg)*),
             Language::Spanish => format!($es $(, $arg)*),
+            Language::German => format!($de $(, $arg)*),
             Language::English => format!($en $(, $arg)*),
         }
     };
@@ -32,7 +33,7 @@ enum Mode {
     Name,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct Spot {
     dimension: Dimension,
     x: i32,
@@ -99,6 +100,8 @@ struct State {
     notice: Option<(String, Instant)>,
     pending_copy: Option<String>,
     pending_command: Option<String>,
+    map_focus: Option<Spot>,
+    waypoint_biomes: BTreeMap<Spot, String>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -127,6 +130,8 @@ impl Default for State {
             notice: None,
             pending_copy: None,
             pending_command: None,
+            map_focus: None,
+            waypoint_biomes: BTreeMap::new(),
         }
     }
 }
@@ -140,9 +145,9 @@ fn state() -> std::sync::MutexGuard<'static, State> {
 fn rectangle(width: f32, height: f32) -> [f32; 4] {
     [
         12.0,
-        42.0,
+        72.0,
         (width - 24.0).max(1.0),
-        (height - 68.0).max(1.0),
+        (height - 98.0).max(1.0),
     ]
 }
 fn inside(mouse: [f32; 2], rect: [f32; 4]) -> bool {
@@ -277,6 +282,180 @@ fn portal_tint(kind: Portal) -> (u32, u8) {
     }
 }
 
+fn draw_icon(
+    game: &Game<'_>,
+    batch: &mut HudBatch,
+    at: [f32; 2],
+    rows: [&str; 8],
+    colors: [u32; 3],
+) {
+    for (y, row) in rows.iter().enumerate() {
+        let bytes = row.as_bytes();
+        let mut x = 0;
+        while x < bytes.len() {
+            let color = bytes[x];
+            let start = x;
+            while x < bytes.len() && bytes[x] == color {
+                x += 1;
+            }
+            if let Some(index) = color.checked_sub(b'1').filter(|i| *i < 3) {
+                game.native_fill(
+                    batch,
+                    [
+                        at[0] + start as f32,
+                        at[1] + y as f32,
+                        (x - start) as f32,
+                        1.0,
+                    ],
+                    colors[index as usize],
+                );
+            }
+        }
+    }
+}
+
+fn dimension_icon(game: &Game<'_>, batch: &mut HudBatch, dimension: Dimension, at: [f32; 2]) {
+    let (rows, colors) = match dimension {
+        Dimension::Player => (
+            [
+                "...11...", "..1111..", ".111111.", "...11...", "...11...", "...11...", "...11...",
+                "........",
+            ],
+            [0xffff6262, 0xffffffff, 0xffffffff],
+        ),
+        Dimension::Overworld => (
+            [
+                "........", "........", "11111111", "11111111", "22222222", "22322232", "23222322",
+                "22232222",
+            ],
+            [0xff68b34a, 0xff93643d, 0xffbc8a54],
+        ),
+        Dimension::Nether => (
+            [
+                ".111111.", ".122221.", ".123321.", ".123321.", ".123321.", ".122221.", ".111111.",
+                "........",
+            ],
+            [0xff44263f, 0xffb649cf, 0xffef9aff],
+        ),
+        Dimension::End => (
+            [
+                "...11...", ".112211.", "12233221", "12333321", ".123321.", "..1221..", "...11...",
+                "........",
+            ],
+            [0xffc6c78c, 0xff598f88, 0xff191d35],
+        ),
+    };
+    draw_icon(game, batch, at, rows, colors);
+}
+
+fn known_biome(game: &Game<'_>, dimension: Dimension, at: [i32; 3]) -> Option<String> {
+    let player = game.native_player()?;
+    if player.dimension != dimension.id()
+        || !game
+            .world
+            .chunks
+            .contains_key(&(at[0].div_euclid(16), at[2].div_euclid(16)))
+    {
+        return None;
+    }
+    game.native_biome(at)
+}
+
+fn localized_biome(id: &str) -> String {
+    horizon_client::lang::get_or(&format!("biome.{}", id.replace(':', ".")), id)
+}
+
+fn biome_icon(game: &Game<'_>, batch: &mut HudBatch, biome: Option<&str>, at: [f32; 2]) {
+    use runtime::BiomeSymbol::*;
+    let (rows, colors) = match runtime::biome_symbol(biome) {
+        Unknown => (
+            [
+                "..1111..", ".11..11.", ".....11.", "...111..", "...11...", "........", "...11...",
+                "........",
+            ],
+            [0xffaeb9c6, 0, 0],
+        ),
+        Water => (
+            [
+                "........", "1..11..1", ".11..11.", "........", "1..11..1", ".11..11.", "........",
+                "........",
+            ],
+            [0xff68b8ed, 0, 0],
+        ),
+        Desert => (
+            [
+                "..1.....", ".111....", "..1.....", ".....2..", "...2.22.", "...222..", ".....2..",
+                "33333333",
+            ],
+            [0xffffd65c, 0xff6b9952, 0xffd9b977],
+        ),
+        Snow => (
+            [
+                "...1....", ".1.1.1..", "..111...", "1111111.", "..111...", ".1.1.1..", "...1....",
+                "........",
+            ],
+            [0xffd2f0ff, 0, 0],
+        ),
+        Forest => (
+            [
+                "...1....", "..111...", ".11111..", "..111...", ".11111..", "1111111.", "...2....",
+                "...2....",
+            ],
+            [0xff4caa65, 0xff9b7045, 0],
+        ),
+        Swamp => (
+            [
+                "...1....", "..111...", ".11111..", "1.121.1.", "..121...", "...2....", "33333333",
+                ".33..33.",
+            ],
+            [0xff75964b, 0xff82664c, 0xff568c85],
+        ),
+        Mushroom => (
+            [
+                "..1111..", ".111111.", "11211211", "11111111", "...22...", "...22...", "...22...",
+                "........",
+            ],
+            [0xffce6262, 0xffeee3ca, 0],
+        ),
+        Badlands => (
+            [
+                ".....11.", "....1111", "..111111", ".2222222", "22222222", "33333333", "11111111",
+                "22222222",
+            ],
+            [0xffc9824a, 0xffb9553d, 0xffecd39b],
+        ),
+        Nether => (
+            [
+                "....1...", "...11...", ".1.112..", ".111122.", "11112221", "11122211", ".112211.",
+                "..1111..",
+            ],
+            [0xffd64e44, 0xffffb552, 0],
+        ),
+        End => (
+            [
+                "........", "...11...", "..1221..", ".122221.", "12233221", ".122221.", "..1111..",
+                "........",
+            ],
+            [0xffc8c78c, 0xffdddca8, 0xffa586c7],
+        ),
+        Cave => (
+            [
+                "..1111..", ".112211.", "11222211", "12222221", "12222221", "12222221", "11222211",
+                "11111111",
+            ],
+            [0xff9b8b85, 0xff333141, 0],
+        ),
+        Plains => (
+            [
+                "........", "...1....", "..121...", "...1....", "...3....", ".3.3....", "..33....",
+                "33333333",
+            ],
+            [0xfff0c763, 0xfffff3d0, 0xff70b65a],
+        ),
+    };
+    draw_icon(game, batch, at, rows, colors);
+}
+
 fn portal_label(kind: Portal) -> &'static str {
     match kind {
         Portal::Nether => tr(
@@ -284,18 +463,21 @@ fn portal_label(kind: Portal) -> &'static str {
             "Портал Незера",
             "Portail du Nether",
             "Portal del Nether",
+            "Netherportal",
         ),
         Portal::End => tr(
             "End portal",
             "Портал Энда",
             "Portail de l’End",
             "Portal del End",
+            "Endportal",
         ),
         Portal::Gateway => tr(
             "End gateway",
             "Врата Энда",
             "Passerelle de l’End",
             "Puerta de enlace del End",
+            "Endtransitportal",
         ),
     }
 }
@@ -572,6 +754,7 @@ fn portal_target_text(target: PortalTarget) -> String {
             "Верхний мир: точка спавна",
             "Surface : point d’apparition",
             "Mundo normal: punto de aparición",
+            "Oberwelt: Spawnpunkt",
         )
         .into(),
         PortalTarget::Outer => tr(
@@ -579,6 +762,7 @@ fn portal_target_text(target: PortalTarget) -> String {
             "Энд: внешние острова",
             "End : îles extérieures",
             "End: islas exteriores",
+            "Ende: äußere Inseln",
         )
         .into(),
         PortalTarget::Unknown => tr(
@@ -586,6 +770,7 @@ fn portal_target_text(target: PortalTarget) -> String {
             "назначение неизвестно",
             "destination inconnue",
             "destino desconocido",
+            "Unbekanntes Ziel",
         )
         .into(),
     }
@@ -613,7 +798,8 @@ fn menu_subtitle(
                     "unknown destination",
                     "назначение неизвестно",
                     "destination inconnue",
-                    "destino desconocido"
+                    "destino desconocido",
+                    "Unbekanntes Ziel"
                 )
                 .to_owned(),
                 portal_target_text
@@ -634,6 +820,7 @@ fn menu_items(
                 "Скопировать координаты",
                 "Copier les coordonnées",
                 "Copiar coordenadas",
+                "Koordinaten kopieren",
             ),
             MenuAction::Copy,
         ),
@@ -643,6 +830,7 @@ fn menu_items(
                 "Поставить вейпоинт",
                 "Créer un repère",
                 "Crear marcador",
+                "Wegpunkt erstellen",
             ),
             MenuAction::Waypoint,
         ),
@@ -654,6 +842,7 @@ fn menu_items(
                 "Скопировать координаты назначения",
                 "Copier les coordonnées de destination",
                 "Copiar coordenadas del destino",
+                "Zielkoordinaten kopieren",
             ),
             MenuAction::CopyDestination,
         ));
@@ -665,6 +854,7 @@ fn menu_items(
                 "Удалить вейпоинт",
                 "Supprimer le repère",
                 "Eliminar marcador",
+                "Wegpunkt löschen",
             ),
             MenuAction::DeleteWaypoint,
         ));
@@ -678,6 +868,7 @@ fn menu_items(
                         "Телепортироваться к порталу",
                         "Se téléporter au portail",
                         "Teletransportarse al portal",
+                        "Zum Portal teleportieren",
                     ),
                     MenuAction::TeleportDestination,
                 ));
@@ -689,6 +880,7 @@ fn menu_items(
                     "Телепортироваться туда",
                     "Se téléporter ici",
                     "Teletransportarse aquí",
+                    "Hierher teleportieren",
                 ),
                 MenuAction::Teleport,
             ));
@@ -765,6 +957,7 @@ fn default_waypoint_name(state: &State) -> String {
         "Вейпоинт {}",
         "Repère {}",
         "Marcador {}",
+        "Wegpunkt {}",
         state.waypoints.len() + 1
     )
 }
@@ -787,6 +980,7 @@ fn perform_menu(game: &Game<'_>, state: &mut State, menu: Menu, action: MenuActi
                     "Координаты скопированы",
                     "Coordonnées copiées",
                     "Coordenadas copiadas",
+                    "Koordinaten kopiert",
                 )
                 .into(),
                 Instant::now(),
@@ -817,6 +1011,7 @@ fn perform_menu(game: &Game<'_>, state: &mut State, menu: Menu, action: MenuActi
                         "Координаты назначения скопированы",
                         "Coordonnées de destination copiées",
                         "Coordenadas del destino copiadas",
+                        "Zielkoordinaten kopiert",
                     )
                     .into(),
                     Instant::now(),
@@ -861,6 +1056,7 @@ fn perform_menu(game: &Game<'_>, state: &mut State, menu: Menu, action: MenuActi
                         "Вейпоинт удалён",
                         "Repère supprimé",
                         "Marcador eliminado",
+                        "Wegpunkt gelöscht",
                     )
                     .into(),
                     Instant::now(),
@@ -976,25 +1172,80 @@ fn button(
     );
 }
 
-fn waypoint_row_at(state: &State, width: f32, index: usize) -> Option<[f32; 4]> {
+fn waypoint_visible_rows(height: f32) -> usize {
+    (((height - 90.0) / 28.0).floor() as usize).clamp(1, 12)
+}
+
+fn waypoint_row_at(state: &State, width: f32, height: f32, index: usize) -> Option<[f32; 4]> {
     let start = state.waypoint_scroll;
-    if index < start || index >= start + 12 {
+    if index < start || index >= start + waypoint_visible_rows(height) {
         return None;
     }
     let row = index - start;
     Some([
         12.0,
-        44.0 + row as f32 * 18.0,
+        44.0 + row as f32 * 28.0,
         (width - 24.0).max(1.0),
-        17.0,
+        27.0,
     ])
 }
 
+// Shared by drawing and hit testing, including narrow GUI viewports.
+fn waypoint_actions(width: f32, height: f32) -> [[f32; 4]; 3] {
+    let button_width = ((width - 36.0) / 3.0).max(1.0);
+    std::array::from_fn(|i| {
+        [
+            12.0 + i as f32 * (button_width + 6.0),
+            height - 42.0,
+            button_width,
+            18.0,
+        ]
+    })
+}
+
+fn show_selected_waypoint(state: &mut State) -> Option<Dimension> {
+    let waypoint = state.waypoints.get(state.waypoint_selected?)?;
+    if waypoint.world != state.world {
+        return None;
+    }
+    let spot = Spot {
+        dimension: waypoint.dimension,
+        x: waypoint.x,
+        z: waypoint.z,
+    };
+    state.map_focus = Some(spot);
+    state.mode = Mode::Map;
+    state.menu = None;
+    state.dragging = false;
+    state.elapsed = 1.0;
+    Some(spot.dimension)
+}
+
+// Apply after the normal dimension/mode transition so it cannot recenter on
+// the player and overwrite the requested waypoint on the following frame.
+fn apply_map_focus(state: &mut State, large: bool, selected: Dimension) {
+    if large
+        && let Some(spot) = state.map_focus.take()
+        && spot.dimension == selected
+    {
+        state
+            .camera
+            .snap([f64::from(spot.x) + 0.5, f64::from(spot.z) + 0.5]);
+        state.frame = None;
+    }
+}
+
 fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
-    game.native_fill(batch, [0.0, 0.0, batch.width, batch.height], 0xff11151b);
+    game.native_fill(batch, [0.0, 0.0, batch.width, batch.height], 0xa611151b);
     game.native_text(
         batch,
-        tr("Waypoints", "Вейпоинты", "Repères", "Marcadores"),
+        tr(
+            "Waypoints",
+            "Вейпоинты",
+            "Repères",
+            "Marcadores",
+            "Wegpunkte",
+        ),
         [12.0, 8.0],
         0xffffff,
         true,
@@ -1006,7 +1257,13 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         game,
         batch,
         create,
-        tr("Create here", "Создать здесь", "Créer ici", "Crear aquí"),
+        tr(
+            "Create here",
+            "Создать здесь",
+            "Créer ici",
+            "Crear aquí",
+            "Hier erstellen",
+        ),
         mouse,
         true,
     );
@@ -1014,7 +1271,7 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         game,
         batch,
         back,
-        tr("Back", "Назад", "Retour", "Volver"),
+        tr("Back", "Назад", "Retour", "Volver", "Zurück"),
         mouse,
         true,
     );
@@ -1027,14 +1284,16 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
                 "Вейпоинтов пока нет. ПКМ на карте или «Создать здесь».",
                 "Aucun repère. Faites un clic droit sur la carte ou choisissez « Créer ici ».",
                 "Aún no hay marcadores. Haz clic derecho en el mapa o elige «Crear aquí».",
+                "Noch keine Wegpunkte. Rechtsklick auf die Karte oder „Hier erstellen“ wählen.",
             ),
             [16.0, 50.0],
             0xaaaaaa,
             true,
         );
     }
+    let mut biome_tooltip = None;
     for (index, waypoint) in state.waypoints.iter().enumerate() {
-        let Some(row) = waypoint_row_at(state, batch.width, index) else {
+        let Some(row) = waypoint_row_at(state, batch.width, batch.height, index) else {
             continue;
         };
         let selected = state.waypoint_selected == Some(index);
@@ -1043,18 +1302,23 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         } else if inside(mouse, row) {
             game.native_fill(batch, row, 0xff222b35);
         }
-        let letter = format!("[{}]", first_letter(&waypoint.name));
-        game.native_text(
+        dimension_icon(
+            game,
             batch,
-            &letter,
-            [row[0] + 6.0, row[1] + 5.0],
-            0xffffd24a,
-            true,
+            waypoint.dimension,
+            [row[0] + 5.0, row[1] + 4.0],
         );
+        let spot = Spot {
+            dimension: waypoint.dimension,
+            x: waypoint.x,
+            z: waypoint.z,
+        };
+        let biome = state.waypoint_biomes.get(&spot).map(String::as_str);
+        biome_icon(game, batch, biome, [row[0] + 18.0, row[1] + 4.0]);
         game.native_text(
             batch,
             &waypoint.name,
-            [row[0] + 30.0, row[1] + 5.0],
+            [row[0] + 32.0, row[1] + 3.0],
             0xffffff,
             false,
         );
@@ -1067,22 +1331,34 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
                 waypoint.y,
                 waypoint.z
             ),
-            [row[0] + 260.0, row[1] + 5.0],
+            [row[0] + 32.0, row[1] + 15.0],
             0xaaaaaa,
             false,
         );
+        if inside(mouse, [row[0] + 17.0, row[1] + 3.0, 10.0, 10.0]) {
+            let label = biome.map_or_else(
+                || tr("Biome: —", "биом: —", "Biome : —", "Bioma: —", "Biom: —").to_owned(),
+                localized_biome,
+            );
+            biome_tooltip = Some(label);
+        }
     }
     let bottom = batch.height - 42.0;
     let selected = state
         .waypoint_selected
         .and_then(|index| state.waypoints.get(index));
-    let rename = [12.0, bottom, 120.0, 18.0];
-    let delete = [138.0, bottom, 100.0, 18.0];
+    let [rename, delete, show] = waypoint_actions(batch.width, batch.height);
     button(
         game,
         batch,
         rename,
-        tr("Rename", "Переименовать", "Renommer", "Cambiar nombre"),
+        tr(
+            "Rename",
+            "Переименовать",
+            "Renommer",
+            "Cambiar nombre",
+            "Umbenennen",
+        ),
         mouse,
         selected.is_some(),
     );
@@ -1090,18 +1366,36 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         game,
         batch,
         delete,
-        tr("Delete", "Удалить", "Supprimer", "Eliminar"),
+        tr("Delete", "Удалить", "Supprimer", "Eliminar", "Löschen"),
+        mouse,
+        selected.is_some(),
+    );
+    button(
+        game,
+        batch,
+        show,
+        tr(
+            "Show on map",
+            "Показать на карте",
+            "Voir sur la carte",
+            "Ver en el mapa",
+            "Auf Karte zeigen",
+        ),
         mouse,
         selected.is_some(),
     );
     let hint = tr(
-        "Scroll to browse; select a waypoint to see its name and coordinates",
-        "Колесо — прокрутка; у выбранной точки есть имя и координаты",
-        "Faites défiler ; sélectionnez un repère pour voir son nom et ses coordonnées",
-        "Desplázate; selecciona un marcador para ver su nombre y coordenadas",
+        "Select a waypoint to see its name and coordinates",
+        "Выберите точку, чтобы увидеть её имя и координаты",
+        "Sélectionnez un repère pour voir son nom et ses coordonnées",
+        "Selecciona un marcador para ver su nombre y coordenadas",
+        "Wegpunkt auswählen, um Namen und Koordinaten anzuzeigen",
     );
-    game.native_text(batch, hint, [250.0, bottom + 5.0], 0x888f98, true);
+    game.native_text(batch, hint, [12.0, bottom + 24.0], 0x888f98, true);
     draw_notice(game, batch, state);
+    if let Some(label) = biome_tooltip {
+        draw_tooltip(game, batch, &label, mouse);
+    }
 }
 
 fn draw_name_form(game: &Game<'_>, batch: &mut HudBatch, state: &State, form: &NameForm) {
@@ -1133,6 +1427,7 @@ fn draw_name_form(game: &Game<'_>, batch: &mut HudBatch, state: &State, form: &N
                 "Новое имя вейпоинта",
                 "Renommer le repère",
                 "Cambiar nombre del marcador",
+                "Wegpunkt umbenennen",
             )
         } else {
             tr(
@@ -1140,6 +1435,7 @@ fn draw_name_form(game: &Game<'_>, batch: &mut HudBatch, state: &State, form: &N
                 "Название вейпоинта",
                 "Nom du repère",
                 "Nombre del marcador",
+                "Wegpunktname",
             )
         },
         [rect[0] + 10.0, rect[1] + 8.0],
@@ -1172,7 +1468,7 @@ fn draw_name_form(game: &Game<'_>, batch: &mut HudBatch, state: &State, form: &N
         game,
         batch,
         save,
-        tr("Save", "Сохранить", "Enregistrer", "Guardar"),
+        tr("Save", "Сохранить", "Enregistrer", "Guardar", "Speichern"),
         mouse,
         true,
     );
@@ -1180,7 +1476,7 @@ fn draw_name_form(game: &Game<'_>, batch: &mut HudBatch, state: &State, form: &N
         game,
         batch,
         cancel,
-        tr("Cancel", "Отмена", "Annuler", "Cancelar"),
+        tr("Cancel", "Отмена", "Annuler", "Cancelar", "Abbrechen"),
         mouse,
         true,
     );
@@ -1191,6 +1487,7 @@ fn draw_name_form(game: &Game<'_>, batch: &mut HudBatch, state: &State, form: &N
             "Enter — сохранить, Esc — отмена",
             "Entrée — enregistrer, Échap — annuler",
             "Intro — guardar, Esc — cancelar",
+            "Eingabe — speichern, Esc — abbrechen",
         ),
         [rect[0] + 10.0, rect[1] + rect[3] - 19.0],
         0x888f98,
@@ -1527,12 +1824,45 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
     if !large {
         state.camera.follow(position);
     }
+    apply_map_focus(&mut state, large, selected);
     let dt = elapsed.as_secs_f64();
     state.camera.advance(dt);
     state.marker = maps::follow_point(state.marker, position, dt);
     state.elapsed += dt;
     if state.elapsed >= 0.05 {
         state.elapsed = 0.0;
+        let known: Vec<_> = state
+            .waypoints
+            .iter()
+            .filter_map(|waypoint| {
+                known_biome(
+                    game,
+                    waypoint.dimension,
+                    [waypoint.x, waypoint.y, waypoint.z],
+                )
+                .map(|biome| {
+                    (
+                        Spot {
+                            dimension: waypoint.dimension,
+                            x: waypoint.x,
+                            z: waypoint.z,
+                        },
+                        biome,
+                    )
+                })
+            })
+            .collect();
+        let spots: Vec<_> = state
+            .waypoints
+            .iter()
+            .map(|w| Spot {
+                dimension: w.dimension,
+                x: w.x,
+                z: w.z,
+            })
+            .collect();
+        state.waypoint_biomes.retain(|spot, _| spots.contains(spot));
+        state.waypoint_biomes.extend(known);
         let cx = (player.x.floor() as i32).div_euclid(16);
         let cz = (player.z.floor() as i32).div_euclid(16);
         let mut chunks: Vec<_> = game
@@ -1813,15 +2143,39 @@ pub(super) fn hud(game: &mut Game<'_>, batch: &mut HudBatch, corners: &mut Corne
             };
             if game.native_corner_shown(corner) {
                 let state = state();
-                let (x, y) = corners.place(corner, size, size + 12.0);
-                draw(game, batch, &state, [x, y, size, size], false, None);
-                game.native_text(
-                    batch,
-                    state.selected.label(),
-                    [x, y + size + 2.0],
-                    0xdddddd,
-                    true,
-                );
+                let lines = game.native_player().map_or_else(Vec::new, |player| {
+                    let dimension = match player.dimension {
+                        "minecraft:overworld" => Dimension::Overworld,
+                        "minecraft:the_nether" => Dimension::Nether,
+                        _ => return Vec::new(),
+                    };
+                    runtime::coordinate_lines(settings, dimension, [player.x, player.y, player.z])
+                });
+                let footer = if lines.is_empty() {
+                    0.0
+                } else {
+                    lines.len() as f32 * 12.0 + 2.0
+                };
+                let width = lines
+                    .iter()
+                    .map(|line| game.native_text_width(line))
+                    .fold(size, f32::max);
+                let (x, y) = corners.place(corner, width, size + footer);
+                let map_x = if matches!(corner, Corner::TopRight | Corner::BottomRight) {
+                    x + width - size
+                } else {
+                    x
+                };
+                draw(game, batch, &state, [map_x, y, size, size], false, None);
+                for (index, line) in lines.iter().enumerate() {
+                    game.native_text(
+                        batch,
+                        line,
+                        [x, y + size + 2.0 + index as f32 * 12.0],
+                        0xdddddd,
+                        true,
+                    );
+                }
             }
         }
     }
@@ -1913,13 +2267,20 @@ fn draw(
         }
     }
     let text = if valid.is_some() {
-        tr("No data", "Нет данных", "Aucune donnée", "Sin datos")
+        tr(
+            "No data",
+            "Нет данных",
+            "Aucune donnée",
+            "Sin datos",
+            "Keine Daten",
+        )
     } else {
         tr(
             "Preparing map…",
             "Подготовка карты…",
             "Préparation de la carte…",
             "Preparando mapa…",
+            "Karte wird vorbereitet…",
         )
     };
     game.native_text(
@@ -1936,7 +2297,7 @@ fn draw(
 
 fn tab(width: f32, index: usize) -> [f32; 4] {
     let w = ((width - 24.0) / 4.0).max(1.0);
-    [12.0 + w * index as f32, 21.0, (w - 2.0).max(1.0), 18.0]
+    [12.0 + w * index as f32, 51.0, (w - 2.0).max(1.0), 18.0]
 }
 
 fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
@@ -1948,20 +2309,42 @@ fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             "Карта мира",
             "Carte du monde",
             "Mapa del mundo",
+            "Weltkarte",
         ),
         [12.0, 8.0],
         0xffffff,
         true,
     );
+    for (index, dimension) in [Dimension::Overworld, Dimension::Nether]
+        .into_iter()
+        .enumerate()
+    {
+        let y = 23.0 + index as f32 * 12.0;
+        dimension_icon(game, batch, dimension, [12.0, y]);
+        let coordinates = game.native_player().and_then(|player| {
+            let source = match player.dimension {
+                "minecraft:overworld" => Dimension::Overworld,
+                "minecraft:the_nether" => Dimension::Nether,
+                _ => return None,
+            };
+            runtime::portal_coordinates(source, dimension, [player.x, player.y, player.z])
+        });
+        let text = coordinates.map_or_else(
+            || format!("{}: —", dimension.label()),
+            |[x, y, z]| format!("{}: X {x}  Y {y}  Z {z}", dimension.label()),
+        );
+        game.native_text(batch, &text, [26.0, y], 0xdddddd, true);
+    }
     let settings = runtime::initialize(game.native_data_dir(runtime::MOD_ID)).settings();
     for (i, dim) in Dimension::ALL.into_iter().enumerate() {
         let rect = tab(batch.width, i);
         let active = dim == settings.world_dimension;
         game.native_fill(batch, rect, if active { 0xff32624b } else { 0xff29323e });
+        dimension_icon(game, batch, dim, [rect[0] + 4.0, rect[1] + 5.0]);
         game.native_text(
             batch,
             dim.label(),
-            [rect[0] + 4.0, rect[1] + 5.0],
+            [rect[0] + 16.0, rect[1] + 5.0],
             0xffffff,
             false,
         );
@@ -1997,10 +2380,7 @@ fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
                 match game.native_player() {
                     Some(player) => {
                         let y = height.unwrap_or(player.y.floor() as i32);
-                        game.native_biome([block[0], y, block[1]]).map(|id| {
-                            let key = format!("biome.{}", id.replace(':', "."));
-                            horizon_client::lang::get_or(&key, &id)
-                        })
+                        known_biome(game, state.dimension, [block[0], y, block[1]])
                     }
                     None => None,
                 }
@@ -2022,25 +2402,30 @@ fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             biome_status = biome;
         }
     }
-    let biome_line = biome_status.map_or_else(
-        || tr("Biome: —", "биом: —", "Biome : —", "Bioma: —").into(),
-        |biome| {
-            localized_format!(
-                "Biome: {biome}",
-                "Биом: {biome}",
-                "Biome : {biome}",
-                "Bioma: {biome}"
-            )
-        },
+    dimension_icon(game, batch, state.selected, [12.0, batch.height - 20.0]);
+    let dimension_label = state.selected.label();
+    game.native_text(
+        batch,
+        dimension_label,
+        [24.0, batch.height - 20.0],
+        0xcccccc,
+        true,
+    );
+    let biome_x = 32.0 + game.native_text_width(dimension_label);
+    biome_icon(
+        game,
+        batch,
+        biome_status.as_deref(),
+        [biome_x, batch.height - 20.0],
+    );
+    let biome_line = biome_status.as_deref().map_or_else(
+        || tr("Biome: —", "биом: —", "Biome : —", "Bioma: —", "Biom: —").to_owned(),
+        localized_biome,
     );
     game.native_text(
         batch,
-        &localized_format!("{} | {} | {:.2} blocks/GUI px | Left drag: pan | Right-click: menu | Scroll: zoom", "{} | {} | {:.2} бл./GUI px | ЛКМ: перемещение | ПКМ: меню | Колесо: масштаб", "{} | {} | {:.2} blocs/px d’interface | Glisser : déplacer | Clic droit : menu | Molette : zoom", "{} | {} | {:.2} bloques/px de interfaz | Arrastrar: mover | Clic derecho: menú | Rueda: zoom",
-            state.selected.label(),
-            biome_line,
-            state.camera.zoom
-        ),
-        [12.0, batch.height - 20.0],
+        &biome_line,
+        [biome_x + 12.0, batch.height - 20.0],
         0xcccccc,
         true,
     );
@@ -2051,6 +2436,7 @@ fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             "M: карта, N: вейпоинты, Esc: закрыть",
             "M : carte, N : repères, Échap : fermer",
             "M: mapa, N: marcadores, Esc: cerrar",
+            "M: Karte, N: Wegpunkte, Esc: schließen",
         ),
         [12.0, batch.height - 10.0],
         0xaaaaaa,
@@ -2058,6 +2444,37 @@ fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     );
     draw_menu(game, batch, state);
     draw_notice(game, batch, state);
+}
+
+// Only the map and its name prompt cover the world. Other screens keep
+// Horizon's normal rendering and overlay priorities.
+fn map_covers_world(state: &State) -> bool {
+    state.mode == Mode::Map
+        || (state.mode == Mode::Name
+            && state
+                .name_form
+                .as_ref()
+                .is_some_and(|form| form.background == Mode::Map))
+}
+
+pub(super) fn transparent_waypoints(game: &Game<'_>) -> bool {
+    if !game.native_on(runtime::MOD_ID) || game.native_mod_screen() != Some(runtime::MOD_ID) {
+        return false;
+    }
+    let state = state();
+    state.mode == Mode::Waypoints
+        || (state.mode == Mode::Name
+            && state
+                .name_form
+                .as_ref()
+                .is_some_and(|form| form.background == Mode::Waypoints))
+}
+
+pub(super) fn covers_world(game: &Game<'_>) -> bool {
+    game.native_on(runtime::MOD_ID)
+        && game.native_mod_screen() == Some(runtime::MOD_ID)
+        && game.native_player().is_some()
+        && map_covers_world(&state())
 }
 
 pub(super) fn screen(game: &Game<'_>, batch: &mut HudBatch) {
@@ -2271,7 +2688,7 @@ fn waypoint_press(
         return;
     }
     for index in 0..state.waypoints.len() {
-        if let Some(row) = waypoint_row_at(state, screen.rect[2], index)
+        if let Some(row) = waypoint_row_at(state, screen.rect[2], screen.rect[3], index)
             && inside(screen.mouse, row)
         {
             state.waypoint_selected = Some(index);
@@ -2279,9 +2696,15 @@ fn waypoint_press(
             return;
         }
     }
-    let bottom = screen.rect[3] - 42.0;
-    let rename = [12.0, bottom, 120.0, 18.0];
-    let delete = [138.0, bottom, 100.0, 18.0];
+    let [rename, delete, show] = waypoint_actions(screen.rect[2], screen.rect[3]);
+    if inside(screen.mouse, show) {
+        if let Some(dimension) = show_selected_waypoint(state) {
+            runtime::initialize(game.native_data_dir(runtime::MOD_ID))
+                .choose_dimension(true, dimension);
+        }
+        *canceled = true;
+        return;
+    }
     if inside(screen.mouse, rename)
         && let Some(index) = state.waypoint_selected
         && let Some(waypoint) = state.waypoints.get(index)
@@ -2317,6 +2740,7 @@ fn waypoint_press(
                 "Вейпоинт удалён",
                 "Repère supprimé",
                 "Marcador eliminado",
+                "Wegpunkt gelöscht",
             )
             .into(),
             Instant::now(),
@@ -2383,6 +2807,7 @@ fn save_name(game: &Game<'_>, state: &mut State) {
                 "Имя вейпоинта изменено",
                 "Repère renommé",
                 "Nombre del marcador cambiado",
+                "Wegpunkt umbenannt",
             )
             .into(),
             Instant::now(),
@@ -2403,6 +2828,7 @@ fn save_name(game: &Game<'_>, state: &mut State) {
                     "Вейпоинт сохранён",
                     "Repère enregistré",
                     "Marcador guardado",
+                    "Wegpunkt gespeichert",
                 )
             } else {
                 tr(
@@ -2410,6 +2836,7 @@ fn save_name(game: &Game<'_>, state: &mut State) {
                     "Вейпоинт не изменён: дубликат, лимит или мир недоступен",
                     "Repère inchangé : doublon, limite atteinte ou monde indisponible",
                     "Marcador sin cambios: duplicado, límite alcanzado o mundo no disponible",
+                    "Wegpunkt unverändert: Duplikat, Grenze erreicht oder Welt nicht verfügbar",
                 )
             }
             .into(),
@@ -2454,7 +2881,10 @@ pub(super) fn scroll(
     }
     let mut state = state();
     if state.mode == Mode::Waypoints {
-        let rows = state.waypoints.len().saturating_sub(12);
+        let rows = state
+            .waypoints
+            .len()
+            .saturating_sub(waypoint_visible_rows(screen.rect[3]));
         let next = (state.waypoint_scroll as i32 - scroll[1] as i32).clamp(0, rows as i32);
         state.waypoint_scroll = next as usize;
         *canceled = true;
@@ -2547,4 +2977,92 @@ pub(super) fn disconnect(game: &Game<'_>) {
 
 pub(super) fn atlas_invalidated() {
     state().uploaded = (0, 0);
+}
+
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+
+    #[test]
+    fn showing_waypoint_survives_dimension_transition_and_preserves_zoom() {
+        let mut state = State {
+            world: "save:test".into(),
+            mode: Mode::Waypoints,
+            ..State::default()
+        };
+        assert_eq!(show_selected_waypoint(&mut state), None);
+        state.waypoints.push(Waypoint {
+            world: state.world.clone(),
+            dimension: Dimension::Nether,
+            x: -101,
+            y: 64,
+            z: 230,
+            name: "Base".into(),
+        });
+        state.waypoint_selected = Some(0);
+        let zoom = state.camera.zoom;
+        assert_eq!(show_selected_waypoint(&mut state), Some(Dimension::Nether));
+        assert!(state.mode == Mode::Map);
+        state.camera.snap([1000.0, 1000.0]); // normal mode/dimension transition
+        apply_map_focus(&mut state, true, Dimension::Nether);
+        assert_eq!(state.camera.center, [-100.5, 230.5]);
+        assert_eq!(state.camera.target, state.camera.center);
+        assert_eq!(state.camera.zoom, zoom);
+        assert!(state.map_focus.is_none());
+        state.camera.snap([1.0, 2.0]);
+        apply_map_focus(&mut state, true, Dimension::Nether);
+        assert_eq!(state.camera.center, [1.0, 2.0]); // one-shot, panning remains possible
+        state.world = "save:other".into();
+        assert_eq!(show_selected_waypoint(&mut state), None);
+    }
+
+    #[test]
+    fn waypoint_actions_fit_small_viewports_and_do_not_overlap_rows() {
+        for width in [320.0, 640.0] {
+            for height in [240.0, 480.0] {
+                let actions = waypoint_actions(width, height);
+                assert!(actions[2][0] + actions[2][2] <= width - 12.0 + 0.01);
+                assert!(actions[0][0] + actions[0][2] < actions[1][0]);
+                let state = State::default();
+                let rows = waypoint_visible_rows(height);
+                let row = waypoint_row_at(&state, width, height, rows - 1).unwrap();
+                assert!(row[1] + row[3] < actions[0][1]);
+                assert!(waypoint_row_at(&state, width, height, rows).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn map_header_coordinates_tabs_and_terrain_do_not_overlap() {
+        for width in [320.0, 640.0] {
+            let map = rectangle(width, 240.0);
+            for index in 0..4 {
+                let tab = tab(width, index);
+                assert!(tab[1] >= 35.0 + 8.0);
+                assert!(tab[1] + tab[3] < map[1]);
+            }
+            assert!(map[3] > 0.0);
+        }
+    }
+
+    #[test]
+    fn only_map_and_its_prompt_cover_the_world() {
+        let mut state = State::default();
+        assert!(map_covers_world(&state));
+        state.mode = Mode::Waypoints;
+        assert!(!map_covers_world(&state));
+        state.mode = Mode::Name;
+        assert!(!map_covers_world(&state));
+        state.name_form = Some(NameForm {
+            text: String::new(),
+            target: None,
+            rename: None,
+            background: Mode::Map,
+        });
+        assert!(map_covers_world(&state));
+        state.name_form.as_mut().unwrap().background = Mode::Waypoints;
+        assert!(!map_covers_world(&state));
+        state.mode = Mode::Map;
+        assert!(map_covers_world(&state));
+    }
 }

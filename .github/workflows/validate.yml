@@ -87,7 +87,7 @@ jobs:
           cmp target/package-first.json target/package-second.json
           cargo build --locked --offline --manifest-path target/mixins/modded/Cargo.toml -p cargo-horizon-mod --target-dir target/horizon-cargo
           export PATH="$PWD/target/horizon-cargo/debug:$PATH"
-          cargo horizon-mod check target/minimap_worldmap_waypoints_reworked-0.4.1.hnmod --json | tee target/package-check.json
+          cargo horizon-mod check target/minimap_worldmap_waypoints_reworked-0.5.0.hnmod --json | tee target/package-check.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:

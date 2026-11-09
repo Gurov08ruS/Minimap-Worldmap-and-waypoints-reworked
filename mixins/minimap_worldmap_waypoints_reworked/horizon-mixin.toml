@@ -1,6 +1,6 @@
 [mod]
 id = "minimap_worldmap_waypoints_reworked"
-version = "0.4.1"
+version = "0.5.0"
 priority = 100
 
 [compatibility]
@@ -165,3 +165,19 @@ kind="HEAD"
 target="horizon_client::game::Game<'_>::forget_atlas_slots"
 helper="atlas.rs"
 bindings=[]
+
+[[injection]]
+id = "map-render-only"
+kind = "HEAD"
+cancellable = true
+target = "horizon_client::game::Game<'_>::render_frame"
+helper = "render.rs"
+bindings = [{ name = "game", ty = "&mut crate::game::Game<'_>", value = "self" }]
+
+[[injection]]
+id = "waypoints-no-blur"
+kind = "HEAD"
+cancellable = true
+target = "horizon_client::game::native_hooks::Game<'_>::native_menu_background"
+helper = "menu_background.rs"
+bindings = [{ name = "game", ty = "&crate::game::Game<'_>", value = "self" }, { name = "radius", ty = "&mut Option<f32>", value = "radius" }]

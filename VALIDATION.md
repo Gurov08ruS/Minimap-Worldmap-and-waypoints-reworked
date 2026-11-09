@@ -1,5 +1,28 @@
 # Validation
 
+## 0.5.0 — local validation, 2026-11-09
+
+Local Linux, Rust 1.95.0, unchanged pinned Horizon and Mixins revisions.
+
+- Formatting, clippy with warnings denied and locked offline workspace tests:
+  pass (40 tests; one manual benchmark ignored).
+- Template integration: pass, including German regional variants and the
+  coordinate settings alongside the existing language and persistence checks.
+- Deterministic staging and source audit: pass; original checkout unchanged.
+- Actual Horizon client check and runtime tests: pass (40 tests).
+- Four client adapter tests: pass, covering map header layout, waypoint layout,
+  centering a selected waypoint across dimension transitions, preserved zoom,
+  and the screens eligible for rendering without the world.
+- Official package check and byte-reproducible packaging: pass.
+  Source bundle: 79,909 bytes; SHA-256
+  `f152cbb7f45fb09697d18009ad5d3c96428b9fbf144ba79c0f0ab5ae35ba8006`.
+
+The new pictograms are original code-drawn assets. Waypoint biome samples live
+only in the current connection's RAM and are collected from loaded chunks in
+the player's actual dimension. Missing/custom biome icons use a question mark.
+No live-game visual review, FPS measurement or macOS/Windows run was performed.
+Registry review was not repeated. This version has not been pushed or published.
+
 ## 0.4.1 — 2026-11-09
 
 Local Linux, Rust 1.95.0, unchanged pinned Horizon and Mixins revisions.
