@@ -1,5 +1,24 @@
 # Validation
 
+## 0.4.1 — 2026-11-09
+
+Local Linux, Rust 1.95.0, unchanged pinned Horizon and Mixins revisions.
+
+- Formatting, clippy with warnings denied and locked offline workspace tests:
+  pass (37 tests; one manual benchmark ignored).
+- Template integration: pass, including English regional variants, Russian,
+  French and Spanish regional variants, and settings preserved across switches.
+- Deterministic staging and source audit: pass; original checkout unchanged.
+- Real Horizon client check and runtime tests: pass (37 tests).
+- Official `cargo horizon-mod check`: pass. Repeated packaging is byte-identical.
+  Source bundle: 72,483 bytes; SHA-256
+  `93b92a321377227840d5adbb21a21b968b0d4d124e8f64de3bffeccf9eada6f8`.
+- Player heading regression covers cardinal directions, rotating minimaps and
+  a viewport with unequal horizontal and vertical scales.
+
+No live-game review or macOS/Windows run was performed for this release.
+Registry review was not repeated for this release.
+
 ## 0.4.0 — 2026-11-08
 
 - Standalone formatting, clippy (`-D warnings`) and locked offline tests: pass,

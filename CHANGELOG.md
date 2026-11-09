@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.1 — 2026-11-09
+
+- Added complete English, French and Spanish interface translations while keeping
+  Russian. The interface follows the game language, including regional French
+  and Spanish variants. Canadian, British, Australian and other English variants
+  share the English translation; unsupported languages fall back to English.
+- Replaced the square player marker with an outlined directional arrow on both
+  maps. The arrow follows the player's yaw and accounts for minimap rotation.
+- Translated the README fully into English and documented language selection.
+- Added regressions for regional language switching, preserved settings and
+  player headings on fixed and rotating maps.
+
 ## 0.4.0 — 2026-11-08
 
 - Waypoint storage, display, create, rename and delete now include the stable

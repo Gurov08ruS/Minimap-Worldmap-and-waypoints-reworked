@@ -34,7 +34,7 @@ def assert_plan(plan):
     assert {x['name'] for x in plan['modules']} == {x['name'] for x in manifest['module']}
     assert all(x['mod_id'] == manifest['mod']['id'] for x in plan['injections'])
 
-FIXTURE_LIB = 'pub mod game;\n'
+FIXTURE_LIB = 'extern crate self as horizon_client;\npub mod lang { pub fn code() -> String { std::env::var("MINIMAP_FIXTURE_LANGUAGE").unwrap_or_else(|_| "en_us".into()) } }\npub mod game;\n'
 FIXTURE_GAME = """
 use std::{cell::Cell, marker::PhantomData, path::PathBuf};
 pub(crate) mod native_hooks;
@@ -65,9 +65,30 @@ impl Game<'_> {
         let directory=PathBuf::from(std::env::var("MINIMAP_FIXTURE_DATA").unwrap());
         let mut game=Game{original:std::array::from_fn(|_|Cell::new(0)),enabled:true,window:true,directory:directory.clone(),open:false,playing:true,binding:"key.keyboard.m".into(),lifetime:PhantomData};
         let mut mods=Vec::new();game.native_mods(&mut mods);game.native_mods(&mut mods);
-        assert_eq!(mods.len(),1);assert_eq!(mods[0].keys[0],[runtime::WORLD_MAP_KEY,"Открыть большую карту",runtime::WORLD_MAP_DEFAULT].map(str::to_owned));
+        assert_eq!(mods.len(),1);assert_eq!(mods[0].keys[0],[runtime::WORLD_MAP_KEY,runtime::tr("Open world map", "Открыть большую карту", "Ouvrir la carte du monde", "Abrir mapa del mundo"),runtime::WORLD_MAP_DEFAULT].map(str::to_owned));
         let mut buttons=Vec::new();game.native_settings("foreign",&mut buttons);assert!(buttons.is_empty());
         game.native_settings(runtime::MOD_ID,&mut buttons);assert_eq!(buttons.len(),10);
+        // The same controller changes labels without altering saved preferences.
+        let original=runtime::initialize(directory.clone()).settings();
+        runtime::set_language("ru_ru");
+        assert_eq!(runtime::Dimension::Overworld.label(), "Верхний мир");
+        assert!(runtime::initialize(directory.clone()).labels()[0].starts_with("Миникарта:"));
+        runtime::set_language("en_us");
+        assert_eq!(runtime::Dimension::Overworld.label(), "Overworld");
+        assert!(runtime::initialize(directory.clone()).labels()[0].starts_with("Minimap:"));
+        runtime::set_language("en_ca");
+        assert_eq!(runtime::tr("Waypoint", "Вейпоинт", "Repère", "Marcador"), "Waypoint");
+        for code in ["en_us", "en_ca", "en_gb", "en_au", "EN-NZ"] {
+            runtime::set_language(code);
+            assert_eq!(runtime::Dimension::Player.label(), "Player");
+        }
+        for (code, label, setting) in [("fr_fr", "Joueur", "Minicarte :"), ("fr_ca", "Joueur", "Minicarte :"), ("es_es", "Jugador", "Minimapa:"), ("es_mx", "Jugador", "Minimapa:")] {
+            runtime::set_language(code);
+            assert_eq!(runtime::Dimension::Player.label(), label);
+            assert!(runtime::initialize(directory.clone()).labels()[0].starts_with(setting));
+        }
+        runtime::set_language("en_us");
+        assert_eq!(runtime::initialize(directory.clone()).settings(), original);
         game.native_key("key.keyboard.m",false);assert!(!game.open);
         game.native_key("key.keyboard.m",true);assert!(game.open);
         game.native_key("key.keyboard.m",false);assert!(game.open);

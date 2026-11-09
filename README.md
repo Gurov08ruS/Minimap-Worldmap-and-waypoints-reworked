@@ -1,8 +1,9 @@
 # Minimap, Worldmap and waypoints reworked
 
 A native Horizon mod by [daniliammo](https://github.com/daniliammo).
-Version **0.4.0** scopes waypoints to their world/server and moves large-map
-rendering to the GPU, with optional distant smoothing enabled by default.
+Version **0.4.1** adds English, Russian, French and Spanish interface translations
+and a directional player arrow on both maps. Regional language variants share
+their language’s translation.
 Old unscoped waypoints from 0.3.x are deleted on first load; preferences remain.
 
 ## Install
@@ -31,11 +32,19 @@ its installed native mod set. `--launcher /path/to/horizon-launcher` selects a
 launcher executable. A source `.hnmod` needs one game build before it can run.
 The script does not update a published release or registry entry.
 
+## Language
+
+The interface follows the game language: Russian (`ru_*`), French (`fr_*`) and
+Spanish (`es_*`) use their respective translations, including regional variants.
+All English variants (`en_*`, including Canadian, British, US and Australian
+English) share the English translation. Other languages fall back to English. Change the game
+language in its language settings. Saved waypoint names are preserved as entered.
+
 ## Controls
 
 - **N** opens the waypoint manager; **M** opens the world map. **Escape** closes
   the open screen (a name prompt cancels first).
-- Rebind **Открыть большую карту** and **Вейпоинты** under **Options → Mods →
+- Rebind **Open world map** and **Waypoints** under **Options → Mods →
   this mod → Settings**. The bindings use Horizon's key assignment and
   persistence, including mouse keys and unbinding; they do not poll a hard-coded
   key.
@@ -50,12 +59,12 @@ The script does not update a published release or registry entry.
 - The world map outlines the block under the pointer with a thin black border
   and a translucent white fill, and shows the pointed-at coordinates and the
   localised biome name.
-- Right-click the world map for a menu at the pointed-at block: **Скопировать
-  координаты**, **Поставить вейпоинт** (the name prompt opens next) and, when the
-  client knows the player may run `/tp`, **Телепортироваться туда**. The teleport
+- Right-click the world map for a menu at the pointed-at block: **Copy
+  coordinates**, **Create waypoint** (the name prompt opens next) and, when the
+  client knows the player may run `/tp`, **Teleport here**. The teleport
   entry is hidden without game-master permission (vanilla level 2 or higher).
   Teleporting to another selected dimension uses `/execute in … run tp`.
-- The menu also shows **Удалить вейпоинт** when the point is a waypoint. The
+- The menu also shows **Delete waypoint** when the point is a waypoint. The
   waypoint manager (**N**) lists, renames and deletes waypoints; creation from
   there uses the player's position.
 - Waypoints are saved with the preferences (newest 64 per world/server), drawn as first-letter
@@ -67,14 +76,16 @@ The script does not update a published release or registry entry.
   show the End platform and gateways the outer islands.
 - World borders are drawn on both the Overworld and Nether maps; the Nether
   border shows the same physical area (÷8).
-- The world map's **Игрок / Верхний мир / Незер / Энд** tabs select its dimension.
-- **Измерение миникарты** in the mod's settings selects the minimap's dimension
-  independently. **Игрок** follows the player's current dimension on either map.
-- The player marker is drawn in every selected dimension. Nether and Overworld
+- The world map's **Player / Overworld / Nether / End** tabs select its dimension.
+- **Minimap dimension** in the mod's settings selects the minimap's dimension
+  independently. **Player** follows the player's current dimension on either map.
+- The player marker is an arrow pointing in the player’s viewing direction on
+  both maps. It stays pointed upward when the minimap rotates with the player.
+  The player marker is drawn in every selected dimension. Nether and Overworld
   positions convert by ×8/÷8, the End and Overworld share one scale, and the
   marker is dimmed while the player stands in another dimension.
 - Selecting a dimension never teleports the player. An uncached area displays
-  **Нет данных**, without substituting the current dimension's terrain.
+  **No data**, without substituting the current dimension's terrain.
 
 ## Current map implementation
 
@@ -122,7 +133,7 @@ repository changes. Up to 4,096 tiles fit in the existing 1024×1024 RGBA slot
 when the repository changes. Camera movement reuses it. The minimap retains its
 CPU renderer for rotation and circular masking. Nearest texture sampling keeps
 block boundaries sharp near the camera; unknown terrain is transparent. The
-**Большая карта — сглаживание вдали** setting defaults on: distant views select
+**World map — distant smoothing** setting defaults on: distant views select
 alpha-weighted, averaged levels (2×2 through 16×16 blocks per texel). Disable it
 for sharp block sampling at every scale. Cached levels cost at most about
 5.33 MiB of CPU pixel storage; only the selected level occupies the GPU slot. Relief reads neighbouring
@@ -210,7 +221,7 @@ python3 tools/package.py
 
 Fetch the pinned Mixins checkout's dependencies with `cargo fetch --locked`
 before the offline checks. The output is
-`target/minimap_worldmap_waypoints_reworked-0.4.0.hnmod`.
+`target/minimap_worldmap_waypoints_reworked-0.4.1.hnmod`.
 Check it with `cargo horizon-mod check <file>` using Horizon's official
 `cargo-horizon-mod` tool. The [validation workflow](.github/workflows/validate.yml)
 runs the standalone tests, source audit, real client check and tests, and official

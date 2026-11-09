@@ -24,6 +24,71 @@ pub const SETTINGS_FILE: &str = "settings.ini";
 const SIZES: [u16; 7] = [64, 96, 128, 160, 192, 224, 256];
 const ZOOMS: [f32; 7] = [0.1, 0.25, 0.5, 0.75, 1.0, 2.0, 4.0];
 
+// Updated by the engine adapter; English is the standalone/default language.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Language {
+    English,
+    Russian,
+    French,
+    Spanish,
+}
+
+impl Language {
+    pub fn from_code(code: &str) -> Self {
+        let prefix = code.split(['_', '-']).next().unwrap_or_default();
+        if prefix.eq_ignore_ascii_case("ru") {
+            Self::Russian
+        } else if prefix.eq_ignore_ascii_case("fr") {
+            Self::French
+        } else if prefix.eq_ignore_ascii_case("es") {
+            Self::Spanish
+        } else {
+            Self::English
+        }
+    }
+}
+
+static LANGUAGE: AtomicU8 = AtomicU8::new(Language::English as u8);
+
+pub fn set_language(code: &str) {
+    LANGUAGE.store(Language::from_code(code) as u8, Ordering::Relaxed);
+}
+
+pub fn language() -> Language {
+    match LANGUAGE.load(Ordering::Relaxed) {
+        1 => Language::Russian,
+        2 => Language::French,
+        3 => Language::Spanish,
+        _ => Language::English,
+    }
+}
+
+pub fn tr(
+    english: &'static str,
+    russian: &'static str,
+    french: &'static str,
+    spanish: &'static str,
+) -> &'static str {
+    match language() {
+        Language::English => english,
+        Language::Russian => russian,
+        Language::French => french,
+        Language::Spanish => spanish,
+    }
+}
+
+macro_rules! localized_format {
+    ($en:literal, $ru:literal, $fr:literal, $es:literal $(, $arg:expr)* $(,)?) => {
+        match language() {
+            Language::Russian => format!($ru $(, $arg)*),
+            Language::French => format!($fr $(, $arg)*),
+            Language::Spanish => format!($es $(, $arg)*),
+            Language::English => format!($en $(, $arg)*),
+        }
+    };
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Dimension {
     Player,
@@ -43,10 +108,10 @@ impl Dimension {
     }
     pub fn label(self) -> &'static str {
         match self {
-            Self::Player => "Игрок",
-            Self::Overworld => "Верхний мир",
-            Self::Nether => "Незер",
-            Self::End => "Энд",
+            Self::Player => tr("Player", "Игрок", "Joueur", "Jugador"),
+            Self::Overworld => tr("Overworld", "Верхний мир", "Surface", "Mundo normal"),
+            Self::Nether => tr("Nether", "Незер", "Nether", "Nether"),
+            Self::End => tr("End", "Энд", "End", "End"),
         }
     }
     pub fn from_id(id: &str) -> Self {
@@ -85,6 +150,7 @@ impl Dimension {
 }
 
 pub mod minimap {
+    use super::{Language, language, tr};
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Corner {
         TopLeft,
@@ -112,10 +178,30 @@ pub mod minimap {
 
         fn label(self) -> &'static str {
             match self {
-                Self::TopLeft => "Слева сверху",
-                Self::TopRight => "Справа сверху",
-                Self::BottomLeft => "Слева снизу",
-                Self::BottomRight => "Справа снизу",
+                Self::TopLeft => tr(
+                    "Top left",
+                    "Слева сверху",
+                    "En haut à gauche",
+                    "Arriba a la izquierda",
+                ),
+                Self::TopRight => tr(
+                    "Top right",
+                    "Справа сверху",
+                    "En haut à droite",
+                    "Arriba a la derecha",
+                ),
+                Self::BottomLeft => tr(
+                    "Bottom left",
+                    "Слева снизу",
+                    "En bas à gauche",
+                    "Abajo a la izquierda",
+                ),
+                Self::BottomRight => tr(
+                    "Bottom right",
+                    "Справа снизу",
+                    "En bas à droite",
+                    "Abajo a la derecha",
+                ),
             }
         }
     }
@@ -285,26 +371,86 @@ pub mod minimap {
         }
 
         pub fn labels(self) -> Vec<String> {
-            let on = |v| if v { "Вкл" } else { "Выкл" };
+            let on = |v| {
+                if v {
+                    tr("On", "Вкл", "Activé", "Activado")
+                } else {
+                    tr("Off", "Выкл", "Désactivé", "Desactivado")
+                }
+            };
             vec![
-                format!("Миникарта: {}", on(self.enabled)),
-                format!("Положение: {}", self.corner.label()),
-                format!("Размер: {} GUI px", self.size_px),
-                format!(
+                localized_format!(
+                    "Minimap: {}",
+                    "Миникарта: {}",
+                    "Minicarte : {}",
+                    "Minimapa: {}",
+                    on(self.enabled)
+                ),
+                localized_format!(
+                    "Position: {}",
+                    "Положение: {}",
+                    "Position : {}",
+                    "Posición: {}",
+                    self.corner.label()
+                ),
+                localized_format!(
+                    "Size: {} GUI px",
+                    "Размер: {} GUI px",
+                    "Taille : {} px d’interface",
+                    "Tamaño: {} px de interfaz",
+                    self.size_px
+                ),
+                localized_format!(
+                    "Shape: {}",
                     "Форма: {}",
+                    "Forme : {}",
+                    "Forma: {}",
                     if self.round {
-                        "Круг"
+                        tr("Circle", "Круг", "Cercle", "Círculo")
                     } else {
-                        "Квадрат"
+                        tr("Square", "Квадрат", "Carré", "Cuadrado")
                     }
                 ),
-                format!("Масштаб: {} бл./пикс.", self.blocks_per_pixel),
-                format!("Вращение: {}", on(self.rotate_with_player)),
-                "Сбросить настройки карты".into(),
-                format!("Измерение миникарты: {}", self.mini_dimension.label()),
-                format!("Измерение большой карты: {}", self.world_dimension.label()),
-                format!(
+                localized_format!(
+                    "Scale: {} blocks/pixel",
+                    "Масштаб: {} бл./пикс.",
+                    "Échelle : {} blocs/pixel",
+                    "Escala: {} bloques/píxel",
+                    self.blocks_per_pixel
+                ),
+                localized_format!(
+                    "Rotation: {}",
+                    "Вращение: {}",
+                    "Rotation : {}",
+                    "Rotación: {}",
+                    on(self.rotate_with_player)
+                ),
+                tr(
+                    "Reset map settings",
+                    "Сбросить настройки карты",
+                    "Réinitialiser les réglages de la carte",
+                    "Restablecer ajustes del mapa",
+                )
+                .into(),
+                localized_format!(
+                    "Minimap dimension: {}",
+                    "Измерение миникарты: {}",
+                    "Dimension de la minicarte : {}",
+                    "Dimensión del minimapa: {}",
+                    self.mini_dimension.label()
+                ),
+                localized_format!(
+                    "World map dimension: {}",
+                    "Измерение большой карты: {}",
+                    "Dimension de la carte du monde : {}",
+                    "Dimensión del mapa del mundo: {}",
+                    self.world_dimension.label()
+                ),
+                localized_format!(
+                    "World map — distant smoothing: {}",
                     "Большая карта — сглаживание вдали: {}",
+                    "Carte du monde — lissage à distance : {}",
+                    "Mapa del mundo — suavizado a distancia: {}",
                     on(self.smooth_worldmap)
                 ),
             ]
@@ -416,7 +562,7 @@ impl Waypoint {
             .collect();
         let name = name.trim();
         if name.is_empty() {
-            "Вейпоинт".into()
+            tr("Waypoint", "Вейпоинт", "Repère", "Marcador").into()
         } else {
             name.to_owned()
         }
@@ -594,7 +740,15 @@ impl Controller {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let mut labels = state.settings.labels();
         if state.error.is_some() {
-            labels.push("Ошибка сохранения настроек: см. журнал клиента".into());
+            labels.push(
+                tr(
+                    "Failed to save settings: see the client log",
+                    "Ошибка сохранения настроек: см. журнал клиента",
+                    "Échec de l’enregistrement des réglages : voir le journal du client",
+                    "Error al guardar los ajustes: consulta el registro del cliente",
+                )
+                .into(),
+            );
         }
         labels
     }
@@ -1131,7 +1285,12 @@ mod tests {
         let controller = Controller::open(directory.clone());
         controller.click(0);
         controller.shutdown();
-        assert!(controller.labels().last().unwrap().contains("Ошибка"));
+        assert!(controller.labels().last().unwrap().contains(tr(
+            "Failed",
+            "Ошибка",
+            "Échec",
+            "Error"
+        )));
         assert_eq!(fs::read(&directory).unwrap(), b"not a directory");
         fs::remove_file(directory).unwrap();
     }
@@ -1437,6 +1596,15 @@ pub mod maps {
             let world = self.world_at(x, y);
             [world[0].floor() as i32, world[1].floor() as i32]
         }
+        /// Minecraft yaw projected through this view into GUI coordinates.
+        pub fn player_heading(&self, yaw: f64, size: [f32; 2]) -> [f32; 2] {
+            let angle = self.angle - yaw.to_radians();
+            let dx = angle.sin() * f64::from(size[0]) / self.span[0];
+            let dy = angle.cos() * f64::from(size[1]) / self.span[1];
+            let length = dx.hypot(dy);
+            [(dx / length) as f32, (dy / length) as f32]
+        }
+
         /// The frame pixel of a world position: `world_at`'s inverse.
         pub fn screen_at(&self, [world_x, world_z]: [f64; 2]) -> [f64; 2] {
             let (s, c) = self.angle.sin_cos();
@@ -2378,6 +2546,29 @@ pub mod maps {
             }
             assert_eq!(camera.center, [80.0, 10.0]);
         }
+        #[test]
+        fn player_heading_tracks_yaw_and_rotating_maps() {
+            let mut frame = view(Dimension::Overworld);
+            for (yaw, expected) in [
+                (0.0, [0.0, 1.0]),
+                (90.0, [-1.0, 0.0]),
+                (180.0, [0.0, -1.0]),
+                (270.0, [1.0, 0.0]),
+            ] {
+                let heading = frame.player_heading(yaw, [128.0, 128.0]);
+                assert!((heading[0] - expected[0]).abs() < 1e-6);
+                assert!((heading[1] - expected[1]).abs() < 1e-6);
+                frame.angle = (yaw + 180.0).to_radians();
+                let heading = frame.player_heading(yaw, [128.0, 128.0]);
+                assert!(heading[0].abs() < 1e-6);
+                assert!((heading[1] + 1.0).abs() < 1e-6);
+                frame.angle = 0.0;
+            }
+            frame.span = [200.0, 100.0];
+            let heading = frame.player_heading(-45.0, [400.0, 100.0]);
+            assert!((heading[0] / heading[1] - 2.0).abs() < 1e-6);
+        }
+
         #[test]
         fn frame_pixels_map_back_to_their_world_position_at_any_angle() {
             let mut frame = view(Dimension::Overworld);
