@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased — LOD and point information
+
+- Draw grass blocks with their biome's grass colour on detailed and LOD map
+  tiles, so plains, forests, swamps and other biomes no longer share one green.
+- Temporarily removed terrain/LOD RAM eviction limits until the persistent
+  container is available. Camera changes and incoming LOD levels retain old data.
+- Preserve original LOD texels at all map zoom levels; smooth detailed chunk
+  images separately. Cull GPU presentation independently of retained terrain,
+  with a worker raster fallback instead of an oversized/failed atlas upload.
+- Retain approximate LOD surface heights and biome names for cursor/menu info.
+
+- Read existing Horizon CPU LOD into a RAM footprint cache. Detailed
+  chunks always take precedence; surface LOD never impersonates an underground
+  slice or a visited chunk.
+- Added one context-menu action for chunk and region information, with yellow
+  LOD/mixed-coverage warnings, real source precision and explicit missing data.
+- Let the world map fill the viewport with contrasting floating controls.
+  Removed the title/player-coordinate header; Nether coordinates now describe
+  the point under the mouse.
+
 ## 0.5.0 — 2026-11-09
 
 - Added German localization, including regional German variants.

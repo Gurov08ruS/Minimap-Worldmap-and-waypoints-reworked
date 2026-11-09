@@ -24,6 +24,16 @@ fn canonical_file_tokens(file: &syn::File) -> String {
     let formatted = syn::parse_file(&prettyplease::unparse(file)).unwrap();
     quote!(#formatted).to_string()
 }
+fn matches_planned_visibility(actual: &syn::Visibility, declared: Option<&str>) -> bool {
+    match declared.unwrap_or("pub(crate)") {
+        "pub" => matches!(actual, syn::Visibility::Public(_)),
+        "pub(crate)" => {
+            matches!(actual, syn::Visibility::Restricted(v) if v.path.is_ident("crate"))
+        }
+        _ => false,
+    }
+}
+
 fn main() {
     let args: Vec<_> = env::args().collect();
     let plan: serde_json::Value = serde_json::from_slice(&fs::read(&args[3]).unwrap()).unwrap();
@@ -86,7 +96,10 @@ fn main() {
         };
         let payload = syn::parse_file(m["source"].as_str().unwrap()).unwrap();
         assert!(module.attrs.is_empty());
-        assert!(matches!(&module.vis, syn::Visibility::Restricted(v) if v.path.is_ident("crate")));
+        assert!(
+            matches_planned_visibility(&module.vis, m["visibility"].as_str()),
+            "module visibility differs from its plan"
+        );
         let mut expected = module.clone();
         expected.content.as_mut().unwrap().1 = payload.items;
         assert!(
@@ -147,4 +160,22 @@ fn main() {
     println!(
         "all original Rust sources preserved apart from planned HEAD statements and support modules"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn public_bridges_require_an_explicit_public_plan() {
+        let public: syn::Visibility = syn::parse_quote!(pub);
+        let private: syn::Visibility = syn::parse_quote!(pub(crate));
+        let parent: syn::Visibility = syn::parse_quote!(pub(super));
+        assert!(matches_planned_visibility(&public, Some("pub")));
+        assert!(!matches_planned_visibility(&public, None));
+        assert!(!matches_planned_visibility(&private, Some("pub")));
+        assert!(matches_planned_visibility(&private, None));
+        assert!(matches_planned_visibility(&private, Some("pub(crate)")));
+        assert!(!matches_planned_visibility(&parent, None));
+        assert!(!matches_planned_visibility(&public, Some("unknown")));
+    }
 }

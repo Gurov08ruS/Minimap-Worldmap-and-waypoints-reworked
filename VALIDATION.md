@@ -1,5 +1,67 @@
 # Validation
 
+## Unreleased — biome-tinted grass, 2026-11-09
+
+- Grass blocks on detailed and LOD map tiles now use the biome's grass tint,
+  with the block's ordinary map colour as the fallback for unknown biomes.
+- Formatting, clippy with warnings denied and locked offline workspace tests:
+  pass (51 runtime tests, one ignored manual benchmark; one source-audit test).
+- Template integration, deterministic AST staging and full source audit: pass.
+  The original Horizon checkout is unchanged.
+- Actual pinned Horizon client check: pass without warnings; the injected
+  runtime tests pass inside the pinned client (51 tests).
+- No live-game visual review, FPS profiling or macOS/Windows run was performed.
+
+## Unreleased — stable LOD retention and zoom quality, 2026-11-09
+
+- Formatting and clippy with warnings denied: pass.
+- Locked offline runtime tests: 50 passed; one manual benchmark ignored.
+  Source-audit regression: one passed.
+- Pinned Horizon client check: pass without warnings.
+- All 50 runtime tests also pass inside the pinned Horizon client.
+- Template integration and deterministic AST staging/source audit: pass;
+  the original Horizon checkout remains unchanged.
+- Five injected client UI tests: pass, including holding the displayed map
+  camera inside the uploaded atlas while the next coverage area is prepared.
+- Official package check and byte-reproducible packaging: pass. Local source
+  bundle: 92,062 bytes; SHA-256
+  `32ef5c88434f6a230d4cb29f8dcc6446b095b4ffc7cace75579a98fdcca8f4d4`.
+
+Regressions cover retention beyond the former terrain budgets, camera/source
+changes, finest available LOD height and biome metadata, unchanged original LOD
+texels at every mip level, and raster fallback beyond GPU atlas capacity.
+Terrain RAM is temporarily uncapped until the persistent cache container exists;
+bounded work queues and waypoint limits remain. The earlier bounded-eviction
+behavior described below has been superseded.
+
+No live-game visual review, FPS profiling or macOS/Windows run was performed.
+These changes are local and have not been committed, pushed or published.
+
+## Unreleased — RAM LOD and full-viewport map, 2026-11-09
+
+- Formatting and clippy with warnings denied: pass.
+- Locked offline workspace tests: pass (47 runtime tests, one source-audit test;
+  one manual benchmark ignored).
+- Template integration, deterministic AST staging and full source audit: pass.
+  The original Horizon checkout is unchanged. Public module visibility is
+  accepted only when explicitly declared by the Mixins plan; undeclared public
+  visibility remains rejected.
+- Actual pinned Horizon client check and runtime tests: pass (47 tests).
+- Four client adapter tests: pass, including full-viewport map geometry and
+  overlay hit testing.
+- Official package check and byte-reproducible packaging: pass. Local source
+  bundle: 88,933 bytes; SHA-256
+  `263635b6c336a159d0997ac6439e55cab4f0fc0c2bfb6490b9a2f81a921204fe`.
+
+New regressions cover real LOD footprint/stride preservation, negative chunk and
+region boundaries, unknown portions of partial footprints, detailed known void
+masking LOD in both renderers, finer LOD priority, filling unknown cells from new
+CPU snapshots, bounded eviction and late jobs crossing world/session resets.
+The CPU adapter reads only Horizon's existing surface columns. It does not fetch
+or generate extra terrain, interpret surface spans as caves, or record visits.
+No live-game visual review, FPS profiling or macOS/Windows run was performed.
+These changes are local and have not been pushed or published.
+
 ## 0.5.0 — local validation, 2026-11-09
 
 Local Linux, Rust 1.95.0, unchanged pinned Horizon and Mixins revisions.

@@ -57,6 +57,7 @@ struct NameForm {
 
 #[derive(Clone, Copy)]
 struct Menu {
+    height_approximate: bool,
     block: [i32; 2],
     height: Option<i32>,
     dimension: Dimension,
@@ -73,6 +74,7 @@ enum MenuAction {
     Teleport,
     TeleportDestination,
     DeleteWaypoint,
+    Information,
 }
 
 struct State {
@@ -102,6 +104,11 @@ struct State {
     pending_command: Option<String>,
     map_focus: Option<Spot>,
     waypoint_biomes: BTreeMap<Spot, String>,
+    lod_elapsed: f64,
+    lod_sources:
+        BTreeMap<(Dimension, maps::LodKey), (Weak<Vec<horizon_client::lod::Column>>, Instant)>,
+    info: Option<Menu>,
+    info_scroll: usize,
 }
 impl Default for State {
     fn default() -> Self {
@@ -132,6 +139,10 @@ impl Default for State {
             pending_command: None,
             map_focus: None,
             waypoint_biomes: BTreeMap::new(),
+            lod_elapsed: 1.0,
+            lod_sources: BTreeMap::new(),
+            info: None,
+            info_scroll: 0,
         }
     }
 }
@@ -143,12 +154,7 @@ fn state() -> std::sync::MutexGuard<'static, State> {
         .unwrap_or_else(|e| e.into_inner())
 }
 fn rectangle(width: f32, height: f32) -> [f32; 4] {
-    [
-        12.0,
-        72.0,
-        (width - 24.0).max(1.0),
-        (height - 98.0).max(1.0),
-    ]
+    [0.0, 0.0, width.max(1.0), height.max(1.0)]
 }
 fn inside(mouse: [f32; 2], rect: [f32; 4]) -> bool {
     mouse[0] >= rect[0]
@@ -778,7 +784,13 @@ fn portal_target_text(target: PortalTarget) -> String {
 
 fn menu_title(menu: Menu) -> String {
     match menu.height {
-        Some(y) => format!("X: {}  Y: {}  Z: {}", menu.block[0], y, menu.block[1]),
+        Some(y) => format!(
+            "X: {}  Y: {}{}  Z: {}",
+            menu.block[0],
+            if menu.height_approximate { "≈" } else { "" },
+            y,
+            menu.block[1]
+        ),
         None => format!("X: {}  Z: {}", menu.block[0], menu.block[1]),
     }
 }
@@ -814,6 +826,16 @@ fn menu_items(
     target: Option<PortalTarget>,
 ) -> Vec<(&'static str, MenuAction)> {
     let mut items = vec![
+        (
+            tr(
+                "Chunk and region information",
+                "Информация о чанке и регионе",
+                "Informations sur le chunk et la région",
+                "Información del chunk y la región",
+                "Chunk- und Regionsinformationen",
+            ),
+            MenuAction::Information,
+        ),
         (
             tr(
                 "Copy coordinates",
@@ -972,6 +994,10 @@ fn perform_menu(game: &Game<'_>, state: &mut State, menu: Menu, action: MenuActi
     let target = portal_target(state, menu, fallback);
     state.menu = None;
     match action {
+        MenuAction::Information => {
+            state.info = Some(menu);
+            state.info_scroll = 0;
+        }
         MenuAction::Copy => {
             state.pending_copy = Some(format!("{} {} {}", menu.block[0], y, menu.block[1]));
             state.notice = Some((
@@ -1714,6 +1740,36 @@ fn draw_world_waypoints(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     }
 }
 
+// A frame may advance only within the atlas that is actually uploaded. Keep
+// the last displayed camera while a wider atlas is being prepared, but always
+// pair the chosen camera with the *new* texture's metadata after an upload.
+fn complete_map_view(
+    atlas: &maps::TerrainAtlas,
+    desired: View,
+    previous: Option<&View>,
+    prepared: &View,
+) -> View {
+    if desired.session != prepared.session
+        || desired.dimension != prepared.dimension
+        || desired.layer != prepared.layer
+        || desired.large != prepared.large
+    {
+        return prepared.clone();
+    }
+    if atlas.covers(&desired) {
+        return desired;
+    }
+    if let Some(previous) = previous
+        && previous.session == desired.session
+        && previous.dimension == desired.dimension
+        && previous.layer == desired.layer
+        && atlas.covers(previous)
+    {
+        return previous.clone();
+    }
+    prepared.clone()
+}
+
 pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
     if !game.native_window() {
         return;
@@ -1763,6 +1819,7 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
         // The key helper opens the screen; this side only chooses its mode.
         if game.native_mod_screen() == Some(runtime::MOD_ID) {
             state.mode = desired;
+            state.info = None;
             state.name_form = None;
             state.menu = None;
             state.waypoint_selected = None;
@@ -1828,6 +1885,125 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
     let dt = elapsed.as_secs_f64();
     state.camera.advance(dt);
     state.marker = maps::follow_point(state.marker, position, dt);
+    state.lod_elapsed += dt;
+    if state.lod_elapsed >= 0.25 {
+        state.lod_elapsed = 0.0;
+        if let Some(lod) = game.lod.as_ref() {
+            let coverage = controller.maps.coverage();
+            let known = coverage
+                .lod
+                .iter()
+                .filter(|(d, _, _)| *d == dimension)
+                .filter_map(|(_, key, _)| {
+                    state
+                        .lod_sources
+                        .get(&(dimension, *key))
+                        .map(|(source, _)| ((key.x, key.z, key.level), source.as_ptr() as usize))
+                })
+                .collect();
+            for (key, columns) in horizon_client::lod::minimap_lod_adapter::snapshots(
+                lod,
+                &known,
+                state.camera.center,
+                4,
+            ) {
+                let source = Arc::downgrade(&columns);
+                let biome_palette = game
+                    .world_biomes
+                    .as_ref()
+                    .unwrap_or_else(|| game.res.biomes())
+                    .clone();
+                let resources = Arc::clone(&game.res);
+                let key = maps::LodKey {
+                    x: key.x,
+                    z: key.z,
+                    level: key.level,
+                };
+                let accepted =
+                    controller
+                        .maps
+                        .submit_lod(state.session, dimension, key, move || {
+                            let mut biome_names = BTreeMap::<u16, Arc<str>>::new();
+                            let book = resources.facts();
+                            let color = |id: horizon_world::registry::BlockStateId,
+                                         biome: u16,
+                                         at: [i64; 2]| {
+                                let state = book.states.get(id.0 as usize)?;
+                                if book.is_air(id) {
+                                    return None;
+                                }
+                                let base = plant_color(state.name.as_ref()).unwrap_or_else(|| {
+                                    horizon_client::blocks::MAP_COLORS
+                                        .get(state.map_color as usize)
+                                        .copied()
+                                        .unwrap_or(0)
+                                });
+                                let grass = biome_palette
+                                    .list
+                                    .get(usize::from(biome))
+                                    .map(|_| {
+                                        biome_palette.grass(biome, at[0] as f64, at[1] as f64)
+                                    });
+                                Some(maps::block_map_color(state.name.as_ref(), base, grass))
+                            };
+                            let mut tile = maps::Tile {
+                                pixels: vec![0; 1024],
+                                biomes: vec![None; 256],
+                                ..maps::Tile::default()
+                            };
+                            let [origin_x, origin_z, size, _] = key.bounds();
+                            let stride = size / 16;
+                            for (i, column) in columns.iter().enumerate() {
+                                let Some(surface) = column.surface else {
+                                    continue;
+                                };
+                                let at = [
+                                    origin_x + (i as i64 % 16) * stride + stride / 2,
+                                    origin_z + (i as i64 / 16) * stride + stride / 2,
+                                ];
+                                let Some(mut rgb) = color(surface.state, surface.biome, at) else {
+                                    continue;
+                                };
+                                if let Some((height, water)) = surface.water
+                                    && let Some(water) = color(water, surface.biome, at)
+                                {
+                                    let depth = (height - surface.height).max(0);
+                                    let alpha = (90 + depth * 8).clamp(90, 210) as u32;
+                                    let channel = |shift: u32| -> u32 {
+                                        (((rgb >> shift) & 255_u32) * (255 - alpha)
+                                            + ((water >> shift) & 255_u32) * alpha)
+                                            / 255
+                                    };
+                                    rgb = (channel(16) << 16) | (channel(8) << 8) | channel(0);
+                                }
+                                if let Some(info) = biome_palette.list.get(surface.biome as usize) {
+                                    let name = biome_names
+                                        .entry(surface.biome)
+                                        .or_insert_with(|| Arc::from(info.name.as_str()));
+                                    tile.biomes[i] = Some(name.clone());
+                                }
+                                tile.heights[i] = surface
+                                    .water
+                                    .map(|(height, _)| height)
+                                    .unwrap_or(surface.height)
+                                    .saturating_sub(1);
+                                tile.pixels[i * 4..i * 4 + 4].copy_from_slice(&[
+                                    (rgb >> 16) as u8,
+                                    (rgb >> 8) as u8,
+                                    rgb as u8,
+                                    255,
+                                ]);
+                            }
+                            tile
+                        });
+                if accepted {
+                    state
+                        .lod_sources
+                        .insert((dimension, key), (source, Instant::now()));
+                }
+            }
+        }
+    }
     state.elapsed += dt;
     if state.elapsed >= 0.05 {
         state.elapsed = 0.0;
@@ -1901,6 +2077,11 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
                 continue;
             };
             let resources = Arc::clone(&game.res);
+            let biome_palette = game
+                .world_biomes
+                .as_ref()
+                .unwrap_or_else(|| game.res.biomes())
+                .clone();
             let accepted = controller.maps.submit(
                 state.session,
                 dimension,
@@ -1973,7 +2154,23 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
                                 .get(state.map_color as usize)
                                 .copied()
                                 .unwrap_or(0);
-                            let rgb = plant_color(state.name.as_ref()).unwrap_or(base);
+                            let grass = matches!(
+                                state.name.as_ref(),
+                                "minecraft:grass_block" | "minecraft:grass"
+                            )
+                            .then(|| {
+                                snapshot.biome([x, y, z]).map(|biome| {
+                                    biome_palette.grass(
+                                        biome.0,
+                                        f64::from(x),
+                                        f64::from(z),
+                                    )
+                                })
+                            })
+                            .flatten();
+                            let rgb = plant_color(state.name.as_ref()).unwrap_or_else(|| {
+                                maps::block_map_color(state.name.as_ref(), base, grass)
+                            });
                             let glass = state.classes.iter().any(|class| {
                                 class.as_ref() == "TransparentBlock"
                                     || class.as_ref() == "HalfTransparentBlock"
@@ -2110,6 +2307,12 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
         // Pointer queries and overlays use this exact same displayed view.
         if let (Some(atlas), Some(view)) = (&image.atlas, current_view) {
             if view.layer == image.view.layer {
+                let view = complete_map_view(
+                    atlas,
+                    view,
+                    state.frame.as_ref().map(|frame| &frame.view),
+                    &image.view,
+                );
                 state.frame = Some(Arc::new(maps::Frame {
                     serial: image.serial,
                     view,
@@ -2207,6 +2410,14 @@ fn draw(
         let mut terrain_visible = frame.known > 0;
         if let Some(atlas) = &frame.atlas {
             terrain_visible = false;
+            for coarse in &atlas.coarse {
+                for part in &coarse.fragments {
+                    if let Some((src, dst)) = atlas.coarse_quad(&frame.view, rect, coarse, *part) {
+                        game.native_sprite(batch, horizon_client::hud::MOD_IMAGE_SPRITE, src, dst);
+                        terrain_visible = true;
+                    }
+                }
+            }
             for (slot, chunk) in atlas.chunks.iter().enumerate() {
                 if let Some((src, dst)) = atlas.quad(&frame.view, rect, *chunk, slot) {
                     game.native_sprite(batch, horizon_client::hud::MOD_IMAGE_SPRITE, src, dst);
@@ -2296,154 +2507,502 @@ fn draw(
 }
 
 fn tab(width: f32, index: usize) -> [f32; 4] {
-    let w = ((width - 24.0) / 4.0).max(1.0);
-    [12.0 + w * index as f32, 51.0, (w - 2.0).max(1.0), 18.0]
+    let w = ((width - 16.0) / 4.0).max(1.0);
+    [8.0 + w * index as f32, 8.0, (w - 2.0).max(1.0), 18.0]
 }
 
-fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
-    game.native_fill(batch, [0.0, 0.0, batch.width, batch.height], 0xff11151b);
+fn information_rect(width: f32, height: f32) -> [f32; 4] {
+    let w = (width - 24.0).clamp(1.0, 560.0);
+    let h = (height - 24.0).clamp(1.0, 260.0);
+    [(width - w) / 2.0, (height - h) / 2.0, w, h]
+}
+fn information_lines(game: &Game<'_>, state: &State, menu: Menu, width: f32) -> Vec<(String, u32)> {
+    let layer = state
+        .frame
+        .as_ref()
+        .filter(|frame| frame.view.dimension == menu.dimension)
+        .map(|f| f.view.layer)
+        .or_else(|| state.layers.get(&menu.dimension).copied())
+        .unwrap_or(Layer::Surface);
+    let coverage = runtime::initialize(game.native_data_dir(runtime::MOD_ID))
+        .maps
+        .coverage();
+    let (chunk, region) = maps::chunk_region(menu.block);
+    let chunk_rect = [i64::from(chunk[0]) * 16, i64::from(chunk[1]) * 16, 16, 16];
+    let region_rect = [
+        i64::from(region[0]) * 512,
+        i64::from(region[1]) * 512,
+        512,
+        512,
+    ];
+    let detail = coverage.detailed_at(menu.dimension, layer, menu.block);
+    let lod_sample = coverage.lod_sample(menu.dimension, layer, menu.block);
+    let lod = lod_sample.as_ref().map(|sample| sample.key);
+    let source = if detail {
+        tr(
+            "Detailed client chunk (cached)",
+            "Подробный клиентский чанк (кэш)",
+            "Chunk client détaillé (en cache)",
+            "Chunk detallado del cliente (caché)",
+            "Detaillierter Client-Chunk (Cache)",
+        )
+    } else if lod.is_some() {
+        tr(
+            "LOD — approximate data",
+            "LOD — приблизительные данные",
+            "LOD — données approximatives",
+            "LOD — datos aproximados",
+            "LOD — ungefähre Daten",
+        )
+    } else {
+        tr(
+            "No data for this layer",
+            "Нет данных для этого слоя",
+            "Aucune donnée pour cette couche",
+            "Sin datos para esta capa",
+            "Keine Daten für diese Ebene",
+        )
+    };
+    let layer_text = match layer {
+        Layer::Surface => tr(
+            "Surface",
+            "Поверхность",
+            "Surface",
+            "Superficie",
+            "Oberfläche",
+        )
+        .to_owned(),
+        Layer::Below(y) => localized_format!(
+            "Below Y {y}",
+            "Ниже Y {y}",
+            "Sous Y {y}",
+            "Por debajo de Y {y}",
+            "Unter Y {y}"
+        ),
+    };
+    let normal = 0xffe1e7ed;
+    let yellow = 0xffffd45c;
+    let mut lines = vec![
+        (
+            format!("{} — {}", menu.dimension.label(), layer_text),
+            normal,
+        ),
+        (
+            format!("X: {}  Z: {}", menu.block[0], menu.block[1]),
+            normal,
+        ),
+        (
+            localized_format!(
+                "Chunk: {} / {}",
+                "Чанк: {} / {}",
+                "Chunk : {} / {}",
+                "Chunk: {} / {}",
+                "Chunk: {} / {}",
+                chunk[0],
+                chunk[1]
+            ),
+            normal,
+        ),
+        (
+            format!(
+                "X {}..{}   Z {}..{}",
+                chunk_rect[0],
+                chunk_rect[0] + 15,
+                chunk_rect[1],
+                chunk_rect[1] + 15
+            ),
+            normal,
+        ),
+        (
+            source.to_owned(),
+            if !detail && lod.is_some() {
+                yellow
+            } else {
+                normal
+            },
+        ),
+    ];
+    if let Some(key) = lod {
+        let stride = 1_i64 << key.level;
+        lines.push((
+            localized_format!(
+                "LOD: 1 sample per {stride}×{stride} blocks",
+                "LOD: 1 отсчёт на {stride}×{stride} блоков",
+                "LOD : 1 échantillon pour {stride}×{stride} blocs",
+                "LOD: 1 muestra por {stride}×{stride} bloques",
+                "LOD: 1 Abtastwert je {stride}×{stride} Blöcke"
+            ),
+            yellow,
+        ));
+        let b = key.bounds();
+        lines.push((
+            format!(
+                "LOD: X {}..{}  Z {}..{}",
+                b[0],
+                b[0] + b[2] - 1,
+                b[1],
+                b[1] + b[3] - 1
+            ),
+            normal,
+        ));
+    }
+    if let Some(sample) = lod_sample {
+        let biome = sample
+            .biome
+            .as_ref()
+            .map(|id| localized_biome(id))
+            .unwrap_or_else(|| {
+                tr("Biome: —", "биом: —", "Biome : —", "Bioma: —", "Biom: —").into()
+            });
+        lines.push((format!("LOD: Y ≈{} | {biome}", sample.height), yellow));
+    }
+    for (is_region, bounds) in [(false, chunk_rect), (true, region_rect)] {
+        let (d, _) = coverage.counts(menu.dimension, layer, bounds);
+        let (_, l) = coverage.counts(menu.dimension, Layer::Surface, bounds);
+        if is_region {
+            lines.push((
+                localized_format!(
+                    "Region: {} / {} (32×32 chunks)",
+                    "Регион: {} / {} (32×32 чанка)",
+                    "Région : {} / {} (32×32 chunks)",
+                    "Región: {} / {} (32×32 chunks)",
+                    "Region: {} / {} (32×32 Chunks)",
+                    region[0],
+                    region[1]
+                ),
+                normal,
+            ));
+            lines.push((
+                format!(
+                    "X {}..{}   Z {}..{}",
+                    bounds[0],
+                    bounds[0] + 511,
+                    bounds[1],
+                    bounds[1] + 511
+                ),
+                normal,
+            ));
+        }
+        if l > 0 {
+            let area = if is_region {
+                tr("Region", "Регион", "Région", "Región", "Region")
+            } else {
+                tr("Chunk", "Чанк", "Chunk", "Chunk", "Chunk")
+            };
+            let status = if d > 0 {
+                tr(
+                    "mixed coverage: detailed + LOD",
+                    "смешанное покрытие: подробное + LOD",
+                    "couverture mixte : détaillée + LOD",
+                    "cobertura mixta: detallada + LOD",
+                    "gemischte Abdeckung: detailliert + LOD",
+                )
+            } else {
+                tr(
+                    "LOD coverage — approximate",
+                    "LOD-покрытие — приблизительно",
+                    "couverture LOD — approximative",
+                    "cobertura LOD — aproximada",
+                    "LOD-Abdeckung — ungefähr",
+                )
+            };
+            lines.push((format!("{area}: {status}"), yellow));
+            if layer != Layer::Surface {
+                lines.push((
+                    tr(
+                        "Surface LOD cannot describe this underground layer",
+                        "Наружный LOD не описывает этот подземный слой",
+                        "Le LOD de surface ne décrit pas cette couche souterraine",
+                        "El LOD de superficie no describe esta capa subterránea",
+                        "Oberflächen-LOD beschreibt diese unterirdische Ebene nicht",
+                    )
+                    .to_owned(),
+                    yellow,
+                ));
+            }
+        }
+        if is_region {
+            lines.push((
+                localized_format!(
+                    "Cached detailed chunks: {d}; LOD footprints: {l}",
+                    "Подробных чанков в кэше: {d}; LOD-тайлов: {l}",
+                    "Chunks détaillés en cache : {d} ; tuiles LOD : {l}",
+                    "Chunks detallados en caché: {d}; teselas LOD: {l}",
+                    "Detaillierte Chunks im Cache: {d}; LOD-Kacheln: {l}"
+                ),
+                normal,
+            ));
+        }
+    }
+    lines.push((
+        tr(
+            "Visit history is not recorded yet",
+            "История посещений пока не записывается",
+            "L’historique des visites n’est pas encore enregistré",
+            "El historial de visitas aún no se registra",
+            "Der Besuchsverlauf wird noch nicht aufgezeichnet",
+        )
+        .to_owned(),
+        0xff9faebd,
+    ));
+    let mut wrapped = Vec::new();
+    for (text, color) in lines {
+        let mut line = String::new();
+        for word in text.split_whitespace() {
+            let next = if line.is_empty() {
+                word.to_owned()
+            } else {
+                format!("{line} {word}")
+            };
+            if !line.is_empty() && game.native_text_width(&next) > width {
+                wrapped.push((std::mem::take(&mut line), color));
+            }
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            line.push_str(word);
+        }
+        if !line.is_empty() {
+            wrapped.push((line, color));
+        }
+    }
+    wrapped
+}
+fn draw_information(game: &Game<'_>, batch: &mut HudBatch, state: &State, menu: Menu) {
+    game.native_fill(batch, [0.0, 0.0, batch.width, batch.height], 0x98000000);
+    let rect = information_rect(batch.width, batch.height);
+    game.native_fill(batch, rect, 0xff151d27);
     game.native_text(
         batch,
         tr(
-            "World map",
-            "Карта мира",
-            "Carte du monde",
-            "Mapa del mundo",
-            "Weltkarte",
+            "Chunk / region",
+            "Чанк / регион",
+            "Chunk / région",
+            "Chunk / región",
+            "Chunk / Region",
         ),
-        [12.0, 8.0],
+        [rect[0] + 10.0, rect[1] + 8.0],
         0xffffff,
         true,
     );
-    for (index, dimension) in [Dimension::Overworld, Dimension::Nether]
-        .into_iter()
-        .enumerate()
-    {
-        let y = 23.0 + index as f32 * 12.0;
-        dimension_icon(game, batch, dimension, [12.0, y]);
-        let coordinates = game.native_player().and_then(|player| {
-            let source = match player.dimension {
-                "minecraft:overworld" => Dimension::Overworld,
-                "minecraft:the_nether" => Dimension::Nether,
-                _ => return None,
-            };
-            runtime::portal_coordinates(source, dimension, [player.x, player.y, player.z])
-        });
-        let text = coordinates.map_or_else(
-            || format!("{}: —", dimension.label()),
-            |[x, y, z]| format!("{}: X {x}  Y {y}  Z {z}", dimension.label()),
-        );
-        game.native_text(batch, &text, [26.0, y], 0xdddddd, true);
-    }
-    let settings = runtime::initialize(game.native_data_dir(runtime::MOD_ID)).settings();
-    for (i, dim) in Dimension::ALL.into_iter().enumerate() {
-        let rect = tab(batch.width, i);
-        let active = dim == settings.world_dimension;
-        game.native_fill(batch, rect, if active { 0xff32624b } else { 0xff29323e });
-        dimension_icon(game, batch, dim, [rect[0] + 4.0, rect[1] + 5.0]);
+    let lines = information_lines(game, state, menu, rect[2] - 24.0);
+    let visible = ((rect[3] - 56.0) / 12.0).max(1.0) as usize;
+    let start = state.info_scroll.min(lines.len().saturating_sub(visible));
+    for (i, (text, color)) in lines.iter().skip(start).take(visible).enumerate() {
         game.native_text(
             batch,
-            dim.label(),
-            [rect[0] + 16.0, rect[1] + 5.0],
-            0xffffff,
-            false,
+            text,
+            [rect[0] + 10.0, rect[1] + 25.0 + i as f32 * 12.0],
+            *color,
+            true,
         );
     }
-    let mouse = game.native_cursor();
-    let rect = rectangle(batch.width, batch.height);
-    let mut biome_status = None;
-    draw(game, batch, state, rect, true, Some(mouse));
-    if let Some(frame) = state.frame.as_ref().filter(|f| {
-        f.view.dimension == state.selected && f.view.large && f.view.session == state.session
-    }) {
-        if let Some(waypoint) = waypoint_at_pointer(state, &frame.view, rect, mouse) {
-            draw_tooltip(
-                game,
-                batch,
-                &format!(
-                    "{}  ({} {} {})",
-                    waypoint.name, waypoint.x, waypoint.y, waypoint.z
-                ),
-                mouse,
-            );
-        }
-        if let Some(block) = hovered_block(&frame.view, rect, mouse) {
-            let height = if state.dimension == frame.view.dimension {
-                hovered_height(game, frame.view.layer, block)
-            } else {
-                match frame.view.layer {
-                    Layer::Below(y) => Some(y),
-                    Layer::Surface => None,
-                }
-            };
-            let biome = if state.dimension == frame.view.dimension {
-                match game.native_player() {
-                    Some(player) => {
-                        let y = height.unwrap_or(player.y.floor() as i32);
-                        known_biome(game, state.dimension, [block[0], y, block[1]])
-                    }
-                    None => None,
-                }
-            } else {
-                None
-            };
-            let text = match height {
-                Some(y) => format!("X: {}  Y: {}  Z: {}", block[0], y, block[1]),
-                None => format!("X: {}  Z: {}", block[0], block[1]),
-            };
-            let width = game.native_text_width(&text);
-            game.native_text(
-                batch,
-                &text,
-                [(batch.width - width - 12.0).max(12.0), 8.0],
-                0xffffff,
-                true,
-            );
-            biome_status = biome;
-        }
+    if lines.len() > visible {
+        let area = rect[3] - 56.0;
+        let thumb = area * visible as f32 / lines.len() as f32;
+        let y = rect[1]
+            + 25.0
+            + (area - thumb) * start as f32 / lines.len().saturating_sub(visible).max(1) as f32;
+        game.native_fill(batch, [rect[0] + rect[2] - 7.0, y, 3.0, thumb], 0xffa2b2bf);
     }
-    dimension_icon(game, batch, state.selected, [12.0, batch.height - 20.0]);
-    let dimension_label = state.selected.label();
-    game.native_text(
+    button(
+        game,
         batch,
-        dimension_label,
-        [24.0, batch.height - 20.0],
-        0xcccccc,
+        [
+            rect[0] + rect[2] - 82.0,
+            rect[1] + rect[3] - 24.0,
+            72.0,
+            18.0,
+        ],
+        tr("Close", "Закрыть", "Fermer", "Cerrar", "Schließen"),
+        game.native_cursor(),
         true,
     );
-    let biome_x = 32.0 + game.native_text_width(dimension_label);
+}
+
+fn map_footer(width: f32, height: f32) -> [f32; 4] {
+    [
+        8.0,
+        (height - 54.0).max(0.0),
+        (width - 16.0).max(1.0),
+        46.0_f32.min(height),
+    ]
+}
+fn over_map_controls(mouse: [f32; 2], width: f32, height: f32) -> bool {
+    inside(mouse, map_footer(width, height)) || (0..4).any(|i| inside(mouse, tab(width, i)))
+}
+fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
+    let mouse = game.native_cursor();
+    let rect = rectangle(batch.width, batch.height);
+    draw(game, batch, state, rect, true, Some(mouse));
+    let mut coordinates = tr(
+        "Point under cursor: —",
+        "Точка под мышью: —",
+        "Point sous le curseur : —",
+        "Punto bajo el cursor: —",
+        "Punkt unter dem Mauszeiger: —",
+    )
+    .to_owned();
+    let mut nether = tr(
+        "Nether (cursor): —",
+        "Незер (точка под мышью): —",
+        "Nether (curseur) : —",
+        "Nether (cursor): —",
+        "Nether (Mauszeiger): —",
+    )
+    .to_owned();
+    let mut biome = None;
+    let mut lod_warning = false;
+    let mut tooltip = None;
+    if !over_map_controls(mouse, batch.width, batch.height)
+        && let Some(frame) = state.frame.as_ref().filter(|f| {
+            f.view.dimension == state.selected && f.view.large && f.view.session == state.session
+        })
+        && let Some(block) = hovered_block(&frame.view, rect, mouse)
+    {
+        let height = if state.dimension == frame.view.dimension {
+            hovered_height(game, frame.view.layer, block)
+        } else {
+            match frame.view.layer {
+                Layer::Below(y) => Some(y),
+                Layer::Surface => None,
+            }
+        };
+        let coverage = runtime::initialize(game.native_data_dir(runtime::MOD_ID))
+            .maps
+            .coverage();
+        let rough = if coverage.detailed_at(frame.view.dimension, frame.view.layer, block) {
+            None
+        } else {
+            coverage.lod_sample(frame.view.dimension, frame.view.layer, block)
+        };
+        let height_approximate = height.is_none() && rough.is_some();
+        let height = height.or_else(|| rough.as_ref().map(|p| p.height));
+        coordinates = match height {
+            Some(y) => format!(
+                "{}: X {}  Y {}{}  Z {}",
+                frame.view.dimension.label(),
+                block[0],
+                if height_approximate { "≈" } else { "" },
+                y,
+                block[1]
+            ),
+            None => format!(
+                "{}: X {}  Z {}",
+                frame.view.dimension.label(),
+                block[0],
+                block[1]
+            ),
+        };
+        if let Some([x, _, z]) = runtime::portal_coordinates(
+            frame.view.dimension,
+            Dimension::Nether,
+            [f64::from(block[0]), 0.0, f64::from(block[1])],
+        ) {
+            nether = localized_format!(
+                "Nether (cursor): X {x}  Z {z}",
+                "Незер (точка под мышью): X {x}  Z {z}",
+                "Nether (curseur) : X {x}  Z {z}",
+                "Nether (cursor): X {x}  Z {z}",
+                "Nether (Mauszeiger): X {x}  Z {z}"
+            );
+        }
+        if state.dimension == frame.view.dimension {
+            if let Some(y) = height.or_else(|| game.native_player().map(|p| p.y.floor() as i32)) {
+                biome = known_biome(game, state.dimension, [block[0], y, block[1]]);
+            }
+        }
+        if biome.is_none() {
+            biome = rough
+                .as_ref()
+                .and_then(|sample| sample.biome.as_ref())
+                .map(|name| name.to_string());
+        }
+        lod_warning = !coverage.detailed_at(frame.view.dimension, frame.view.layer, block)
+            && coverage
+                .lod_at(frame.view.dimension, frame.view.layer, block)
+                .is_some();
+        if let Some(waypoint) = waypoint_at_pointer(state, &frame.view, rect, mouse) {
+            tooltip = Some(format!(
+                "{}  ({} {} {})",
+                waypoint.name, waypoint.x, waypoint.y, waypoint.z
+            ));
+        }
+    }
+    let settings = runtime::initialize(game.native_data_dir(runtime::MOD_ID)).settings();
+    for (i, dimension) in Dimension::ALL.into_iter().enumerate() {
+        let tab = tab(batch.width, i);
+        button(game, batch, tab, "", mouse, true);
+        if dimension == settings.world_dimension {
+            game.native_fill(batch, tab, 0xe032624b);
+        }
+        dimension_icon(game, batch, dimension, [tab[0] + 4.0, tab[1] + 5.0]);
+        game.native_text(
+            batch,
+            dimension.label(),
+            [tab[0] + 16.0, tab[1] + 5.0],
+            0xffffff,
+            true,
+        );
+    }
+    let footer = map_footer(batch.width, batch.height);
+    game.native_fill(batch, footer, 0xdf10151d);
+    game.native_text(
+        batch,
+        &coordinates,
+        [footer[0] + 6.0, footer[1] + 5.0],
+        0xffffff,
+        true,
+    );
+    dimension_icon(
+        game,
+        batch,
+        Dimension::Nether,
+        [footer[0] + 6.0, footer[1] + 18.0],
+    );
+    game.native_text(
+        batch,
+        &nether,
+        [footer[0] + 18.0, footer[1] + 18.0],
+        0xffffff,
+        true,
+    );
     biome_icon(
         game,
         batch,
-        biome_status.as_deref(),
-        [biome_x, batch.height - 20.0],
+        biome.as_deref(),
+        [footer[0] + 6.0, footer[1] + 31.0],
     );
-    let biome_line = biome_status.as_deref().map_or_else(
+    let mut label = biome.as_deref().map_or_else(
         || tr("Biome: —", "биом: —", "Biome : —", "Bioma: —", "Biom: —").to_owned(),
         localized_biome,
     );
+    if lod_warning {
+        label.push_str(tr(
+            " | LOD — approximate",
+            " | LOD — приблизительно",
+            " | LOD — approximatif",
+            " | LOD — aproximado",
+            " | LOD — ungefähr",
+        ));
+    }
     game.native_text(
         batch,
-        &biome_line,
-        [biome_x + 12.0, batch.height - 20.0],
-        0xcccccc,
+        &label,
+        [footer[0] + 18.0, footer[1] + 31.0],
+        if lod_warning { 0xffffd45c } else { 0xffffff },
         true,
     );
-    game.native_text(
-        batch,
-        tr(
-            "M: map, N: waypoints, Esc: close",
-            "M: карта, N: вейпоинты, Esc: закрыть",
-            "M : carte, N : repères, Échap : fermer",
-            "M: mapa, N: marcadores, Esc: cerrar",
-            "M: Karte, N: Wegpunkte, Esc: schließen",
-        ),
-        [12.0, batch.height - 10.0],
-        0xaaaaaa,
-        true,
-    );
+    if let Some(tooltip) = tooltip
+        && state.info.is_none()
+    {
+        draw_tooltip(game, batch, &tooltip, mouse);
+    }
     draw_menu(game, batch, state);
     draw_notice(game, batch, state);
+    if let Some(info) = state.info {
+        draw_information(game, batch, state, info);
+    }
 }
 
 // Only the map and its name prompt cover the world. Other screens keep
@@ -2519,6 +3078,22 @@ pub(super) fn press(
         return;
     }
     let mut state = state();
+    if state.info.is_some() {
+        if button == 0 {
+            let rect = information_rect(screen.rect[2], screen.rect[3]);
+            let close = [
+                rect[0] + rect[2] - 82.0,
+                rect[1] + rect[3] - 24.0,
+                72.0,
+                18.0,
+            ];
+            if !inside(screen.mouse, rect) || inside(screen.mouse, close) {
+                state.info = None;
+            }
+        }
+        *canceled = true;
+        return;
+    }
     match state.mode {
         Mode::Map => map_press(game, &mut state, screen, button, canceled),
         Mode::Waypoints => waypoint_press(game, &mut state, screen, button, canceled),
@@ -2533,6 +3108,20 @@ fn map_press(
     button: i32,
     canceled: &mut bool,
 ) {
+    if state.menu.is_none() && over_map_controls(screen.mouse, screen.rect[2], screen.rect[3]) {
+        if button == 0 {
+            for (i, dimension) in Dimension::ALL.into_iter().enumerate() {
+                if inside(screen.mouse, tab(screen.rect[2], i)) {
+                    runtime::initialize(game.native_data_dir(runtime::MOD_ID))
+                        .choose_dimension(true, dimension);
+                    break;
+                }
+            }
+        }
+        state.menu = None;
+        *canceled = true;
+        return;
+    }
     if button == 1 {
         let menu = menu_target_at(game, state, screen, screen.mouse);
         state.menu = menu;
@@ -2628,7 +3217,14 @@ fn menu_target_at(
             Layer::Surface => None,
         }
     };
+    let rough = runtime::initialize(game.native_data_dir(runtime::MOD_ID))
+        .maps
+        .coverage()
+        .lod_sample(state.selected, frame.view.layer, block);
+    let height_approximate = height.is_none() && rough.is_some();
+    let height = height.or_else(|| rough.map(|p| p.height));
     Some(Menu {
+        height_approximate,
         block,
         height,
         dimension: state.selected,
@@ -2862,6 +3458,10 @@ pub(super) fn drag(game: &Game<'_>, delta: [f32; 2], button: i32, canceled: &mut
         return;
     }
     let mut state = state();
+    if state.info.is_some() {
+        *canceled = true;
+        return;
+    }
     if state.mode != Mode::Map || !state.dragging {
         return;
     }
@@ -2880,6 +3480,16 @@ pub(super) fn scroll(
         return;
     }
     let mut state = state();
+    if state.info.is_some() {
+        let rect = information_rect(screen.rect[2], screen.rect[3]);
+        let visible = ((rect[3] - 56.0) / 12.0).max(1.0) as usize;
+        let lines = information_lines(game, &state, state.info.unwrap(), rect[2] - 24.0);
+        let max = lines.len().saturating_sub(visible);
+        state.info_scroll =
+            (state.info_scroll.min(max) as i32 - scroll[1] as i32).clamp(0, max as i32) as usize;
+        *canceled = true;
+        return;
+    }
     if state.mode == Mode::Waypoints {
         let rows = state
             .waypoints
@@ -2891,6 +3501,10 @@ pub(super) fn scroll(
         return;
     }
     if state.mode != Mode::Map {
+        return;
+    }
+    if over_map_controls(screen.mouse, screen.rect[2], screen.rect[3]) {
+        *canceled = true;
         return;
     }
     let rect = rectangle(screen.rect[2], screen.rect[3]);
@@ -2911,6 +3525,13 @@ pub(super) fn screen_key(game: &Game<'_>, key: &str, canceled: &mut bool) {
         return;
     }
     let mut state = state();
+    if state.info.is_some() {
+        if key == "key.keyboard.escape" {
+            state.info = None;
+        }
+        *canceled = true;
+        return;
+    }
     if state.mode == Mode::Name {
         match key {
             "key.keyboard.escape" => {
@@ -3033,15 +3654,65 @@ mod render_tests {
     }
 
     #[test]
-    fn map_header_coordinates_tabs_and_terrain_do_not_overlap() {
+    fn map_camera_never_advances_beyond_the_uploaded_atlas() {
+        let atlas = maps::TerrainAtlas {
+            serial: 1,
+            pixels: Vec::new(),
+            width: 1024,
+            height: 16,
+            chunks: Vec::new(),
+            coarse: Vec::new(),
+            region: [-128, -128, 256, 256],
+            lod: 0,
+        };
+        let prepared = View {
+            session: 1,
+            dimension: Dimension::Overworld,
+            layer: Layer::Surface,
+            center: [0.0; 2],
+            span: [64.0; 2],
+            width: 64,
+            height: 64,
+            angle: 0.0,
+            round: false,
+            large: true,
+            smooth: true,
+        };
+        let mut other = prepared.clone();
+        other.dimension = Dimension::Nether;
+        assert_eq!(complete_map_view(&atlas, other, None, &prepared), prepared);
+        let mut previous = prepared.clone();
+        previous.center = [16.0, 0.0];
+        let mut desired = prepared.clone();
+        desired.span = [1024.0; 2];
+        assert_eq!(
+            complete_map_view(&atlas, desired.clone(), Some(&previous), &prepared),
+            previous
+        );
+        previous.session = 2;
+        assert_eq!(
+            complete_map_view(&atlas, desired, Some(&previous), &prepared),
+            prepared
+        );
+        let mut desired = prepared.clone();
+        desired.center = [12.0, 0.0];
+        assert_eq!(
+            complete_map_view(&atlas, desired.clone(), None, &prepared),
+            desired
+        );
+    }
+
+    #[test]
+    fn full_map_uses_the_viewport_with_controls_overlaid_and_hit_tested() {
         for width in [320.0, 640.0] {
-            let map = rectangle(width, 240.0);
-            for index in 0..4 {
-                let tab = tab(width, index);
-                assert!(tab[1] >= 35.0 + 8.0);
-                assert!(tab[1] + tab[3] < map[1]);
+            assert_eq!(rectangle(width, 240.0), [0.0, 0.0, width, 240.0]);
+            assert!(over_map_controls([10.0, 10.0], width, 240.0));
+            assert!(over_map_controls([10.0, 220.0], width, 240.0));
+            assert!(!over_map_controls([width / 2.0, 100.0], width, 240.0));
+            for i in 0..4 {
+                let tab = tab(width, i);
+                assert!(tab[0] >= 0.0 && tab[0] + tab[2] <= width);
             }
-            assert!(map[3] > 0.0);
         }
     }
 

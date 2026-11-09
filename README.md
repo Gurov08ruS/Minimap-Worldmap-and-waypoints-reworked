@@ -2,7 +2,7 @@
 
 A native Horizon mod by [daniliammo](https://github.com/daniliammo).
 Version **0.5.0** adds German localization, dimension and biome pictograms,
-converted coordinates at the top of the world map, and a Show on map action for
+converted coordinate overlays on the world map, and a Show on map action for
 waypoints. The waypoint manager is translucent without blur; the full-screen
 map skips rendering the 3D world behind it.
 Old unscoped waypoints from 0.3.x are deleted on first load; preferences remain.
@@ -69,10 +69,16 @@ language in its language settings. Saved waypoint names are preserved as entered
 
 ## Controls
 
-- The world map always shows the player's Overworld and Nether coordinates at
-  the top, independently of the minimap coordinate toggles. Unsupported portal
-  conversions are shown as unavailable. Coordinates under the mouse remain
-  separate from the player's coordinates.
+- The world map fills the viewport. Dimension buttons and cursor information
+  float over the terrain on contrasting backgrounds; there is no title bar or
+  player-coordinate header. The Nether coordinate line converts the point under
+  the mouse from the selected map dimension (Overworld ÷8; Nether unchanged).
+  Unsupported dimension conversions are shown as unavailable.
+- Right-click a point and choose **Chunk and region information** to inspect its
+  chunk, 32×32-chunk region, block bounds, height layer and cached data source.
+  LOD data is flagged in yellow, including mixed detailed/LOD region coverage.
+  A LOD footprint is counted as a footprint, rather than invented detailed chunks.
+  Visit dates are not recorded yet.
 - Dimension tabs and map status use original pictograms. Biome icons represent
   biome families; hover over a waypoint's biome icon for its localized name.
   Waypoint biome samples are kept for the current connection when their chunks
@@ -138,12 +144,25 @@ language in its language settings. Saved waypoint names are preserved as entered
 
 ## Current map implementation
 
-Both views use one background sampler and a shared, bounded **RAM** repository,
+Both views use one background sampler and a shared **RAM** repository,
 keyed by connection/session, dimension, chunk and sampled height layer. Terrain
 from previously visited dimensions remains browsable within the same connection,
-subject to the 4,096 tile/layer memory limit. Visible demand is protected against
-background eviction; the recovery working set is bounded at extreme zoom-out.
+with temporary uncapped retention until the persistent container is implemented.
+Turning the camera, changing zoom and receiving new LOD levels do not evict
+previous terrain. Memory usage grows as more territory is retained.
 Disconnect/relogin retires the old session. No permanent world cache is written.
+
+The map also reads Horizon’s existing CPU LOD columns through an injected adapter.
+It neither requests extra terrain nor drives LOD generation. LOD is stored as
+16×16-sample footprints with their original extent and stride, only for the surface
+layer. It does not substitute surface terrain for caves or Nether underground
+layers. Detailed cached chunks always win, including known void; newer LOD never
+overwrites them. Unchanged CPU snapshots are ignored; a changed snapshot can fill unknown LOD
+cells, while existing samples and all detailed data keep priority. Up to four
+LOD snapshots are queued every 250 ms, prioritizing the map camera. The previous 512-LOD and 4,096-terrain RAM limits are temporarily removed.
+Work queues and snapshot submission rates remain bounded. Approximate surface
+Y and biome names are retained with LOD samples, independently of Horizon’s
+current camera/frustum; approximate heights are marked with `≈`.
 
 The sampler uses ordinary client-loaded chunks and map colours; underground/Nether
 views sample below the player's head. Translucent columns are composited instead
@@ -164,7 +183,7 @@ single generic plant green. Render-invisible blocks such as barriers, light
 blocks and moving pistons leave no map pixel. Nether portals, End portals and End
 gateways are recorded as map features and get their own markers.
 
-Unknown dimensions are not fetched from the server. Distant LOD, persistent
+Unknown dimensions are not fetched from the server. Persistent
 history, manual Y selection and rectangle shape remain
 future stages in [PLAN.md](PLAN.md).
 
@@ -179,13 +198,18 @@ coordinates and overlays use that same camera.
 The worker prepares colours and relief shading once per block when the terrain
 repository changes. Up to 4,096 tiles fit in the existing 1024×1024 RGBA slot
 (4 MiB); the current implementation rebuilds/uploads the selected layer's atlas
-when the repository changes. Camera movement reuses it. The minimap retains its
+when its data or padded visible coverage changes. Camera movement inside that
+coverage reuses it. Off-screen data stays in RAM. If visible entries exceed the
+1024×1024 GPU slot, a worker raster fallback presents the retained data without
+truncating the cache; extreme views can therefore cost more CPU. The minimap retains its
 CPU renderer for rotation and circular masking. Nearest texture sampling keeps
 block boundaries sharp near the camera; unknown terrain is transparent. The
 **World map — distant smoothing** setting defaults on: distant views select
 alpha-weighted, averaged levels (2×2 through 16×16 blocks per texel). Disable it
-for sharp block sampling at every scale. Cached levels cost at most about
-5.33 MiB of CPU pixel storage; only the selected level occupies the GPU slot. Relief reads neighbouring
+for sharp block sampling at every scale. LOD textures retain their original sample resolution at every zoom; only
+detailed chunk images use the distant smoothing levels. Mixed presentation
+atlases can use up to about 20 MiB for their five cached levels; only the selected
+level occupies the GPU slot. These presentation limits do not cap terrain RAM. Relief reads neighbouring
 chunks to preserve lighting across tile edges. See [PERFORMANCE.md](PERFORMANCE.md)
 for measurements, limitations and further optimization options.
 

@@ -1517,7 +1517,8 @@ mod tests {
     }
 }
 
-// Shared, bounded in-memory terrain repository. No game objects cross the worker boundary.
+// Shared in-memory terrain repository; retention is temporarily uncapped until the container.
+// No game objects cross the worker boundary.
 pub mod maps {
     use super::Dimension;
     use std::{
@@ -1568,6 +1569,7 @@ pub mod maps {
         pub walls: [bool; 256],
         /// Portal blocks met while scanning the columns.
         pub portals: Vec<([i32; 3], Portal)>,
+        pub biomes: Vec<Option<Arc<str>>>,
     }
     impl Default for Tile {
         fn default() -> Self {
@@ -1576,6 +1578,7 @@ pub mod maps {
                 heights: [0; 256],
                 walls: [false; 256],
                 portals: Vec::new(),
+                biomes: Vec::new(),
             }
         }
     }
@@ -1591,6 +1594,16 @@ pub mod maps {
                 & 255
         };
         (channel(16) << 16) | (channel(8) << 8) | channel(0)
+    }
+
+    /// The map colour of a block after its biome tint: a grass block's top is
+    /// drawn with the biome's grass colour, as the world tints it, while every
+    /// other block keeps its own map colour. Unknown biomes keep `base`.
+    pub fn block_map_color(name: &str, base: u32, grass: Option<u32>) -> u32 {
+        match (name, grass) {
+            ("minecraft:grass_block" | "minecraft:grass", Some(grass)) => grass & 0x00ff_ffff,
+            _ => base,
+        }
     }
 
     /// A shallow seabed keeps most of its colour; deep water darkens it in
@@ -1611,6 +1624,7 @@ pub mod maps {
             heights: [minimum; 256],
             walls: [false; 256],
             portals: Vec::new(),
+            biomes: Vec::new(),
         };
         for z in 0..16 {
             for x in 0..16 {
@@ -1737,6 +1751,22 @@ pub mod maps {
             blocks.log2().floor().clamp(0.0, 4.0) as usize
         }
 
+        fn atlas_region(&self) -> [i64; 4] {
+            let step = 2f64.powf(
+                (self.span[0].max(self.span[1]) / 4.0)
+                    .max(64.0)
+                    .log2()
+                    .ceil(),
+            );
+            let origin = self.center.map(|v| (v / step).round() * step);
+            let radius = self.span.map(|v| (v / 2.0 / step).ceil() * step + step);
+            [
+                (origin[0] - radius[0]) as i64,
+                (origin[1] - radius[1]) as i64,
+                (radius[0] * 2.0) as i64,
+                (radius[1] * 2.0) as i64,
+            ]
+        }
         pub fn demands(&self, dimension: Dimension, layer: Layer, chunk: [i32; 2]) -> bool {
             if dimension != self.dimension || layer != self.layer {
                 return false;
@@ -1922,17 +1952,262 @@ pub mod maps {
             self.anchor.is_some() || self.zoom != self.zoom_target || self.center != self.target
         }
     }
+    /// One real CPU LOD tile, always 16x16 samples; never expanded into fake chunks.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    pub struct LodKey {
+        pub x: i32,
+        pub z: i32,
+        pub level: u8,
+    }
+    impl LodKey {
+        pub fn size(self) -> i64 {
+            16_i64 << self.level.min(22)
+        }
+        pub fn bounds(self) -> [i64; 4] {
+            let size = self.size();
+            [
+                i64::from(self.x) * size,
+                i64::from(self.z) * size,
+                size,
+                size,
+            ]
+        }
+        pub fn intersects_known(self, mask: [u64; 4], rect: [i64; 4]) -> bool {
+            let b = self.bounds();
+            if !intersects(rect, b) {
+                return false;
+            }
+            let stride = b[2] / 16;
+            (0..256).any(|i| {
+                mask[i / 64] & (1 << (i % 64)) != 0
+                    && intersects(
+                        rect,
+                        [
+                            b[0] + (i % 16) as i64 * stride,
+                            b[1] + (i / 16) as i64 * stride,
+                            stride,
+                            stride,
+                        ],
+                    )
+            })
+        }
+        pub fn cell(self, block: [i32; 2]) -> Option<usize> {
+            let [x, z, size, _] = self.bounds();
+            let (dx, dz) = (i64::from(block[0]) - x, i64::from(block[1]) - z);
+            (dx >= 0 && dz >= 0 && dx < size && dz < size)
+                .then(|| ((dz * 16 / size) * 16 + dx * 16 / size) as usize)
+        }
+    }
+    #[derive(Clone, Default)]
+    pub struct Coverage {
+        pub session: u64,
+        pub detailed: BTreeSet<(Dimension, Layer, i32, i32)>,
+        pub lod: Vec<(Dimension, LodKey, [u64; 4])>,
+        pub lod_data: BTreeMap<(Dimension, LodKey), Arc<Tile>>,
+    }
+    #[derive(Clone)]
+    pub struct LodSample {
+        pub key: LodKey,
+        pub height: i32,
+        pub biome: Option<Arc<str>>,
+    }
+    impl Coverage {
+        pub fn lod_sample(
+            &self,
+            dimension: Dimension,
+            layer: Layer,
+            at: [i32; 2],
+        ) -> Option<LodSample> {
+            let key = self.lod_at(dimension, layer, at)?;
+            let tile = self.lod_data.get(&(dimension, key))?;
+            let cell = key.cell(at)?;
+            Some(LodSample {
+                key,
+                height: tile.heights[cell],
+                biome: tile.biomes.get(cell).cloned().flatten(),
+            })
+        }
+        pub fn lod_at(&self, dimension: Dimension, layer: Layer, at: [i32; 2]) -> Option<LodKey> {
+            if layer != Layer::Surface {
+                return None;
+            }
+            for level in 0..=22 {
+                let size = 16_i64 << level;
+                let key = LodKey {
+                    x: i64::from(at[0]).div_euclid(size) as i32,
+                    z: i64::from(at[1]).div_euclid(size) as i32,
+                    level,
+                };
+                if let Some(tile) = self.lod_data.get(&(dimension, key))
+                    && let Some(cell) = key.cell(at)
+                    && tile
+                        .pixels
+                        .get(cell * 4 + 3)
+                        .is_some_and(|alpha| *alpha != 0)
+                {
+                    return Some(key);
+                }
+            }
+            None
+        }
+        pub fn detailed_at(&self, dimension: Dimension, layer: Layer, at: [i32; 2]) -> bool {
+            self.detailed
+                .contains(&(dimension, layer, at[0].div_euclid(16), at[1].div_euclid(16)))
+        }
+        /// Detailed chunk count and LOD footprint count in a half-open block rectangle.
+        pub fn counts(&self, dimension: Dimension, layer: Layer, rect: [i64; 4]) -> (usize, usize) {
+            let detailed = self
+                .detailed
+                .iter()
+                .filter(|(d, l, x, z)| {
+                    *d == dimension
+                        && *l == layer
+                        && intersects(rect, [i64::from(*x) * 16, i64::from(*z) * 16, 16, 16])
+                })
+                .count();
+            let lod = if layer == Layer::Surface {
+                self.lod
+                    .iter()
+                    .filter(|(d, k, m)| *d == dimension && k.intersects_known(*m, rect))
+                    .count()
+            } else {
+                0
+            };
+            (detailed, lod)
+        }
+    }
+    pub fn intersects(a: [i64; 4], b: [i64; 4]) -> bool {
+        a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3]
+    }
+    /// Floor division is essential at negative region/chunk boundaries.
+    pub fn chunk_region(block: [i32; 2]) -> ([i32; 2], [i32; 2]) {
+        let chunk = block.map(|v| v.div_euclid(16));
+        (chunk, chunk.map(|v| v.div_euclid(32)))
+    }
+    #[derive(Clone)]
+    pub struct LodDraw {
+        pub key: LodKey,
+        pub uv_origin: [usize; 2],
+        pub fragments: Vec<[i64; 4]>,
+    }
+    /// Cut out *whole* detailed chunks, even known void/transparent pixels. LOD
+    /// must never shine through them. Subdivide only near detail, not into all chunks.
+    fn lod_fragments(key: LodKey, detailed: &BTreeSet<[i32; 2]>) -> Vec<[i64; 4]> {
+        let mut stack = vec![key.bounds()];
+        let mut out = Vec::new();
+        while let Some(rect) = stack.pop() {
+            let overlap = detailed
+                .range(
+                    [
+                        ((rect[0] / 16).clamp(i64::from(i32::MIN), i64::from(i32::MAX))) as i32,
+                        i32::MIN,
+                    ]
+                        ..=[
+                            (((rect[0] + rect[2] - 1) / 16)
+                                .clamp(i64::from(i32::MIN), i64::from(i32::MAX)))
+                                as i32,
+                            i32::MAX,
+                        ],
+                )
+                .any(|[x, z]| intersects(rect, [i64::from(*x) * 16, i64::from(*z) * 16, 16, 16]));
+            if !overlap {
+                out.push(rect);
+            } else if rect[2] > 16 {
+                let half = rect[2] / 2;
+                for z in [rect[1], rect[1] + half] {
+                    for x in [rect[0], rect[0] + half] {
+                        stack.push([x, z, half, half]);
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Block-resolution terrain, uploaded only when the repository changes.
     pub struct TerrainAtlas {
         pub serial: u64,
         pub pixels: Vec<u8>,
         pub height: usize,
         pub chunks: Vec<[i32; 2]>,
+        pub coarse: Vec<LodDraw>,
+        pub region: [i64; 4],
         pub width: usize,
         pub lod: usize,
     }
     impl TerrainAtlas {
         fn levels(self) -> Vec<Arc<Self>> {
+            // Keep original LOD texels at every zoom. Only detailed chunk
+            // textures use the optional distant smoothing levels.
+            if !self.coarse.is_empty() && self.chunks.is_empty() {
+                let atlas = Arc::new(self);
+                return vec![atlas; 5];
+            }
+            if !self.coarse.is_empty() {
+                let mut levels = vec![Arc::new(self)];
+                for lod in 1..=4 {
+                    let source = &levels[0];
+                    let step = 1usize << lod;
+                    let size = 16 / step;
+                    let columns = 1024 / size;
+                    let fine_height = source.chunks.len().div_ceil(columns) * size;
+                    let height = (fine_height + source.coarse.len().div_ceil(64) * 16).max(16);
+                    let mut pixels = vec![0; 1024 * height * 4];
+                    for slot in 0..source.chunks.len() {
+                        for y in 0..size {
+                            for x in 0..size {
+                                let mut rgba = [0u32; 4];
+                                for dy in 0..step {
+                                    for dx in 0..step {
+                                        let index = ((slot / 64 * 16 + y * step + dy) * 1024
+                                            + slot % 64 * 16
+                                            + x * step
+                                            + dx)
+                                            * 4;
+                                        let a = u32::from(source.pixels[index + 3]);
+                                        for (c, sum) in rgba[..3].iter_mut().enumerate() {
+                                            *sum += u32::from(source.pixels[index + c]) * a;
+                                        }
+                                        rgba[3] += a;
+                                    }
+                                }
+                                let index = ((slot / columns * size + y) * 1024
+                                    + slot % columns * size
+                                    + x)
+                                    * 4;
+                                for c in 0..3 {
+                                    pixels[index + c] =
+                                        ((rgba[c] + rgba[3] / 2) / rgba[3].max(1)) as u8;
+                                }
+                                pixels[index + 3] = ((rgba[3] + (step * step / 2) as u32)
+                                    / (step * step) as u32)
+                                    as u8;
+                            }
+                        }
+                    }
+                    let mut coarse = source.coarse.clone();
+                    for (i, draw) in coarse.iter_mut().enumerate() {
+                        let origin = [i % 64 * 16, fine_height + i / 64 * 16];
+                        for row in 0..16 {
+                            let from = ((draw.uv_origin[1] + row) * 1024 + draw.uv_origin[0]) * 4;
+                            let to = ((origin[1] + row) * 1024 + origin[0]) * 4;
+                            pixels[to..to + 64].copy_from_slice(&source.pixels[from..from + 64]);
+                        }
+                        draw.uv_origin = origin;
+                    }
+                    levels.push(Arc::new(Self {
+                        serial: source.serial,
+                        pixels,
+                        width: 1024,
+                        height,
+                        chunks: source.chunks.clone(),
+                        coarse,
+                        lod,
+                        region: source.region,
+                    }));
+                }
+                return levels;
+            }
             let mut levels = vec![Arc::new(self)];
             for lod in 1..=4 {
                 let source = &levels[lod - 1];
@@ -1966,10 +2241,46 @@ pub mod maps {
                     width,
                     height,
                     chunks: source.chunks.clone(),
+                    coarse: source.coarse.clone(),
+                    region: source.region,
                     lod,
                 }));
             }
             levels
+        }
+
+        pub fn covers(&self, view: &View) -> bool {
+            (0..2).all(|axis| {
+                view.center[axis] - view.span[axis] / 2.0 >= self.region[axis] as f64
+                    && view.center[axis] + view.span[axis] / 2.0
+                        <= (self.region[axis] + self.region[axis + 2]) as f64
+            })
+        }
+        pub fn coarse_quad(
+            &self,
+            view: &View,
+            rect: [f32; 4],
+            draw: &LodDraw,
+            part: [i64; 4],
+        ) -> Option<([f32; 4], [f32; 4])> {
+            let bounds = draw.key.bounds();
+            let mut src = [0.0; 4];
+            let mut dst = [0.0; 4];
+            for axis in 0..2 {
+                let low = view.center[axis] - view.span[axis] / 2.0;
+                let start = (part[axis] as f64).max(low);
+                let end = ((part[axis] + part[axis + 2]) as f64).min(low + view.span[axis]);
+                if end <= start {
+                    return None;
+                }
+                let origin = draw.uv_origin[axis];
+                src[axis] = origin as f32
+                    + ((start - bounds[axis] as f64) * 16.0 / bounds[2] as f64) as f32;
+                src[axis + 2] = ((end - start) * 16.0 / bounds[2] as f64) as f32;
+                dst[axis] = rect[axis] + ((start - low) / view.span[axis]) as f32 * rect[axis + 2];
+                dst[axis + 2] = ((end - start) / view.span[axis]) as f32 * rect[axis + 2];
+            }
+            Some((src, dst))
         }
 
         /// Clip in world space before converting to GUI coordinates. UVs stay
@@ -1991,14 +2302,18 @@ pub mod maps {
                 if end <= start {
                     return None;
                 }
-                let atlas_origin = if axis == 0 { slot % 64 } else { slot / 64 } * 16;
-                src[axis] = atlas_origin as f32 + (start - origin) as f32;
-                src[axis + 2] = (end - start) as f32;
+                let size = 16usize >> self.lod;
+                let columns = self.width / size;
+                let atlas_origin = if axis == 0 {
+                    slot % columns * size
+                } else {
+                    slot / columns * size
+                };
+                src[axis] = atlas_origin as f32 + ((start - origin) / 16.0 * size as f64) as f32;
+                src[axis + 2] = ((end - start) / 16.0 * size as f64) as f32;
                 dst[axis] = rect[axis] + ((start - low) / view.span[axis]) as f32 * rect[axis + 2];
                 dst[axis + 2] = ((end - start) / view.span[axis]) as f32 * rect[axis + 2];
             }
-            let scale = (1 << self.lod) as f32;
-            src = src.map(|v| v / scale);
             Some((src, dst))
         }
     }
@@ -2017,45 +2332,168 @@ pub mod maps {
     #[derive(Default)]
     pub struct Cache {
         tiles: BTreeMap<Key, (u64, Tile)>,
+        lod_tiles: BTreeMap<(Dimension, LodKey), (u64, Arc<Tile>)>,
         clock: u64,
-        view: Option<View>,
     }
     impl Cache {
         pub fn insert(&mut self, dimension: Dimension, layer: Layer, chunk: [i32; 2], tile: Tile) {
-            if self.tiles.len() >= 4096
-                && !self
-                    .tiles
-                    .contains_key(&(dimension, layer, chunk[0], chunk[1]))
-            {
-                let victim = self
-                    .tiles
-                    .iter()
-                    .filter(|(key, _)| {
-                        !self
-                            .view
-                            .as_ref()
-                            .is_some_and(|view| view.demands(key.0, key.1, [key.2, key.3]))
-                    })
-                    .min_by_key(|(_, value)| value.0)
-                    .map(|(key, _)| *key);
-                if let Some(key) = victim {
-                    self.tiles.remove(&key);
-                } else {
-                    return;
-                }
-            }
             self.clock += 1;
             self.tiles
                 .insert((dimension, layer, chunk[0], chunk[1]), (self.clock, tile));
         }
+        pub fn insert_lod(&mut self, dimension: Dimension, key: LodKey, tile: Tile) -> bool {
+            if key.level > 22
+                || tile.pixels.len() != 1024
+                || !tile.pixels.chunks_exact(4).any(|p| p[3] != 0)
+            {
+                return false;
+            }
+            if let Some((stamp, old)) = self.lod_tiles.get_mut(&(dimension, key)) {
+                let old = Arc::make_mut(old);
+                let mut changed = false;
+                for i in 0..256 {
+                    if old.pixels[i * 4 + 3] == 0 && tile.pixels[i * 4 + 3] != 0 {
+                        old.pixels[i * 4..i * 4 + 4]
+                            .copy_from_slice(&tile.pixels[i * 4..i * 4 + 4]);
+                        old.heights[i] = tile.heights[i];
+                        if !tile.biomes.is_empty() {
+                            if old.biomes.len() != 256 {
+                                old.biomes.resize(256, None);
+                            }
+                            old.biomes[i] = tile.biomes.get(i).cloned().flatten();
+                        }
+                        changed = true;
+                    }
+                }
+                if !tile.biomes.is_empty() {
+                    if old.biomes.len() != 256 {
+                        old.biomes.resize(256, None);
+                    }
+                    for i in 0..256 {
+                        if old.biomes[i].is_none()
+                            && let Some(name) = tile.biomes.get(i).cloned().flatten()
+                        {
+                            old.biomes[i] = Some(name);
+                            changed = true;
+                        }
+                    }
+                }
+                if changed {
+                    self.clock += 1;
+                    *stamp = self.clock;
+                }
+                return changed;
+            }
+            self.clock += 1;
+            self.lod_tiles
+                .insert((dimension, key), (self.clock, Arc::new(tile)));
+            true
+        }
+        pub fn coverage(&self) -> Coverage {
+            Coverage {
+                session: 0,
+                detailed: self.tiles.keys().copied().collect(),
+                lod_data: self
+                    .lod_tiles
+                    .iter()
+                    .map(|(key, (_, tile))| (*key, tile.clone()))
+                    .collect(),
+                lod: self
+                    .lod_tiles
+                    .iter()
+                    .map(|((d, key), (_, tile))| {
+                        let mut mask = [0; 4];
+                        for (i, pixel) in tile.pixels.chunks_exact(4).enumerate() {
+                            if pixel[3] != 0 {
+                                mask[i / 64] |= 1 << (i % 64);
+                            }
+                        }
+                        (*d, *key, mask)
+                    })
+                    .collect(),
+            }
+        }
+        fn lod_pixel(&self, dimension: Dimension, layer: Layer, block: [i32; 2]) -> Option<&[u8]> {
+            if layer != Layer::Surface || self.lod_tiles.is_empty() {
+                return None;
+            }
+            for level in 0..=22 {
+                let size = 16_i64 << level;
+                let key = LodKey {
+                    x: (i64::from(block[0]).div_euclid(size)) as i32,
+                    z: (i64::from(block[1]).div_euclid(size)) as i32,
+                    level,
+                };
+                if let Some((_, tile)) = self.lod_tiles.get(&(dimension, key)) {
+                    let cell = key.cell(block)?;
+                    let pixel = tile.pixels.get(cell * 4..cell * 4 + 4)?;
+                    if pixel[3] != 0 {
+                        return Some(pixel);
+                    }
+                }
+            }
+            None
+        }
+        fn gpu_atlas_fits(&self, view: &View) -> bool {
+            let region = view.atlas_region();
+            let fine = self
+                .tiles
+                .keys()
+                .filter(|key| {
+                    key.0 == view.dimension
+                        && key.1 == view.layer
+                        && intersects(
+                            region,
+                            [i64::from(key.2) * 16, i64::from(key.3) * 16, 16, 16],
+                        )
+                })
+                .count();
+            let coarse = if view.layer == Layer::Surface {
+                self.lod_tiles
+                    .keys()
+                    .filter(|(d, key)| *d == view.dimension && intersects(region, key.bounds()))
+                    .count()
+            } else {
+                0
+            };
+            fine.div_ceil(64) + coarse.div_ceil(64) <= 64
+        }
         fn terrain_atlas(&self, view: &View, serial: u64) -> TerrainAtlas {
+            let region = view.atlas_region();
             let chunks: Vec<_> = self
                 .tiles
                 .keys()
-                .filter(|key| key.0 == view.dimension && key.1 == view.layer)
+                .filter(|key| {
+                    key.0 == view.dimension
+                        && key.1 == view.layer
+                        && intersects(
+                            region,
+                            [i64::from(key.2) * 16, i64::from(key.3) * 16, 16, 16],
+                        )
+                })
                 .map(|key| [key.2, key.3])
                 .collect();
-            let height = chunks.len().div_ceil(64).max(1) * 16;
+            let detailed: BTreeSet<_> = chunks.iter().copied().collect();
+            let mut coarse: Vec<_> = if view.layer == Layer::Surface {
+                self.lod_tiles
+                    .keys()
+                    .filter(|(d, key)| *d == view.dimension && intersects(region, key.bounds()))
+                    .map(|(_, key)| *key)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            coarse.sort_by_key(|key| std::cmp::Reverse(key.level));
+            let coarse: Vec<LodDraw> = coarse
+                .into_iter()
+                .enumerate()
+                .map(|(i, key)| LodDraw {
+                    key,
+                    uv_origin: [i % 64 * 16, chunks.len().div_ceil(64) * 16 + i / 64 * 16],
+                    fragments: lod_fragments(key, &detailed),
+                })
+                .collect();
+            let height = (chunks.len().div_ceil(64) + coarse.len().div_ceil(64)).max(1) * 16;
             let mut pixels = vec![0; 1024 * height * 4];
             for (slot, chunk) in chunks.iter().enumerate() {
                 // Bake lighting once per block, including neighbouring chunks.
@@ -2081,18 +2519,31 @@ pub mod maps {
                         .copy_from_slice(&tile.pixels[row * 64..row * 64 + 64]);
                 }
             }
+            for draw in &coarse {
+                let tile = &self.lod_tiles[&(view.dimension, draw.key)].1;
+                for y in 0..16 {
+                    let src = y * 64;
+                    let dst = ((draw.uv_origin[1] + y) * 1024 + draw.uv_origin[0]) * 4;
+                    pixels[dst..dst + 64].copy_from_slice(&tile.pixels[src..src + 64]);
+                }
+            }
             TerrainAtlas {
                 serial,
                 pixels,
                 height,
                 chunks,
+                coarse,
+                region,
                 width: 1024,
                 lod: 0,
             }
         }
-        pub fn render(&self, view: View, serial: u64) -> Frame {
-            let width = view.width.clamp(1, 1024);
-            let height = view.height.clamp(1, 1024);
+        pub fn render(&self, mut view: View, serial: u64) -> Frame {
+            let scale = (view.width.max(view.height) as f64 / 1024.0).max(1.0);
+            view.width = ((view.width as f64 / scale).ceil() as usize).clamp(1, 1024);
+            view.height = ((view.height as f64 / scale).ceil() as usize).clamp(1, 1024);
+            let width = view.width;
+            let height = view.height;
             let mut pixels = vec![0; width * height * 4];
             let mut known = 0;
             let (sin, cos) = view.angle.sin_cos();
@@ -2132,8 +2583,10 @@ pub mod maps {
                     let i = (y * width + x) * 4;
                     let local = (bz.rem_euclid(16) * 16 + bx.rem_euclid(16)) as usize;
                     let Some(current) = current else {
-                        // Unknown terrain stays transparent; no screen-space
-                        // checkerboard that turns into stripes while moving.
+                        if let Some(color) = self.lod_pixel(view.dimension, view.layer, [bx, bz]) {
+                            pixels[i..i + 4].copy_from_slice(color);
+                            known += 1;
+                        }
                         continue;
                     };
                     let Some(color) = current.pixels.get(local * 4..local * 4 + 4) else {
@@ -2213,6 +2666,12 @@ pub mod maps {
         }
     }
     enum Job {
+        Lod {
+            session: u64,
+            dimension: Dimension,
+            key: LodKey,
+            sample: Box<dyn FnOnce() -> Tile + Send>,
+        },
         Chunk {
             session: u64,
             dimension: Dimension,
@@ -2232,6 +2691,7 @@ pub mod maps {
         output: Arc<Mutex<Option<Arc<Frame>>>>,
         session: Arc<AtomicU64>,
         resident: Arc<Mutex<BTreeSet<Key>>>,
+        coverage: Arc<Mutex<Arc<Coverage>>>,
         portals: Arc<Mutex<PortalMap>>,
     }
     impl Default for Service {
@@ -2247,6 +2707,8 @@ pub mod maps {
             let session = Arc::new(AtomicU64::new(0));
             let resident = Arc::new(Mutex::new(BTreeSet::new()));
             let portals = Arc::new(Mutex::new(BTreeMap::new()));
+            let coverage = Arc::new(Mutex::new(Arc::new(Coverage::default())));
+            let coverage_state = coverage.clone();
             let residency = resident.clone();
             let portal_points = portals.clone();
             let (input, result, active) = (latest.clone(), output.clone(), session.clone());
@@ -2261,13 +2723,28 @@ pub mod maps {
                         let mut jobs = vec![first];
                         jobs.extend(rx.try_iter().take(7));
                         let mut changed = false;
-                        let requested = input.lock().unwrap_or_else(|e| e.into_inner()).clone();
                         if current != active.load(Ordering::Acquire) {
                             cache = Cache::default();
                             current = active.load(Ordering::Acquire);
                         }
-                        cache.view = requested;
                         for job in jobs {
+                            let job = match job {
+                                Job::Lod {
+                                    session,
+                                    dimension,
+                                    key,
+                                    sample,
+                                } => {
+                                    if session == active.load(Ordering::Acquire) {
+                                        let tile = sample();
+                                        if session == active.load(Ordering::Acquire) {
+                                            changed |= cache.insert_lod(dimension, key, tile);
+                                        }
+                                    }
+                                    continue;
+                                }
+                                other => other,
+                            };
                             if let Job::Chunk {
                                 session,
                                 dimension,
@@ -2302,6 +2779,11 @@ pub mod maps {
                             let mut entries = residency.lock().unwrap_or_else(|e| e.into_inner());
                             if current == active.load(Ordering::Acquire) {
                                 *entries = cache.tiles.keys().copied().collect();
+                                *coverage_state.lock().unwrap_or_else(|e| e.into_inner()) = {
+                                    let mut summary = cache.coverage();
+                                    summary.session = current;
+                                    Arc::new(summary)
+                                };
                             }
                         }
                         let Some(view) = input.lock().unwrap_or_else(|e| e.into_inner()).clone()
@@ -2325,9 +2807,12 @@ pub mod maps {
                             continue;
                         }
                         serial += 1;
-                        let frame = if view.large {
+                        let frame = if view.large && cache.gpu_atlas_fits(&view) {
                             let key = (view.session, view.dimension, view.layer, cache.clock);
-                            if atlas.as_ref().is_none_or(|a| a.key != key) {
+                            if atlas
+                                .as_ref()
+                                .is_none_or(|a| a.key != key || !a.levels[0].covers(&view))
+                            {
                                 atlas = Some(AtlasCache {
                                     key,
                                     levels: cache.terrain_atlas(&view, serial).levels(),
@@ -2338,7 +2823,7 @@ pub mod maps {
                                 serial,
                                 view,
                                 pixels: Vec::new(),
-                                known: terrain.chunks.len(),
+                                known: terrain.chunks.len() + terrain.coarse.len(),
                                 atlas: Some(terrain),
                             })
                         } else {
@@ -2358,11 +2843,14 @@ pub mod maps {
                 output,
                 session,
                 resident,
+                coverage,
                 portals,
             }
         }
         pub fn reset(&self, session: u64) {
             self.session.store(session, Ordering::Release);
+            *self.coverage.lock().unwrap_or_else(|e| e.into_inner()) =
+                Arc::new(Coverage::default());
             self.resident
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -2372,6 +2860,35 @@ pub mod maps {
                 .unwrap_or_else(|e| e.into_inner())
                 .clear();
             *self.output.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
+        pub fn coverage(&self) -> Arc<Coverage> {
+            let coverage = self.coverage.lock().unwrap_or_else(|e| e.into_inner());
+            if coverage.session == self.session.load(Ordering::Acquire) {
+                coverage.clone()
+            } else {
+                Arc::new(Coverage::default())
+            }
+        }
+        pub fn submit_lod(
+            &self,
+            session: u64,
+            dimension: Dimension,
+            key: LodKey,
+            sample: impl FnOnce() -> Tile + Send + 'static,
+        ) -> bool {
+            self.tx
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .is_some_and(|tx| {
+                    tx.try_send(Job::Lod {
+                        session,
+                        dimension,
+                        key,
+                        sample: Box::new(sample),
+                    })
+                    .is_ok()
+                })
         }
         pub fn portals(&self) -> Vec<(Dimension, [i32; 3], Portal)> {
             self.portals
@@ -2462,6 +2979,25 @@ pub mod maps {
                 large: true,
                 smooth: false,
             }
+        }
+        #[test]
+        fn grass_blocks_take_the_biome_grass_colour() {
+            assert_eq!(
+                block_map_color("minecraft:grass_block", 0x7fb238, Some(0x91bd59)),
+                0x91bd59
+            );
+            assert_eq!(
+                block_map_color("minecraft:grass_block", 0x7fb238, None),
+                0x7fb238
+            );
+            assert_eq!(
+                block_map_color("minecraft:stone", 0x707070, Some(0x91bd59)),
+                0x707070
+            );
+            assert_eq!(
+                block_map_color("minecraft:grass", 0x7fb238, Some(0xffffff)),
+                0xffffff
+            );
         }
         fn terrain_fixture() -> Cache {
             let mut cache = Cache::default();
@@ -2626,10 +3162,7 @@ pub mod maps {
         }
         #[test]
         fn a_stationary_view_is_not_evicted_by_background_terrain() {
-            let mut cache = Cache {
-                view: Some(view(Dimension::Overworld)),
-                ..Cache::default()
-            };
+            let mut cache = Cache::default();
             cache.insert(
                 Dimension::Overworld,
                 Layer::Surface,
@@ -2741,6 +3274,379 @@ pub mod maps {
             assert!((heading[0] / heading[1] - 2.0).abs() < 1e-6);
         }
 
+        fn coarse_tile(rgb: [u8; 3]) -> Tile {
+            Tile {
+                pixels: rgb.into_iter().chain([255]).cycle().take(1024).collect(),
+                ..Tile::default()
+            }
+        }
+        #[test]
+        fn real_lod_coverage_does_not_invent_chunks_or_visit_history() {
+            let mut cache = Cache::default();
+            let key = LodKey {
+                x: -1,
+                z: 0,
+                level: 2,
+            };
+            assert!(cache.insert_lod(Dimension::Overworld, key, coarse_tile([80, 120, 40])));
+            let mut v = view(Dimension::Overworld);
+            v.center = [-8.0, 8.0];
+            v.span = [16.0; 2];
+            let frame = cache.render(v.clone(), 1);
+            assert!(
+                frame
+                    .pixels
+                    .chunks_exact(4)
+                    .all(|p| p == [80, 120, 40, 255])
+            );
+            let coverage = cache.coverage();
+            assert!(coverage.detailed.is_empty());
+            assert_eq!(
+                coverage.lod_at(Dimension::Overworld, Layer::Surface, [-1, 1]),
+                Some(key)
+            );
+            assert_eq!(
+                coverage.lod_at(Dimension::Nether, Layer::Surface, [-1, 1]),
+                None
+            );
+            v.layer = Layer::Below(40);
+            assert_eq!(cache.render(v, 2).known, 0);
+            assert_eq!(chunk_region([-1, -513]), ([-1, -33], [-1, -2]));
+        }
+        #[test]
+        fn detailed_void_always_masks_lod_in_cpu_and_gpu_maps() {
+            let mut cache = Cache::default();
+            let key = LodKey {
+                x: -1,
+                z: 0,
+                level: 2,
+            };
+            cache.insert_lod(Dimension::Overworld, key, coarse_tile([90, 20, 10]));
+            cache.insert(
+                Dimension::Overworld,
+                Layer::Surface,
+                [-1, 0],
+                Tile {
+                    pixels: vec![0; 1024],
+                    ..Tile::default()
+                },
+            );
+            let mut v = view(Dimension::Overworld);
+            v.center = [-8.0, 8.0];
+            v.span = [16.0; 2];
+            assert!(cache.render(v.clone(), 1).pixels.iter().all(|v| *v == 0));
+            let atlas = cache.terrain_atlas(&v, 1);
+            assert!(
+                atlas.coarse[0]
+                    .fragments
+                    .iter()
+                    .all(|part| !intersects(*part, [-16, 0, 16, 16]))
+            );
+            assert!(!cache.insert_lod(Dimension::Overworld, key, coarse_tile([255, 255, 255])));
+            assert!(
+                cache
+                    .coverage()
+                    .detailed_at(Dimension::Overworld, Layer::Surface, [-1, 1])
+            );
+        }
+        #[test]
+        fn lod_priority_precision_and_large_footprints_remain_bounded() {
+            let mut cache = Cache::default();
+            let coarse = LodKey {
+                x: 0,
+                z: 0,
+                level: 22,
+            };
+            let finer = LodKey {
+                x: 0,
+                z: 0,
+                level: 1,
+            };
+            cache.insert_lod(Dimension::Overworld, coarse, coarse_tile([10, 10, 10]));
+            cache.insert_lod(Dimension::Overworld, finer, coarse_tile([20, 20, 20]));
+            assert_eq!(
+                cache
+                    .coverage()
+                    .lod_at(Dimension::Overworld, Layer::Surface, [5, 5]),
+                Some(finer)
+            );
+            assert_eq!(
+                cache.lod_pixel(Dimension::Overworld, Layer::Surface, [5, 5]),
+                Some([20, 20, 20, 255].as_slice())
+            );
+            let detailed = BTreeSet::from([[0, 0]]);
+            let fragments = lod_fragments(coarse, &detailed);
+            assert!(fragments.len() < 100);
+            assert!(
+                fragments
+                    .iter()
+                    .all(|part| !intersects(*part, [0, 0, 16, 16]))
+            );
+            let mut partial = coarse_tile([1, 2, 3]);
+            partial.pixels[4..].fill(0);
+            let mut c = Cache::default();
+            c.insert_lod(
+                Dimension::Overworld,
+                LodKey {
+                    x: 0,
+                    z: 0,
+                    level: 6,
+                },
+                partial,
+            );
+            assert_eq!(
+                c.coverage()
+                    .counts(Dimension::Overworld, Layer::Surface, [512, 512, 512, 512]),
+                (0, 0)
+            );
+        }
+        #[test]
+        fn detailed_arrivals_and_lod_beyond_old_limits_keep_all_known_terrain() {
+            let mut cache = Cache::default();
+            for x in 0..520 {
+                cache.insert_lod(
+                    Dimension::Overworld,
+                    LodKey { x, z: 0, level: 1 },
+                    coarse_tile([1, 2, 3]),
+                );
+            }
+            assert_eq!(cache.lod_tiles.len(), 520);
+            for x in 0..4096 {
+                cache.insert(
+                    Dimension::Overworld,
+                    Layer::Surface,
+                    [x, 0],
+                    Tile::default(),
+                );
+            }
+            assert_eq!(cache.tiles.len(), 4096);
+            assert_eq!(cache.lod_tiles.len(), 520);
+            assert!(cache.insert_lod(
+                Dimension::Overworld,
+                LodKey {
+                    x: 521,
+                    z: 0,
+                    level: 1
+                },
+                coarse_tile([1, 2, 3])
+            ));
+        }
+        #[test]
+        fn newer_lod_revisions_fill_holes_without_overwriting_known_samples() {
+            let mut cache = Cache::default();
+            let key = LodKey {
+                x: 0,
+                z: 0,
+                level: 1,
+            };
+            let mut partial = coarse_tile([10, 20, 30]);
+            partial.pixels[4..].fill(0);
+            assert!(cache.insert_lod(Dimension::Overworld, key, partial));
+            assert!(cache.insert_lod(Dimension::Overworld, key, coarse_tile([40, 50, 60])));
+            assert_eq!(
+                cache.lod_pixel(Dimension::Overworld, Layer::Surface, [0, 0]),
+                Some([10, 20, 30, 255].as_slice())
+            );
+            assert_eq!(
+                cache.lod_pixel(Dimension::Overworld, Layer::Surface, [4, 0]),
+                Some([40, 50, 60, 255].as_slice())
+            );
+            assert!(!cache.insert_lod(Dimension::Overworld, key, coarse_tile([99, 99, 99])));
+        }
+
+        #[test]
+        fn old_lod_jobs_cannot_publish_coverage_into_a_new_world() {
+            let service = Service::new();
+            service.reset(1);
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            assert!(service.submit_lod(
+                1,
+                Dimension::Overworld,
+                LodKey {
+                    x: 0,
+                    z: 0,
+                    level: 1
+                },
+                move || {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    coarse_tile([1, 2, 3])
+                }
+            ));
+            started_rx
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .unwrap();
+            service.reset(2);
+            release_tx.send(()).unwrap();
+            let mut v = view(Dimension::Overworld);
+            v.session = 2;
+            service.request(v);
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while service.frame().is_none() {
+                assert!(std::time::Instant::now() < until);
+                std::thread::yield_now();
+            }
+            assert!(service.coverage().lod.is_empty());
+            assert_eq!(service.frame().unwrap().view.session, 2);
+            assert_eq!(service.frame().unwrap().known, 0);
+            service.shutdown();
+        }
+
+        #[test]
+        fn lod_texels_keep_their_resolution_colors_and_opacity_at_every_zoom() {
+            let mut cache = Cache::default();
+            cache.insert(
+                Dimension::Overworld,
+                Layer::Surface,
+                [10, 0],
+                coarse_tile([80, 90, 100]),
+            );
+            let mut tile = coarse_tile([1, 2, 3]);
+            for i in 0..256 {
+                tile.pixels[i * 4..i * 4 + 4].copy_from_slice(&[
+                    i as u8,
+                    (255 - i) as u8,
+                    55,
+                    if i % 3 == 0 { 0 } else { 255 },
+                ]);
+            }
+            let original = tile.pixels.clone();
+            let key = LodKey {
+                x: 0,
+                z: 0,
+                level: 2,
+            };
+            cache.insert_lod(Dimension::Overworld, key, tile);
+            let mut v = view(Dimension::Overworld);
+            v.center = [80.0, 32.0];
+            v.span = [256.0; 2];
+            let levels = cache.terrain_atlas(&v, 1).levels();
+            for atlas in levels {
+                let draw = &atlas.coarse[0];
+                for y in 0..16 {
+                    let index = ((draw.uv_origin[1] + y) * atlas.width + draw.uv_origin[0]) * 4;
+                    assert_eq!(
+                        &atlas.pixels[index..index + 64],
+                        &original[y * 64..y * 64 + 64]
+                    );
+                }
+                let (src, _) = atlas
+                    .coarse_quad(&v, [0.0, 0.0, 256.0, 256.0], draw, key.bounds())
+                    .unwrap();
+                assert_eq!(src[2..], [16.0, 16.0]);
+                assert!(atlas.width <= 1024 && atlas.height <= 1024);
+            }
+        }
+        #[test]
+        fn lod_height_biome_and_finest_source_survive_source_changes_and_camera_turns() {
+            let mut cache = Cache::default();
+            let key = LodKey {
+                x: -1,
+                z: 0,
+                level: 2,
+            };
+            let mut tile = coarse_tile([12, 34, 56]);
+            tile.heights.fill(87);
+            tile.biomes = vec![Some(Arc::from("minecraft:birch_forest")); 256];
+            cache.insert_lod(Dimension::Overworld, key, tile);
+            let before = cache.coverage();
+            let sample = before
+                .lod_sample(Dimension::Overworld, Layer::Surface, [-8, 8])
+                .unwrap();
+            assert_eq!(sample.height, 87);
+            assert_eq!(sample.biome.as_deref(), Some("minecraft:birch_forest"));
+            assert_eq!(sample.key, key);
+            // More than the former LOD budget: do not evict what was behind the camera.
+            for x in 0..600 {
+                cache.insert_lod(
+                    Dimension::Overworld,
+                    LodKey { x, z: 10, level: 2 },
+                    coarse_tile([90, 80, 70]),
+                );
+            }
+            let mut v = view(Dimension::Overworld);
+            v.center = [-8.0, 8.0];
+            v.span = [8.0; 2];
+            for angle in [0.0, 1.5, 3.0, 5.0] {
+                v.angle = angle;
+                assert_eq!(cache.render(v.clone(), 1).known, 256);
+                assert_eq!(
+                    cache
+                        .coverage()
+                        .lod_sample(Dimension::Overworld, Layer::Surface, [-8, 8])
+                        .unwrap()
+                        .height,
+                    87
+                );
+            }
+            assert_eq!(
+                before
+                    .lod_sample(Dimension::Overworld, Layer::Surface, [-8, 8])
+                    .unwrap()
+                    .biome
+                    .as_deref(),
+                Some("minecraft:birch_forest")
+            );
+        }
+        #[test]
+        fn atlas_capacity_limits_only_presentation_not_cached_terrain() {
+            let mut cache = Cache::default();
+            for x in 0..4100 {
+                cache.insert_lod(
+                    Dimension::Overworld,
+                    LodKey { x, z: 0, level: 0 },
+                    coarse_tile([1, 2, 3]),
+                );
+            }
+            let mut near = view(Dimension::Overworld);
+            near.span = [16.0; 2];
+            near.center = [8.0; 2];
+            assert!(cache.gpu_atlas_fits(&near));
+            assert!(cache.terrain_atlas(&near, 1).height <= 1024);
+            let mut far = near.clone();
+            far.span = [150000.0; 2];
+            far.width = 1600;
+            far.height = 1200;
+            assert!(!cache.gpu_atlas_fits(&far));
+            let frame = cache.render(far, 2);
+            assert!(frame.view.width <= 1024 && frame.view.height <= 1024);
+            assert_eq!(frame.pixels.len(), frame.view.width * frame.view.height * 4);
+            assert_eq!(cache.lod_tiles.len(), 4100);
+            assert!(
+                cache
+                    .coverage()
+                    .lod_sample(Dimension::Overworld, Layer::Surface, [0, 0])
+                    .is_some()
+            );
+            assert!(
+                cache
+                    .coverage()
+                    .lod_sample(Dimension::Overworld, Layer::Surface, [4099 * 16, 0])
+                    .is_some()
+            );
+        }
+        #[test]
+        fn coarse_atlas_geometry_uses_actual_world_extent_and_valid_uvs() {
+            let mut cache = Cache::default();
+            let key = LodKey {
+                x: -1,
+                z: 0,
+                level: 3,
+            };
+            cache.insert_lod(Dimension::Overworld, key, coarse_tile([1, 2, 3]));
+            let mut v = view(Dimension::Overworld);
+            v.center = [-64.0, 64.0];
+            v.span = [128.0; 2];
+            let atlas = cache.terrain_atlas(&v, 1);
+            let draw = &atlas.coarse[0];
+            let (src, dst) = atlas
+                .coarse_quad(&v, [10.0, 20.0, 256.0, 256.0], draw, key.bounds())
+                .unwrap();
+            assert_eq!(src, [0.0, 0.0, 16.0, 16.0]);
+            assert_eq!(dst, [10.0, 20.0, 256.0, 256.0]);
+            assert_eq!(atlas.chunks.len(), 0);
+        }
         #[test]
         fn frame_pixels_map_back_to_their_world_position_at_any_angle() {
             let mut frame = view(Dimension::Overworld);
@@ -3195,7 +4101,7 @@ mod map_regressions {
         assert!(frame.known > 0);
     }
     #[test]
-    fn evicted_terrain_can_be_inserted_again_without_source_edits() {
+    fn terrain_beyond_the_old_budget_is_retained() {
         let mut cache = Cache::default();
         for x in 0..4097 {
             cache.insert(
@@ -3208,7 +4114,7 @@ mod map_regressions {
                 },
             );
         }
-        assert_eq!(cache.render(view(1), 1).known, 0);
+        assert_eq!(cache.render(view(1), 1).known, 256);
         cache.insert(
             Dimension::Overworld,
             Layer::Surface,

@@ -181,3 +181,10 @@ cancellable = true
 target = "horizon_client::game::native_hooks::Game<'_>::native_menu_background"
 helper = "menu_background.rs"
 bindings = [{ name = "game", ty = "&crate::game::Game<'_>", value = "self" }, { name = "radius", ty = "&mut Option<f32>", value = "radius" }]
+
+[[module]]
+id = "lod-adapter"
+file = "crates/horizon-client-render/src/lod.rs"
+name = "minimap_lod_adapter"
+source = "lod_adapter.rs"
+visibility = "pub"
