@@ -1,6 +1,58 @@
 # Validation
 
-## Unreleased — biome blending, water and fluid hover, 2026-11-10
+## 0.5.0 — release validation, 2026-11-10
+
+Validated on Linux with Rust 1.95.0 and the unchanged Horizon/Mixins pins in
+`compatibility.json`. Historical checks below describe pre-release snapshots;
+their older package sizes and hashes do not identify the release artifact.
+
+- Formatting and clippy with warnings denied: pass.
+- Locked offline workspace tests: pass (55 runtime tests, one ignored manual
+  benchmark, one source-audit test).
+- Regressions cover retained detailed biome names after chunk unload, negative
+  chunk coordinates, dimension/layer isolation, missing and updated resamples,
+  immutable coverage snapshots, and water-surface versus cave biome sampling.
+- Template integration, deterministic AST staging and full source audit: pass;
+  the original Horizon checkout remains unchanged.
+- Actual pinned Horizon client check: pass without warnings.
+- Runtime tests inside the pinned client: pass (55 tests).
+- Reproducible source-only package and official package check: pass.
+  Artifact: `minimap_worldmap_waypoints_reworked-0.5.0.hnmod`, 103,330 bytes.
+  SHA-256: `41969c9bdfc128b6e995784060d68c01ceda2987e9476f08f7a52dc36e6cfce0`.
+- Local launcher also compiled the installed package on the user's existing
+  `fdc87ae` base in the performance profile. This is a compilation check,
+  not an additional supported-revision or gameplay claim.
+
+Biome and terrain history remains in RAM for the current connection. Disconnect
+clears it. Previously unknown biome data requires another visit to a loaded
+chunk. No live-game visual review, FPS profiling, macOS/Windows run or registry
+publication was performed for this release.
+
+## Pre-release snapshot — zoom stripes and fixed source detail, 2026-11-10
+
+- Removed zoom-dependent atlas levels and the distant-smoothing setting;
+  legacy preferences load without restoring that behavior.
+- Texture publication now uses immutable snapshot identity and commits the
+  matching geometry only after the upload succeeds. Resource invalidation
+  discards the displayed frame and forces its next upload.
+- Formatting, clippy with warnings denied and locked offline workspace tests:
+  pass (53 runtime tests, one ignored manual benchmark; one source-audit test).
+- New regressions cover same-size atlases with different slot layouts, failed
+  uploads, repeated zoom, atlas/raster transitions, resource invalidation, and
+  unchanged detailed/LOD texels through zoom and atlas repacking.
+- Template integration: pass. Pinned Horizon client check: pass without warnings.
+- All 53 runtime tests pass inside the pinned client; nine client UI tests pass.
+  Deterministic AST staging and full source audit pass; the original Horizon
+  checkout remains unchanged.
+- Official package check: pass. Local source bundle: 98,052 bytes; SHA-256
+  `6c2d8a04f929338902ce7efe2331c2bf792b180440d00ab33ae4a0f8eb58af26`.
+
+No live-game visual review, FPS profiling or macOS/Windows run was performed.
+The existing raster fallback remains limited to a 1024-pixel image side when
+visible terrain exceeds the shared GPU slot; it samples original terrain without
+zoom-dependent averaging. These checks were recorded before the 0.5.0 release.
+
+## Pre-release snapshot — biome blending, water and fluid hover, 2026-11-10
 
 - Hovering a detailed water or lava column reports its surface Y first and the
   lowest liquid Y in parentheses, in the world-map footer, the point menu title
@@ -19,7 +71,7 @@
   in the pinned client (52); injected client adapter tests pass (9).
 - No live-game visual review, FPS profiling or macOS/Windows run was performed.
 
-## Unreleased — real leaf colours, 2026-11-09
+## Pre-release snapshot — real leaf colours, 2026-11-09
 
 - Leaf states get their map colour from the game's own block sprites: the mean
   texture colour is multiplied by the state's `TintSource`. Oak, jungle, acacia,
@@ -36,7 +88,7 @@
   texture-tint multiplication and colour-swatch layout).
 - No live-game visual review, FPS profiling or macOS/Windows run was performed.
 
-## Unreleased — waypoint colours and compact map footer, 2026-11-09
+## Pre-release snapshot — waypoint colours and compact map footer, 2026-11-09
 
 - World-map cursor and Nether coordinates share one footer line; the biome
   keeps its own line.
@@ -54,7 +106,7 @@
   runtime tests pass inside the pinned client (52 tests).
 - No live-game visual review, FPS profiling or macOS/Windows run was performed.
 
-## Unreleased — biome-tinted grass, 2026-11-09
+## Pre-release snapshot — biome-tinted grass, 2026-11-09
 
 - Grass blocks on detailed and LOD map tiles now use the biome's grass tint,
   with the block's ordinary map colour as the fallback for unknown biomes.
@@ -66,7 +118,7 @@
   runtime tests pass inside the pinned client (51 tests).
 - No live-game visual review, FPS profiling or macOS/Windows run was performed.
 
-## Unreleased — stable LOD retention and zoom quality, 2026-11-09
+## Pre-release snapshot — stable LOD retention and zoom quality, 2026-11-09
 
 - Formatting and clippy with warnings denied: pass.
 - Locked offline runtime tests: 50 passed; one manual benchmark ignored.
@@ -89,9 +141,9 @@ bounded work queues and waypoint limits remain. The earlier bounded-eviction
 behavior described below has been superseded.
 
 No live-game visual review, FPS profiling or macOS/Windows run was performed.
-These changes are local and have not been committed, pushed or published.
+These checks were recorded before the 0.5.0 release.
 
-## Unreleased — RAM LOD and full-viewport map, 2026-11-09
+## Pre-release snapshot — RAM LOD and full-viewport map, 2026-11-09
 
 - Formatting and clippy with warnings denied: pass.
 - Locked offline workspace tests: pass (47 runtime tests, one source-audit test;
@@ -137,7 +189,7 @@ The new pictograms are original code-drawn assets. Waypoint biome samples live
 only in the current connection's RAM and are collected from loaded chunks in
 the player's actual dimension. Missing/custom biome icons use a question mark.
 No live-game visual review, FPS measurement or macOS/Windows run was performed.
-Registry review was not repeated. This version has not been pushed or published.
+Registry review was not repeated for this pre-release snapshot.
 
 ## 0.4.1 — 2026-11-09
 

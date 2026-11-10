@@ -311,7 +311,6 @@ struct State {
     camera: maps::Camera,
     marker: [f64; 2],
     elapsed: f64,
-    uploaded: (u64, usize),
     frame: Option<Arc<maps::Frame>>,
     dragging: bool,
     close: bool,
@@ -347,7 +346,6 @@ impl Default for State {
             camera: maps::Camera::new([0.0; 2], 2.0),
             marker: [0.0; 2],
             elapsed: 1.0,
-            uploaded: (0, 0),
             frame: None,
             dragging: false,
             close: false,
@@ -516,7 +514,7 @@ fn draw_icon(
     game: &Game<'_>,
     batch: &mut HudBatch,
     at: [f32; 2],
-    rows: [&str; 8],
+    rows: [&str; 16],
     colors: [u32; 3],
 ) {
     for (y, row) in rows.iter().enumerate() {
@@ -548,29 +546,37 @@ fn dimension_icon(game: &Game<'_>, batch: &mut HudBatch, dimension: Dimension, a
     let (rows, colors) = match dimension {
         Dimension::Player => (
             [
-                "...11...", "..1111..", ".111111.", "...11...", "...11...", "...11...", "...11...",
-                "........",
+                "................", ".......11.......", "......1111......", ".....111111.....",
+                "....11211211....", "...1122112211...", "..112221122211..", ".11222211222211.",
+                ".......11.......", ".......11.......", ".......11.......", ".......11.......",
+                "......2112......", ".....222222.....", "................", "................",
             ],
             [0xffff6262, 0xffffffff, 0xffffffff],
         ),
         Dimension::Overworld => (
             [
-                "........", "........", "11111111", "11111111", "22222222", "22322232", "23222322",
-                "22232222",
+                "................", "................", "..111111111111..", ".11111111111111.",
+                ".11111111111111.", ".22111221112212.", ".22212222122222.", ".22222222222222.",
+                ".22332222233222.", ".22222232222222.", ".22222222222222.", ".23222222222322.",
+                "..222233222222..", "....22222222....", "......2222......", "................",
             ],
             [0xff68b34a, 0xff93643d, 0xffbc8a54],
         ),
         Dimension::Nether => (
             [
-                ".111111.", ".122221.", ".123321.", ".123321.", ".123321.", ".122221.", ".111111.",
-                "........",
+                "................", "..111111111111..", "..111111111111..", "..112222222211..",
+                "..112233222211..", "..112333322211..", "..112233222211..", "..112222233211..",
+                "..112222333211..", "..112222233211..", "..112332222211..", "..112233222211..",
+                "..112222222211..", "..111111111111..", "..111111111111..", "................",
             ],
             [0xff44263f, 0xffb649cf, 0xffef9aff],
         ),
         Dimension::End => (
             [
-                "...11...", ".112211.", "12233221", "12333321", ".123321.", "..1221..", "...11...",
-                "........",
+                "................", "................", "......2222......", "....22111122....",
+                "..221111111122..", ".22111333311122.", ".21113333331112.", ".21133333333112.",
+                ".22113333331122.", "..221133331122..", "...2211111122...", "....22211222....",
+                "......2222......", ".......22.......", "................", "................",
             ],
             [0xffc6c78c, 0xff598f88, 0xff191d35],
         ),
@@ -596,94 +602,24 @@ fn localized_biome(id: &str) -> String {
 }
 
 fn biome_icon(game: &Game<'_>, batch: &mut HudBatch, biome: Option<&str>, at: [f32; 2]) {
-    use runtime::BiomeSymbol::*;
-    let (rows, colors) = match runtime::biome_symbol(biome) {
-        Unknown => (
-            [
-                "..1111..", ".11..11.", ".....11.", "...111..", "...11...", "........", "...11...",
-                "........",
-            ],
-            [0xffaeb9c6, 0, 0],
-        ),
-        Water => (
-            [
-                "........", "1..11..1", ".11..11.", "........", "1..11..1", ".11..11.", "........",
-                "........",
-            ],
-            [0xff68b8ed, 0, 0],
-        ),
-        Desert => (
-            [
-                "..1.....", ".111....", "..1.....", ".....2..", "...2.22.", "...222..", ".....2..",
-                "33333333",
-            ],
-            [0xffffd65c, 0xff6b9952, 0xffd9b977],
-        ),
-        Snow => (
-            [
-                "...1....", ".1.1.1..", "..111...", "1111111.", "..111...", ".1.1.1..", "...1....",
-                "........",
-            ],
-            [0xffd2f0ff, 0, 0],
-        ),
-        Forest => (
-            [
-                "...1....", "..111...", ".11111..", "..111...", ".11111..", "1111111.", "...2....",
-                "...2....",
-            ],
-            [0xff4caa65, 0xff9b7045, 0],
-        ),
-        Swamp => (
-            [
-                "...1....", "..111...", ".11111..", "1.121.1.", "..121...", "...2....", "33333333",
-                ".33..33.",
-            ],
-            [0xff75964b, 0xff82664c, 0xff568c85],
-        ),
-        Mushroom => (
-            [
-                "..1111..", ".111111.", "11211211", "11111111", "...22...", "...22...", "...22...",
-                "........",
-            ],
-            [0xffce6262, 0xffeee3ca, 0],
-        ),
-        Badlands => (
-            [
-                ".....11.", "....1111", "..111111", ".2222222", "22222222", "33333333", "11111111",
-                "22222222",
-            ],
-            [0xffc9824a, 0xffb9553d, 0xffecd39b],
-        ),
-        Nether => (
-            [
-                "....1...", "...11...", ".1.112..", ".111122.", "11112221", "11122211", ".112211.",
-                "..1111..",
-            ],
-            [0xffd64e44, 0xffffb552, 0],
-        ),
-        End => (
-            [
-                "........", "...11...", "..1221..", ".122221.", "12233221", ".122221.", "..1111..",
-                "........",
-            ],
-            [0xffc8c78c, 0xffdddca8, 0xffa586c7],
-        ),
-        Cave => (
-            [
-                "..1111..", ".112211.", "11222211", "12222221", "12222221", "12222221", "11222211",
-                "11111111",
-            ],
-            [0xff9b8b85, 0xff333141, 0],
-        ),
-        Plains => (
-            [
-                "........", "...1....", "..121...", "...1....", "...3....", ".3.3....", "..33....",
-                "33333333",
-            ],
-            [0xfff0c763, 0xfffff3d0, 0xff70b65a],
-        ),
-    };
-    draw_icon(game, batch, at, rows, colors);
+    let icon = runtime::biome_pictogram(biome);
+    for (y, row) in icon.rows.iter().enumerate() {
+        let mut x = 0;
+        while x < runtime::BIOME_ICON_SIZE {
+            let index = (row >> (x * 2)) & 3;
+            let start = x;
+            while x < runtime::BIOME_ICON_SIZE && (row >> (x * 2)) & 3 == index {
+                x += 1;
+            }
+            if index != 0 {
+                game.native_fill(
+                    batch,
+                    [at[0] + start as f32, at[1] + y as f32, (x - start) as f32, 1.0],
+                    icon.colors[index as usize - 1],
+                );
+            }
+        }
+    }
 }
 
 fn portal_label(kind: Portal) -> &'static str {
@@ -1498,7 +1434,7 @@ fn button(
 }
 
 fn waypoint_visible_rows(height: f32) -> usize {
-    (((height - 90.0) / 28.0).floor() as usize).clamp(1, 12)
+    (((height - 90.0) / 42.0).floor() as usize).clamp(1, 12)
 }
 
 fn waypoint_row_at(state: &State, width: f32, height: f32, index: usize) -> Option<[f32; 4]> {
@@ -1509,9 +1445,9 @@ fn waypoint_row_at(state: &State, width: f32, height: f32, index: usize) -> Opti
     let row = index - start;
     Some([
         12.0,
-        44.0 + row as f32 * 28.0,
+        44.0 + row as f32 * 42.0,
         (width - 24.0).max(1.0),
-        27.0,
+        41.0,
     ])
 }
 
@@ -1652,16 +1588,16 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         let biome = state.waypoint_biomes.get(&spot).map(String::as_str);
         let biome_x = name_x + game.native_text_width(&waypoint.name) + 7.0;
         let right = row[0] + row[2] - 4.0;
-        if biome_x + 8.0 < right {
+        if biome_x + runtime::BIOME_ICON_SIZE as f32 <= right {
             biome_icon(game, batch, biome, [biome_x, row[1] + 3.0]);
             if let Some(biome) = biome {
-                let label_x = biome_x + 12.0;
+                let label_x = biome_x + 20.0;
                 if label_x < right {
                     let label = fit_text(game, &localized_biome(biome), right - label_x);
                     game.native_text(batch, &label, [label_x, row[1] + 3.0], 0x8fcf86, false);
                 }
             }
-            if inside(mouse, [biome_x, row[1] + 2.0, right - biome_x, 12.0]) {
+            if inside(mouse, [biome_x, row[1] + 2.0, right - biome_x, 17.0]) {
                 let label = biome.map_or_else(
                     || tr("Biome: —", "биом: —", "Biome : —", "Bioma: —", "Biom: —").to_owned(),
                     localized_biome,
@@ -1673,7 +1609,7 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             game,
             batch,
             waypoint.dimension,
-            [row[0] + 6.0, row[1] + 16.0],
+            [row[0] + 6.0, row[1] + 22.0],
         );
         game.native_text(
             batch,
@@ -1684,7 +1620,7 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
                 waypoint.y,
                 waypoint.z
             ),
-            [row[0] + 18.0, row[1] + 15.0],
+            [row[0] + 26.0, row[1] + 25.0],
             0xaaaaaa,
             false,
         );
@@ -2496,7 +2432,8 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
                 move || {
                     let book = resources.facts();
                     let minimum = snapshot.height().start;
-                    maps::sample(
+                    let mut names = BTreeMap::<u16, Arc<str>>::new();
+                    maps::sample_with_biomes(
                         |x, y, z| {
                             let id = snapshot.block([x, y, z]);
                             let air = book.is_air(id);
@@ -2639,6 +2576,11 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
                         [pos.0, pos.1],
                         minimum,
                         layer,
+                        |at| {
+                            let id = snapshot.biome(at)?.0;
+                            let info = biome_palette.list.get(id as usize)?;
+                            Some(names.entry(id).or_insert_with(|| Arc::from(info.name.as_str())).clone())
+                        },
                     )
                 },
             );
@@ -2700,7 +2642,6 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
             },
             round: !large && settings.round,
             large,
-            smooth: large && settings.smooth_worldmap,
         };
         controller.maps.request(view.clone());
         current_view = Some(view);
@@ -2710,45 +2651,34 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
         && image.view.dimension == selected
         && image.view.large == large
     {
-        let (serial, width, height, pixels) = match &image.atlas {
-            Some(atlas) => (
-                (atlas.serial, atlas.width),
-                atlas.width,
-                atlas.height,
-                &atlas.pixels,
-            ),
-            None => (
-                (image.serial, 0),
-                image.view.width,
-                image.view.height,
-                &image.pixels,
-            ),
-        };
-        if serial != state.uploaded && !game.native_mod_image(width as u32, height as u32, pixels) {
+        if current_view
+            .as_ref()
+            .is_some_and(|view| view.layer != image.view.layer)
+        {
             return;
         }
-        state.uploaded = serial;
         // Camera movement is independent of worker sampling/upload latency.
         // Pointer queries and overlays use this exact same displayed view.
-        if let (Some(atlas), Some(view)) = (&image.atlas, current_view) {
-            if view.layer == image.view.layer {
-                let view = complete_map_view(
-                    atlas,
-                    view,
-                    state.frame.as_ref().map(|frame| &frame.view),
-                    &image.view,
-                );
-                state.frame = Some(Arc::new(maps::Frame {
-                    serial: image.serial,
-                    view,
-                    pixels: Vec::new(),
-                    known: image.known,
-                    atlas: Some(atlas.clone()),
-                }));
-            }
+        let next = if let (Some(atlas), Some(view)) = (&image.atlas, current_view) {
+            let view = complete_map_view(
+                atlas,
+                view,
+                state.frame.as_ref().map(|frame| &frame.view),
+                &image.view,
+            );
+            Arc::new(maps::Frame {
+                serial: image.serial,
+                view,
+                pixels: Vec::new(),
+                known: image.known,
+                atlas: Some(atlas.clone()),
+            })
         } else {
-            state.frame = Some(image);
-        }
+            image
+        };
+        maps::present_frame(&mut state.frame, next, |width, height, pixels| {
+            game.native_mod_image(width, height, pixels)
+        });
     }
 }
 
@@ -2933,7 +2863,7 @@ fn draw(
 
 fn tab(width: f32, index: usize) -> [f32; 4] {
     let w = ((width - 16.0) / 4.0).max(1.0);
-    [8.0 + w * index as f32, 8.0, (w - 2.0).max(1.0), 18.0]
+    [8.0 + w * index as f32, 8.0, (w - 2.0).max(1.0), 24.0]
 }
 
 fn information_rect(width: f32, height: f32) -> [f32; 4] {
@@ -3268,9 +3198,9 @@ fn draw_information(game: &Game<'_>, batch: &mut HudBatch, state: &State, menu: 
 fn map_footer(width: f32, height: f32) -> [f32; 4] {
     [
         8.0,
-        (height - 41.0).max(0.0),
+        (height - 47.0).max(0.0),
         (width - 16.0).max(1.0),
-        33.0_f32.min(height),
+        39.0_f32.min(height),
     ]
 }
 fn over_map_controls(mouse: [f32; 2], width: f32, height: f32) -> bool {
@@ -3324,6 +3254,7 @@ fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         } else {
             coverage.lod_sample(frame.view.dimension, frame.view.layer, block)
         };
+        let detailed = coverage.detailed_biome(frame.view.dimension, frame.view.layer, block);
         let height_approximate = column.is_none() && rough.is_some();
         let height = column
             .map(|column| column.height)
@@ -3377,9 +3308,9 @@ fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             }
         }
         if biome.is_none() {
-            biome = rough
+            biome = detailed
                 .as_ref()
-                .and_then(|sample| sample.biome.as_ref())
+                .or_else(|| rough.as_ref().and_then(|sample| sample.biome.as_ref()))
                 .map(|name| name.to_string());
         }
         lod_warning = !coverage.detailed_at(frame.view.dimension, frame.view.layer, block)
@@ -3400,11 +3331,11 @@ fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         if dimension == settings.world_dimension {
             game.native_fill(batch, tab, 0xe032624b);
         }
-        dimension_icon(game, batch, dimension, [tab[0] + 4.0, tab[1] + 5.0]);
+        dimension_icon(game, batch, dimension, [tab[0] + 4.0, tab[1] + 4.0]);
         game.native_text(
             batch,
             dimension.label(),
-            [tab[0] + 16.0, tab[1] + 5.0],
+            [tab[0] + 24.0, tab[1] + 8.0],
             0xffffff,
             true,
         );
@@ -3441,7 +3372,7 @@ fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     game.native_text(
         batch,
         &label,
-        [footer[0] + 18.0, footer[1] + 18.0],
+        [footer[0] + 26.0, footer[1] + 21.0],
         if lod_warning { 0xffffd45c } else { 0xffffff },
         true,
     );
@@ -4068,7 +3999,7 @@ pub(super) fn disconnect(game: &Game<'_>) {
 }
 
 pub(super) fn atlas_invalidated() {
-    state().uploaded = (0, 0);
+    state().frame = None;
 }
 
 #[cfg(test)]
@@ -4181,14 +4112,12 @@ mod render_tests {
     #[test]
     fn map_camera_never_advances_beyond_the_uploaded_atlas() {
         let atlas = maps::TerrainAtlas {
-            serial: 1,
             pixels: Vec::new(),
             width: 1024,
             height: 16,
             chunks: Vec::new(),
             coarse: Vec::new(),
             region: [-128, -128, 256, 256],
-            lod: 0,
         };
         let prepared = View {
             session: 1,
@@ -4201,7 +4130,6 @@ mod render_tests {
             angle: 0.0,
             round: false,
             large: true,
-            smooth: true,
         };
         let mut other = prepared.clone();
         other.dimension = Dimension::Nether;

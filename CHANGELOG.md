@@ -1,7 +1,20 @@
 # Changelog
 
-## Unreleased — LOD and point information
+## 0.5.0 — 2026-11-10
 
+- Preserve per-column biome names with detailed terrain in the session cache.
+  Unloading a game chunk or browsing another dimension no longer removes its
+  known biome name/icon. Missing resamples preserve known names; new known
+  samples update them. Data remains in RAM until disconnect, not on disk.
+- Give each of the 67 vanilla biomes its own original 16×16 pictogram, including
+  sulfur caves and the void. Redraw all dimension pictograms at 16×16 and fit
+  their tabs and waypoint rows to the larger size.
+
+- Fix chunk stripes during zoom by publishing geometry only with its exact
+  uploaded texture. Equal image dimensions no longer conceal changed atlas
+  layouts; failed uploads retain the previous complete frame.
+- Remove zoom-dependent texture levels and the distant-smoothing setting.
+  Detailed chunks and LOD keep their original texels at every map scale.
 - Added a new mod icon built from the in-game map with a thin, single-colour
   square frame, plus world-map, Nether, End, waypoint and waypoint-creation
   screenshots under `assets/screenshots`. Registry-ready copies and an entry
@@ -28,8 +41,8 @@
   parentheses in the world-map footer and the point menu.
 - Temporarily removed terrain/LOD RAM eviction limits until the persistent
   container is available. Camera changes and incoming LOD levels retain old data.
-- Preserve original LOD texels at all map zoom levels; smooth detailed chunk
-  images separately. Cull GPU presentation independently of retained terrain,
+- Preserve original terrain texels at all map zoom levels.
+  Cull GPU presentation independently of retained terrain,
   with a worker raster fallback instead of an oversized/failed atlas upload.
 - Retain approximate LOD surface heights and biome names for cursor/menu info.
 
@@ -42,13 +55,9 @@
   Removed the title/player-coordinate header; Nether coordinates now describe
   the point under the mouse.
 
-## 0.5.0 — 2026-11-09
-
 - Added German localization, including regional German variants.
-- Show both Overworld and Nether player coordinates above the world map;
-  removed mouse-drag and scroll navigation hints from the map interface.
-- Added original dimension and biome-family pictograms to the map and waypoint
-  manager, with localized biome tooltips and explicit unknown-data icons.
+- Removed mouse-drag and scroll navigation hints from the map interface.
+- Added localized biome tooltips and explicit unknown-data icons.
 - Added Show on map for selected waypoints, preserving zoom and centering on the
   point in its dimension; adapted waypoint rows and controls to small viewports.
 - Made the waypoint manager translucent and disabled its background blur.
@@ -56,7 +65,6 @@
   replacing the standalone dimension label, with correct negative rounding.
 - Skip world geometry preparation and rendering behind the full-screen map,
   keeping game/network updates, texture uploads and interface rendering active.
-- Added README screenshot placeholders and documented the new interface.
 
 ## 0.4.1 — 2026-11-09
 

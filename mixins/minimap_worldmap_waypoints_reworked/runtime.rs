@@ -233,7 +233,6 @@ pub mod minimap {
         pub round: bool,
         pub mini_dimension: super::Dimension,
         pub world_dimension: super::Dimension,
-        pub smooth_worldmap: bool,
         pub overworld_coordinates: bool,
         pub nether_coordinates: bool,
     }
@@ -249,7 +248,6 @@ pub mod minimap {
                 round: false,
                 mini_dimension: super::Dimension::Player,
                 world_dimension: super::Dimension::Player,
-                smooth_worldmap: true,
                 overworld_coordinates: true,
                 nether_coordinates: true,
             }
@@ -282,9 +280,6 @@ pub mod minimap {
                     }
                     "nether_coordinates" => {
                         value.nether_coordinates = raw.parse().unwrap_or(value.nether_coordinates)
-                    }
-                    "smooth_worldmap" => {
-                        value.smooth_worldmap = raw.parse().unwrap_or(value.smooth_worldmap)
                     }
                     "enabled" => value.enabled = raw.parse().unwrap_or(value.enabled),
                     "corner" => {
@@ -322,7 +317,7 @@ pub mod minimap {
 
         pub fn encode(self) -> String {
             format!(
-                "# Minimap Reworked settings\nenabled={}\ncorner={}\nsize={}\nshape={}\nzoom={}\nrotate={}\nmini_dimension={}\nworld_dimension={}\nsmooth_worldmap={}\noverworld_coordinates={}\nnether_coordinates={}\n",
+                "# Minimap Reworked settings\nenabled={}\ncorner={}\nsize={}\nshape={}\nzoom={}\nrotate={}\nmini_dimension={}\nworld_dimension={}\noverworld_coordinates={}\nnether_coordinates={}\n",
                 self.enabled,
                 self.corner.name(),
                 self.size_px,
@@ -331,7 +326,6 @@ pub mod minimap {
                 self.rotate_with_player,
                 self.mini_dimension.name(),
                 self.world_dimension.name(),
-                self.smooth_worldmap,
                 self.overworld_coordinates,
                 self.nether_coordinates,
             )
@@ -354,7 +348,7 @@ pub mod minimap {
                 5 => self.rotate_with_player = !self.rotate_with_player,
                 6 => {
                     *self = Self::default();
-                    return 0xfbf;
+                    return 0x7bf;
                 }
                 7 => {
                     self.mini_dimension = super::cycle(self.mini_dimension, &super::Dimension::ALL)
@@ -363,9 +357,8 @@ pub mod minimap {
                     self.world_dimension =
                         super::cycle(self.world_dimension, &super::Dimension::ALL)
                 }
-                9 => self.smooth_worldmap = !self.smooth_worldmap,
-                10 => self.overworld_coordinates = !self.overworld_coordinates,
-                11 => self.nether_coordinates = !self.nether_coordinates,
+                9 => self.overworld_coordinates = !self.overworld_coordinates,
+                10 => self.nether_coordinates = !self.nether_coordinates,
                 _ => return 0,
             }
             1 << button
@@ -395,12 +388,9 @@ pub mod minimap {
                 self.world_dimension = edited.world_dimension;
             }
             if mask & 512 != 0 {
-                self.smooth_worldmap = edited.smooth_worldmap;
-            }
-            if mask & 1024 != 0 {
                 self.overworld_coordinates = edited.overworld_coordinates;
             }
-            if mask & 2048 != 0 {
+            if mask & 1024 != 0 {
                 self.nether_coordinates = edited.nether_coordinates;
             }
             if mask & 32 != 0 {
@@ -494,14 +484,6 @@ pub mod minimap {
                     self.world_dimension.label()
                 ),
                 localized_format!(
-                    "World map — distant smoothing: {}",
-                    "Большая карта — сглаживание вдали: {}",
-                    "Carte du monde — lissage à distance : {}",
-                    "Mapa del mundo — suavizado a distancia: {}",
-                    "Weltkarte — Glättung in der Ferne: {}",
-                    on(self.smooth_worldmap)
-                ),
-                localized_format!(
                     "Overworld coordinates: {}",
                     "Координаты Верхнего мира: {}",
                     "Coordonnées de la Surface : {}",
@@ -537,84 +519,769 @@ pub mod minimap {
 
 use minimap::Settings;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BiomeSymbol {
-    Unknown,
-    Water,
-    Desert,
-    Snow,
-    Forest,
-    Swamp,
-    Mushroom,
-    Cave,
-    Badlands,
-    Nether,
-    End,
-    Plains,
+/// Original 16×16 biome pictograms. Each row packs sixteen two-bit palette indices,
+/// leftmost pixel first; index zero is transparent. Colours are portable ARGB.
+#[derive(Debug, PartialEq, Eq)]
+pub struct BiomePictogram {
+    pub rows: [u32; 16],
+    pub colors: [u32; 3],
 }
 
-/// Built-in biome families use original pictograms; unknown/custom biomes stay explicit.
-pub fn biome_symbol(id: Option<&str>) -> BiomeSymbol {
-    use BiomeSymbol::*;
-    let Some(name) = id.and_then(|id| id.strip_prefix("minecraft:")) else {
-        return Unknown;
-    };
-    if name.contains("ocean") || name.contains("river") || name.contains("beach") {
-        Water
-    } else if name.contains("snow")
-        || name.contains("frozen")
-        || name.contains("ice")
-        || name.contains("peaks")
-        || name == "grove"
-    {
-        Snow
-    } else if name.contains("swamp") {
-        Swamp
-    } else if name.contains("mushroom") {
-        Mushroom
-    } else if name.contains("badlands") {
-        Badlands
-    } else if name.contains("desert") {
-        Desert
-    } else if [
-        "nether_wastes",
-        "soul_sand_valley",
-        "basalt_deltas",
-        "crimson_forest",
-        "warped_forest",
-    ]
-    .contains(&name)
-    {
-        Nether
-    } else if name == "the_end" || name.starts_with("end_") || name == "small_end_islands" {
-        End
-    } else if name.contains("forest")
-        || name.contains("taiga")
-        || name.contains("jungle")
-        || name.contains("cherry")
-        || name == "pale_garden"
-    {
-        Forest
-    } else if ["dripstone_caves", "lush_caves", "deep_dark"].contains(&name) {
-        Cave
-    } else if [
-        "plains",
-        "sunflower_plains",
-        "savanna",
-        "savanna_plateau",
-        "windswept_savanna",
-        "meadow",
-        "windswept_hills",
-        "windswept_gravelly_hills",
-        "stony_shore",
-    ]
-    .contains(&name)
-    {
-        Plains
-    } else {
-        Unknown
-    }
+pub const BIOME_ICON_SIZE: usize = 16;
+
+pub fn biome_pictogram(id: Option<&str>) -> &'static BiomePictogram {
+    id.and_then(|id| id.strip_prefix("minecraft:"))
+        .and_then(|name| BIOME_PICTOGRAMS.iter().find(|(key, _)| *key == name))
+        .map_or(&UNKNOWN_BIOME_PICTOGRAM, |(_, icon)| icon)
 }
+
+static UNKNOWN_BIOME_PICTOGRAM: BiomePictogram = BiomePictogram {
+    rows: [
+        0, 0x00555000, 0x01400500, 0x05000140, 0x00000140, 0x00000500, 0x00001400, 0x00005000,
+        0x00005000, 0, 0, 0x00005000, 0x00005000, 0, 0, 0,
+    ],
+    colors: [0xffaeb9c6, 0, 0],
+};
+
+pub static BIOME_PICTOGRAMS: &[(&str, BiomePictogram)] = &[
+    (
+        "badlands",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x01555400, 0x01555400, 0x05555400,
+                0x05555400, 0x05555554, 0x0ffffffc, 0x15555554, 0x15555554, 0x2aaaaaa8, 0x55555554,
+                0x55555554, 0x00000000,
+            ],
+            colors: [0xffc37b43, 0xffb34f38, 0xffe9c78e],
+        },
+    ),
+    (
+        "bamboo_jungle",
+        BiomePictogram {
+            rows: [
+                0x00053000, 0x00c5c000, 0x003b0000, 0x000d014c, 0x14c53170, 0x17c5cec0, 0xec3b0340,
+                0x340d014c, 0x14c53170, 0x17c5cec0, 0xec3b0340, 0x340d014c, 0x14053170, 0x14050ec0,
+                0x14050340, 0x00000000,
+            ],
+            colors: [0xff4e9b4b, 0xffc4ce6a, 0xff267348],
+        },
+    ),
+    (
+        "basalt_deltas",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x00000000, 0x00055000, 0x00059000, 0x00059000, 0x15459000, 0x16459000,
+                0x16459154, 0x16459164, 0x16459164, 0x16459164, 0x16455164, 0x16755164, 0x16755154,
+                0x15757f54, 0x00303f00,
+            ],
+            colors: [0xff676672, 0xffa4a2a5, 0xffef963e],
+        },
+    ),
+    (
+        "beach",
+        BiomePictogram {
+            rows: [
+                0xaaa15555, 0xaaa15555, 0xaa815555, 0xaa855555, 0xaa855555, 0xaaa15555, 0xaaa15555,
+                0xaaa857d5, 0xaaa85ff5, 0xaaaa1ff5, 0xaaaa17d5, 0xaaa85555, 0xaaa85ff5, 0xaaa85555,
+                0xaaa15555, 0xaaa15555,
+            ],
+            colors: [0xffe8cd8d, 0xff69bce1, 0xfff9edbf],
+        },
+    ),
+    (
+        "birch_forest",
+        BiomePictogram {
+            rows: [
+                0x00055000, 0x00155400, 0x01555500, 0x05555540, 0x15555550, 0x15555550, 0x15555550,
+                0x05555540, 0x01555500, 0x0017d000, 0x000a8000, 0x000a8000, 0x000bc000, 0x000a8000,
+                0x000a8000, 0x00000000,
+            ],
+            colors: [0xff96bb56, 0xffe8e3ce, 0xff50554f],
+        },
+    ),
+    (
+        "cherry_grove",
+        BiomePictogram {
+            rows: [
+                0x00055000, 0x00155400, 0x01fd5500, 0x05fd5540, 0x15555fd0, 0x15555fd0, 0x15555550,
+                0x05555540, 0x01555500, 0x00155000, 0x000a8000, 0x050a8000, 0x000a8000, 0x000a8014,
+                0x000a8000, 0x00000000,
+            ],
+            colors: [0xffeca5c4, 0xff80565c, 0xffffd5e5],
+        },
+    ),
+    (
+        "cold_ocean",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x00000000, 0x00000080, 0x00054080, 0x10101aa8, 0x05400590, 0x00000080,
+                0x00000000, 0x00054000, 0x10101004, 0x05400550, 0x00000000, 0x00000000, 0x00000000,
+                0x00000000, 0x00000000,
+            ],
+            colors: [0xff608fbb, 0xffa6d5e9, 0xff426785],
+        },
+    ),
+    (
+        "crimson_forest",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x00555400, 0x01555500, 0x05555f50, 0x15555f50, 0x15f55550, 0x15f55554,
+                0x15555554, 0x000a8000, 0x000a8000, 0x000a8000, 0x000a8000, 0x150a8000, 0x150a8154,
+                0x150a8154, 0x00000000,
+            ],
+            colors: [0xffb43e5e, 0xff79464c, 0xfff3ad78],
+        },
+    ),
+    (
+        "dappled_forest",
+        BiomePictogram {
+            rows: [
+                0x00055000, 0x00155400, 0x015f5500, 0x055f57c0, 0x155557d0, 0x17d55550, 0x17d57d50,
+                0x05557d40, 0x01555500, 0x0017d000, 0x000a8000, 0x000a8000, 0x000bc000, 0x000a8000,
+                0x000a8000, 0x00000000,
+            ],
+            colors: [0xffb9ce6a, 0xffe9d9b1, 0xff69763c],
+        },
+    ),
+    (
+        "dark_forest",
+        BiomePictogram {
+            rows: [
+                0x00055000, 0x00155400, 0x05555500, 0x15555550, 0x55555554, 0x55555555, 0x55555555,
+                0x55555554, 0x15555550, 0x05555000, 0x000a8000, 0x000a8ffc, 0x000a8ffc, 0x000a82a0,
+                0x000a82a0, 0x00000000,
+            ],
+            colors: [0xff355c3d, 0xff795338, 0xff52754a],
+        },
+    ),
+    (
+        "deep_cold_ocean",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x00000000, 0x00000080, 0x00054080, 0x10101aa8, 0x05400590, 0x00000080,
+                0x00000000, 0x00054000, 0x10121004, 0x05622550, 0x000a8000, 0x000a8000, 0x00020000,
+                0x0ffffff0, 0x00000000,
+            ],
+            colors: [0xff3c608c, 0xff7eafc9, 0xff293f63],
+        },
+    ),
+    (
+        "deep_dark",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x00400000, 0x01555500, 0x01555540, 0x07555740, 0x076aa750, 0x17aaab50,
+                0x17aaab54, 0x16efae54, 0x16aaaa54, 0x17eaaa54, 0x16aaaf54, 0x16abea54, 0x16aaaa54,
+                0x16aaaa54, 0x00000000,
+            ],
+            colors: [0xff255a61, 0xff132b39, 0xff61d3cf],
+        },
+    ),
+    (
+        "deep_frozen_ocean",
+        BiomePictogram {
+            rows: [
+                0x00800000, 0x00800200, 0x02a00200, 0x02a54a80, 0x1aa81a84, 0x0aa80a90, 0x2aaa2aa0,
+                0x00002aa0, 0x00054000, 0x10121004, 0x05622550, 0x000a8000, 0x000a8000, 0x00020000,
+                0x0ffffff0, 0x00000000,
+            ],
+            colors: [0xff456b96, 0xffc6e7f3, 0xff2e4e72],
+        },
+    ),
+    (
+        "deep_lukewarm_ocean",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x00000000, 0x00000000, 0x00054000, 0x10101004, 0x05400550, 0x00000000,
+                0x00000020, 0x08054020, 0x18121084, 0x06622590, 0x020a8080, 0x080a8020, 0x08020020,
+                0x0ffffff0, 0x00000000,
+            ],
+            colors: [0xff388aa9, 0xff92c4a4, 0xff24627f],
+        },
+    ),
+    (
+        "deep_ocean",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x02a00000, 0x00000000, 0x00054000, 0x10101004, 0x05400550, 0x00000000,
+                0x00000000, 0x00054000, 0x10121004, 0x05622550, 0x000a8a80, 0x000a8000, 0x00020000,
+                0x0ffffff0, 0x00000000,
+            ],
+            colors: [0xff346d9f, 0xff6aa7cb, 0xff254b73],
+        },
+    ),
+    (
+        "desert",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x000003f0, 0x00000ffc, 0x00000ffc, 0x00000ffc, 0x0a2803f0, 0x0a280000,
+                0x0a28a000, 0x0aa8a000, 0x0aaaa000, 0x002aa000, 0x00280000, 0x00280000, 0x15555554,
+                0x15555554, 0x00000000,
+            ],
+            colors: [0xffdabb78, 0xff68964f, 0xfff9d764],
+        },
+    ),
+    (
+        "dripstone_caves",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x00400000, 0x01555500, 0x01555540, 0x0555fd40, 0x056afd50, 0x15aafd50,
+                0x15aab954, 0x16aaba54, 0x16baba54, 0x16baba54, 0x16faaa54, 0x16feaa54, 0x17feaa54,
+                0x17feaa54, 0x00000000,
+            ],
+            colors: [0xffac866b, 0xff38313c, 0xffd1aa81],
+        },
+    ),
+    (
+        "end_barrens",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x04000000,
+                0x15554000, 0x556a9554, 0x05556a50, 0x0157d540, 0x0017d400, 0x00055000, 0x00004000,
+                0x00000000, 0x00000000,
+            ],
+            colors: [0xffbcb98e, 0xffddd9ac, 0xff8c799f],
+        },
+    ),
+    (
+        "end_highlands",
+        BiomePictogram {
+            rows: [
+                0x0003c000, 0x0003c000, 0x0003ff00, 0x0fc3ff00, 0x00c00f00, 0x00c00f00, 0x00c00f00,
+                0x01d55f00, 0x05555500, 0x15555550, 0x5aaaaaa4, 0x15555550, 0x05555540, 0x01555500,
+                0x00555400, 0x00155000,
+            ],
+            colors: [0xffccc88d, 0xffeae3ad, 0xffa17cc3],
+        },
+    ),
+    (
+        "end_midlands",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x002aa800, 0x016aa800, 0x05555500,
+                0x15555550, 0x5aaaaaa4, 0x15555550, 0x05555540, 0x015fd500, 0x005fd400, 0x00155000,
+                0x00000000, 0x00000000,
+            ],
+            colors: [0xffc7c28d, 0xffe3dfb2, 0xff9982b6],
+        },
+    ),
+    (
+        "eroded_badlands",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x00054000, 0x00054000, 0x00054000, 0x00054000, 0x00054150, 0x00054150,
+                0x15054150, 0x15155150, 0x3f3ff3f0, 0x15155554, 0x55555554, 0xaaaaaaa8, 0x55555554,
+                0x55555554, 0x00000000,
+            ],
+            colors: [0xffca8953, 0xffaa5039, 0xfff0d3a2],
+        },
+    ),
+    (
+        "flower_forest",
+        BiomePictogram {
+            rows: [
+                0x00055000, 0x00155400, 0x01555500, 0x05555540, 0x15555550, 0x15555550, 0x15555550,
+                0x05555540, 0x01555500, 0x00155000, 0x000a8000, 0x000a80f0, 0x0f0a80f0, 0x0f0aa800,
+                0x000aa800, 0x00000000,
+            ],
+            colors: [0xff539e62, 0xffec9bb8, 0xfff5d06b],
+        },
+    ),
+    (
+        "forest",
+        BiomePictogram {
+            rows: [
+                0x00055000, 0x00155400, 0x01555500, 0x05555540, 0x15555550, 0x15555550, 0x15555550,
+                0x05555540, 0x01555500, 0x00155000, 0x000a8000, 0x000a8000, 0x000a8000, 0x000a8000,
+                0x000a8000, 0x00000000,
+            ],
+            colors: [0xff4ca45c, 0xff91653f, 0xff86c16b],
+        },
+    ),
+    (
+        "frozen_ocean",
+        BiomePictogram {
+            rows: [
+                0x00800000, 0x00800200, 0x02a00200, 0x02a54a80, 0x1aa81a84, 0x0aa80a90, 0x2aaa2aa0,
+                0x00002aa0, 0x00054000, 0x10101004, 0x05400550, 0x00000000, 0x00000000, 0x00000000,
+                0x00000000, 0x00000000,
+            ],
+            colors: [0xff77adcd, 0xffe3f9ff, 0xff52758e],
+        },
+    ),
+    (
+        "frozen_peaks",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x00020000, 0x00068000, 0x000a8000, 0x001aa000, 0x002ba000, 0x006ba800,
+                0x00ae9800, 0x015d9600, 0x01656500, 0x05b56540, 0x05956540, 0x16d55950, 0x16555950,
+                0x57555554, 0x00000000,
+            ],
+            colors: [0xff88c9e6, 0xffe9fbff, 0xff498ba8],
+        },
+    ),
+    (
+        "frozen_river",
+        BiomePictogram {
+            rows: [
+                0x01555400, 0x00556400, 0x00569400, 0x00195400, 0x00165400, 0x00059500, 0x00016540,
+                0x00005950, 0x00001554, 0x00000555, 0x00001594, 0x00005654, 0x00005950, 0x00016550,
+                0x00055540, 0x00155540,
+            ],
+            colors: [0xffa0d9ef, 0xffe6f8ff, 0xff678ca7],
+        },
+    ),
+    (
+        "grove",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x00400000, 0x01500000, 0x01500400, 0x05f41500, 0x0f5f1500, 0x3555d540,
+                0x15555540, 0x55555550, 0x55555550, 0x55555554, 0x55555555, 0x02a55555, 0x02a55555,
+                0x3ffffffc, 0x3ffffffc,
+            ],
+            colors: [0xff679587, 0xff937359, 0xffe3f3ef],
+        },
+    ),
+    (
+        "ice_spikes",
+        BiomePictogram {
+            rows: [
+                0x00080000, 0x00080000, 0x000a0000, 0x000a0100, 0x002e0100, 0x042e0140, 0x042e8540,
+                0x052e8540, 0x152e8540, 0x152ba550, 0x156ba550, 0x156ba550, 0x556ba550, 0x555ba954,
+                0x555aa954, 0x00000000,
+            ],
+            colors: [0xff92cfe8, 0xffe5faff, 0xff4d86ae],
+        },
+    ),
+    (
+        "jagged_peaks",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x00020000, 0x00068000, 0x000a8000, 0x001aa000, 0x002ba080, 0x006ba880,
+                0x00ae5aa0, 0x015d56a0, 0x01755ff8, 0x05755ffc, 0x05d57ffc, 0x15d57fff, 0x1755ffff,
+                0x57555554, 0x00000000,
+            ],
+            colors: [0xff8b969f, 0xfff2f8fc, 0xff56626d],
+        },
+    ),
+    (
+        "jungle",
+        BiomePictogram {
+            rows: [
+                0x00155400, 0x01555500, 0x05555540, 0x15555554, 0x15555555, 0x17555555, 0x07555555,
+                0x03555555, 0x03155555, 0x03055555, 0x03095555, 0x030a5555, 0x030a8554, 0x030a82a0,
+                0x000a82a0, 0x00000000,
+            ],
+            colors: [0xff31834b, 0xff8b6945, 0xff75ba4c],
+        },
+    ),
+    (
+        "lukewarm_ocean",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x00000000, 0x00000000, 0x00054000, 0x10101004, 0x05400550, 0x00000000,
+                0x00000020, 0x08054020, 0x18101084, 0x06400590, 0x02000080, 0x08000020, 0x08000020,
+                0x00000000, 0x00000000,
+            ],
+            colors: [0xff55bbd9, 0xffb0dbaf, 0xff3389b9],
+        },
+    ),
+    (
+        "lush_caves",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x00400000, 0x01555500, 0x01555540, 0x05555540, 0x056e9550, 0x15bf9950,
+                0x15ae9954, 0x16a69a54, 0x16a6aa54, 0x16a6aa54, 0x16a6aa54, 0x16aaaa54, 0x16555554,
+                0x16555554, 0x00000000,
+            ],
+            colors: [0xff719e57, 0xff303e39, 0xffe8a7cb],
+        },
+    ),
+    (
+        "mangrove_swamp",
+        BiomePictogram {
+            rows: [
+                0x00055000, 0x00155400, 0x01555500, 0x05555540, 0x15569550, 0x15569550, 0x15555550,
+                0x05555540, 0x01555540, 0x01155040, 0x010a8040, 0x002aa000, 0x3f8a88fc, 0x008a8800,
+                0x2a0a82a0, 0x3ffffffc,
+            ],
+            colors: [0xff568751, 0xff875144, 0xff75b7a2],
+        },
+    ),
+    (
+        "meadow",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000540, 0x00001550, 0x00001650,
+                0x01501550, 0x05540540, 0x05940300, 0x05540300, 0x01530330, 0x00c33330, 0x00ffffc0,
+                0x3ffffffc, 0xffffffff,
+            ],
+            colors: [0xff91ba5d, 0xfff5d8ea, 0xff659c47],
+        },
+    ),
+    (
+        "mushroom_fields",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x00155000, 0x01555500, 0x05556940, 0x15a56950, 0x15a55550, 0x05555540,
+                0x05555540, 0x05555540, 0x000a8000, 0x000a8000, 0x000a8000, 0x000a8000, 0x000a8000,
+                0x3ffffff0, 0x00000000,
+            ],
+            colors: [0xffce6468, 0xfff4e7cd, 0xff957b98],
+        },
+    ),
+    (
+        "nether_wastes",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x00000000, 0x00000000, 0x00040000, 0x0a940000, 0x0a950100, 0x15550140,
+                0x15554550, 0x15554554, 0x15555554, 0x15f55554, 0x3ffd7754, 0x357fffd4, 0x155fd5fc,
+                0x15575574, 0x00000000,
+            ],
+            colors: [0xffc4594c, 0xff803a3b, 0xffffad4c],
+        },
+    ),
+    (
+        "ocean",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x02a00000, 0x00000000, 0x00054000, 0x10101004, 0x05400550, 0x00000000,
+                0x00000000, 0x00054000, 0x10101004, 0x05400550, 0x00000a80, 0x00000000, 0x00000000,
+                0x00000000, 0x00000000,
+            ],
+            colors: [0xff529dce, 0xff8bd0eb, 0xff32759f],
+        },
+    ),
+    (
+        "old_growth_birch_forest",
+        BiomePictogram {
+            rows: [
+                0x00155400, 0x00555500, 0x01555540, 0x05555540, 0x15555550, 0x15555550, 0x15569550,
+                0x0557d540, 0x01569500, 0x00169000, 0x000a8000, 0x000a8000, 0x000a8000, 0x000a8000,
+                0x000a8000, 0x00000000,
+            ],
+            colors: [0xff87b453, 0xffe8e4d1, 0xff4e5945],
+        },
+    ),
+    (
+        "old_growth_pine_taiga",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x00010000, 0x00054000, 0x00054000, 0x00155000, 0x00155000, 0x00555400,
+                0x005a9400, 0x015a9500, 0x055a9540, 0x055a9540, 0x155a9550, 0x000a83fc, 0x000a8ff0,
+                0x000a8ff0, 0x00000000,
+            ],
+            colors: [0xff597a4a, 0xff886646, 0xffa1a15d],
+        },
+    ),
+    (
+        "old_growth_spruce_taiga",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x00010400, 0x00055500, 0x00455500, 0x01555540, 0x01555540, 0x05555550,
+                0x05555550, 0x15555554, 0x15555555, 0x55555555, 0x55555555, 0x55555a00, 0x55555600,
+                0x3ffffffc, 0x00000000,
+            ],
+            colors: [0xff3f694e, 0xff806243, 0xff88a15e],
+        },
+    ),
+    (
+        "pale_garden",
+        BiomePictogram {
+            rows: [
+                0x00055000, 0x00155400, 0x01555500, 0x05555540, 0x15555550, 0x15555550, 0x15555550,
+                0x05555540, 0x01555540, 0x01155040, 0x010a8040, 0x000ec040, 0x000a8000, 0x000a8000,
+                0x000a8000, 0x00000000,
+            ],
+            colors: [0xffb6b9a5, 0xffbcb3a1, 0xffe69d54],
+        },
+    ),
+    (
+        "plains",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00400040,
+                0x00400040, 0x01100110, 0x01100110, 0x01340300, 0x03330330, 0x00c33330, 0x00c0c0c0,
+                0x3ffffffc, 0x00000000,
+            ],
+            colors: [0xffa6d45c, 0xfffff1bb, 0xff548f46],
+        },
+    ),
+    (
+        "river",
+        BiomePictogram {
+            rows: [
+                0x01555400, 0x00555400, 0x0057d4a8, 0x001574a8, 0x001554a8, 0x000555a8, 0x00015540,
+                0x00005550, 0x00001554, 0x2aa00555, 0x2aa01554, 0x2aa05554, 0x2aa05550, 0x2aa15550,
+                0x00055540, 0x00155540,
+            ],
+            colors: [0xff69b7e9, 0xff9dbe66, 0xff447eab],
+        },
+    ),
+    (
+        "savanna",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x00000000, 0x00000000, 0x00015554, 0x00015554, 0x15555554, 0x1555a000,
+                0x00028000, 0x00028000, 0x00028000, 0x00028000, 0x00028000, 0x00028000, 0x3ffffff0,
+                0x3ffffff0, 0x00000000,
+            ],
+            colors: [0xff9da44e, 0xff8c6944, 0xffd8c875],
+        },
+    ),
+    (
+        "savanna_plateau",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x00000000, 0x00000000, 0x00015554, 0x00015554, 0x15555554, 0x1555a000,
+                0x00028000, 0x00028000, 0x03fff000, 0x03fff000, 0x0fffff00, 0x0fffff00, 0x3ffffff0,
+                0x3ffffff0, 0x00000000,
+            ],
+            colors: [0xffa6a44a, 0xff876047, 0xffcdb17a],
+        },
+    ),
+    (
+        "small_end_islands",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x00000000, 0x00f00000, 0x00f00040, 0x00000150, 0x00001555, 0x00000554,
+                0x02000150, 0x0a800040, 0x2aa80000, 0xaaaa0000, 0x2aa80000, 0x0aa00000, 0x0a800000,
+                0x02000000, 0x00000000,
+            ],
+            colors: [0xffd9d4a0, 0xfff2eabd, 0xff9b7ebf],
+        },
+    ),
+    (
+        "snowy_beach",
+        BiomePictogram {
+            rows: [
+                0xaaa15555, 0xaaa157f5, 0xaa8157f5, 0xaa855555, 0xaa857ffd, 0xaaa15555, 0xaaa15555,
+                0xaaa85555, 0xaaa85555, 0xaaaa1ff5, 0xaaaa1555, 0xaaa85555, 0xaaa85555, 0xaaa85555,
+                0xaaa15555, 0xaaa15555,
+            ],
+            colors: [0xffe1eff3, 0xff78b3d5, 0xffa6b9c3],
+        },
+    ),
+    (
+        "snowy_plains",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x00000000, 0x00000000, 0x00000080, 0x00000080, 0x00800aa8, 0x00000080,
+                0x00000080, 0x00000000, 0x00002000, 0x0000a800, 0x000aaa80, 0x156aaaa4, 0x15555554,
+                0x15555554, 0x00000000,
+            ],
+            colors: [0xffd7efff, 0xffffffff, 0xff92b8ce],
+        },
+    ),
+    (
+        "snowy_slopes",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x00100000, 0x00140000, 0x00550000, 0x00550000, 0x01654000, 0x01695000,
+                0x016a5400, 0x05aa9400, 0x05aea500, 0x05faa540, 0x3faaa950, 0x16aaaa50, 0x56aaaa94,
+                0x56aaaaa5, 0x00000000,
+            ],
+            colors: [0xffdcebf2, 0xffffffff, 0xff8ba4b7],
+        },
+    ),
+    (
+        "snowy_taiga",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x00030000, 0x000dc000, 0x00054000, 0x001fd000, 0x00f57c00, 0x00555400,
+                0x005ff400, 0x03f55f00, 0x05555540, 0x05555540, 0x15555550, 0x000a8000, 0x000a8000,
+                0x000a8000, 0x00000000,
+            ],
+            colors: [0xff5c8c80, 0xff87694d, 0xffe3f4f5],
+        },
+    ),
+    (
+        "soul_sand_valley",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x0c000300, 0x0c0003c0, 0x0f0003c0, 0x3f000ff0, 0x3fcaaff0, 0x302aaff0,
+                0x009696f0, 0x00969630, 0x002aa800, 0x155aa554, 0x15555554, 0x15555554, 0x15555554,
+                0x15555554, 0x00000000,
+            ],
+            colors: [0xff8f7766, 0xff594f4e, 0xff72d9d5],
+        },
+    ),
+    (
+        "sparse_jungle",
+        BiomePictogram {
+            rows: [
+                0x00155400, 0x01555500, 0x05555540, 0x15555550, 0x155555d0, 0x155555d0, 0x055555c0,
+                0x015555c0, 0x001550c0, 0x0c0a80c0, 0x3c0a80c0, 0x330a80c0, 0x000a80c0, 0x000a80fc,
+                0x000a80fc, 0x00000000,
+            ],
+            colors: [0xff70a557, 0xff917348, 0xffa5c76d],
+        },
+    ),
+    (
+        "stony_peaks",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x00010000, 0x00054000, 0x00054000, 0x00155000, 0x00169000, 0x00569400,
+                0x005d5400, 0x015d5500, 0x01755500, 0x05755a40, 0x05d55a40, 0x16a55550, 0x17555550,
+                0x57555554, 0x00000000,
+            ],
+            colors: [0xffa5a196, 0xffcec8b9, 0xff6d7169],
+        },
+    ),
+    (
+        "stony_shore",
+        BiomePictogram {
+            rows: [
+                0xaaa15555, 0xaaa15555, 0xaa8157f5, 0xaa855ffd, 0xaa855ffd, 0xaaa1f7f5, 0xaaa1f555,
+                0xaaa85555, 0xaaa85555, 0xaaaa17d5, 0xaaaa1ff5, 0xaaa85ff5, 0xaaa857d5, 0xaaa85555,
+                0xaaa15555, 0xaaa15555,
+            ],
+            colors: [0xff949c9e, 0xff70b3d1, 0xffd0d2c9],
+        },
+    ),
+    (
+        "sulfur_caves",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x00400000, 0x01555500, 0x01555540, 0x057d5540, 0x056aa550, 0x15baa950,
+                0x15baa954, 0x16feae54, 0x16feae54, 0x16febe54, 0x16febf54, 0x17ffff54, 0x17ffff54,
+                0x16aaaa54, 0x00000000,
+            ],
+            colors: [0xffa59958, 0xff47433b, 0xffe8da6e],
+        },
+    ),
+    (
+        "sunflower_plains",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x00000000, 0x00000000, 0x00054000, 0x00165000, 0x001a9000, 0x00165000,
+                0x00054000, 0x03c30000, 0x033f0000, 0x03330300, 0x03330330, 0x00c33330, 0x00c3c0c0,
+                0x3ffffffc, 0x00000000,
+            ],
+            colors: [0xfff3c538, 0xff684524, 0xff629c40],
+        },
+    ),
+    (
+        "swamp",
+        BiomePictogram {
+            rows: [
+                0x00055000, 0x00155400, 0x01555500, 0x05555540, 0x15555550, 0x15555550, 0x15555550,
+                0x05555540, 0x01555540, 0x01155040, 0x010a8040, 0x000a8000, 0x3f0a80fc, 0x000a8000,
+                0x000a8000, 0x3ffffffc,
+            ],
+            colors: [0xff789549, 0xff826348, 0xff58938c],
+        },
+    ),
+    (
+        "taiga",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x00010000, 0x00054000, 0x00054000, 0x00155000, 0x00155000, 0x00555400,
+                0x00555400, 0x01555500, 0x05555540, 0x05555540, 0x15555550, 0x000a8000, 0x000a8000,
+                0x000a8000, 0x00000000,
+            ],
+            colors: [0xff487e63, 0xff8c6748, 0xff96b18b],
+        },
+    ),
+    (
+        "the_end",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x003ff000, 0x003ff000, 0x000fc000, 0x000fc000, 0x000fc000, 0x000fc000,
+                0x015fd400, 0x055fd500, 0x155fd550, 0x5aaaaaa4, 0x15555550, 0x05555540, 0x01555500,
+                0x00555400, 0x00155000,
+            ],
+            colors: [0xffd7d49e, 0xffefe8ba, 0xffa587cf],
+        },
+    ),
+    (
+        "the_void",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x15000054, 0x10000004, 0x10000004, 0x10000004, 0x00000000, 0x00000000,
+                0x00028000, 0x00028000, 0x00000000, 0x00000000, 0x10000004, 0x10000004, 0x10000004,
+                0x15400154, 0x00000000,
+            ],
+            colors: [0xff9b89bd, 0xffd2c3e9, 0xff514867],
+        },
+    ),
+    (
+        "warm_ocean",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x00000000, 0x00000000, 0x00054000, 0x10101004, 0x05400550, 0x00000028,
+                0x000002a8, 0x0f0542a8, 0x1f101284, 0x0ffc0690, 0x0ffc0280, 0x003c0280, 0x003c0280,
+                0x003c0000, 0x00000000,
+            ],
+            colors: [0xff48cec5, 0xfff0b27d, 0xffc7649c],
+        },
+    ),
+    (
+        "warped_forest",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x00555400, 0x01555500, 0x05555f50, 0x15555f50, 0x15f55550, 0x15f55554,
+                0x15555554, 0x040a8010, 0x040a8010, 0x040a8010, 0x000a8010, 0x000a8010, 0x000a8000,
+                0x000a8000, 0x00000000,
+            ],
+            colors: [0xff37ad9a, 0xff535078, 0xff92d4b1],
+        },
+    ),
+    (
+        "windswept_forest",
+        BiomePictogram {
+            rows: [
+                0x3ff00000, 0x00010000, 0x00054ffc, 0x00054000, 0x00155000, 0x00155000, 0x00555400,
+                0x00555400, 0x01555500, 0x05555540, 0x05555740, 0x15557fd0, 0x000bfff0, 0x00fffff0,
+                0x0ffffffc, 0xffffffff,
+            ],
+            colors: [0xff628f61, 0xff977757, 0xffb8c4bd],
+        },
+    ),
+    (
+        "windswept_gravelly_hills",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x00010000, 0x00054000, 0x00054000, 0x00155000, 0x00175080, 0x00575480,
+                0x005d56a0, 0x015d56a0, 0x01759ff8, 0x05755ffc, 0x05e57ffc, 0x15d57eff, 0x1655efff,
+                0x57555554, 0x00000000,
+            ],
+            colors: [0xff9b9b98, 0xffd1d0c9, 0xff686c70],
+        },
+    ),
+    (
+        "windswept_hills",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x00010000, 0x2aa54000, 0x00054aa8, 0x00155000, 0x00175080, 0x00575480,
+                0x005d56a0, 0x015d56a0, 0x01755ff8, 0x05755ffc, 0x05d57ffc, 0x15d57fff, 0x1755ffff,
+                0x57555554, 0x00000000,
+            ],
+            colors: [0xff82907d, 0xffc3c9c5, 0xff607260],
+        },
+    ),
+    (
+        "windswept_savanna",
+        BiomePictogram {
+            rows: [
+                0x00000000, 0x15540000, 0x00000000, 0x55415554, 0x00015554, 0x15555554, 0x1555a000,
+                0x00028000, 0x00028000, 0x00028c00, 0x0002bf00, 0x0002bfc0, 0x0002ffc0, 0x3ffffff0,
+                0x3ffffffc, 0x000fffff,
+            ],
+            colors: [0xff9a9c52, 0xff826047, 0xffb3aa8a],
+        },
+    ),
+    (
+        "wooded_badlands",
+        BiomePictogram {
+            rows: [
+                0x00fffc00, 0x00fffc00, 0x00fffc00, 0x00020000, 0x01565400, 0x01565400, 0x05555400,
+                0x05555400, 0x05555554, 0x0ffffffc, 0x15555554, 0x15555554, 0x2aaaaaa8, 0x55555554,
+                0x55555554, 0x00000000,
+            ],
+            colors: [0xffc47b47, 0xffa94f37, 0xff64834b],
+        },
+    ),
+];
 
 /// Portal-scale coordinates. Scale continuous X/Z before flooring, including
 /// negative coordinates; Y is unchanged. The End has no such portal mapping.
@@ -1396,7 +2063,7 @@ mod tests {
         // Migration must persist even without an edit or a world being joined.
         controller.shutdown();
         assert_eq!(controller.settings().size_px, 192);
-        assert!(!controller.settings().smooth_worldmap);
+        assert!(!controller.settings().encode().contains("smooth_worldmap"));
         assert_eq!(controller.waypoints(&scoped.world), vec![scoped.clone()]);
         assert!(controller.waypoints("save:A").is_empty());
         let file = fs::read_to_string(directory.join(SETTINGS_FILE)).unwrap();
@@ -1673,6 +2340,7 @@ pub mod maps {
             }
         }
     }
+
     /// The most translucent layers one column composites. A deep ocean is one
     /// water layer, not one per block, but glass above water above ice still
     /// blends in order.
@@ -1735,19 +2403,33 @@ pub mod maps {
         (70 + depth.saturating_mul(10)).min(190) as u8
     }
 
+    #[cfg(test)]
     pub fn sample(
+        block: impl FnMut(i32, i32, i32) -> Block,
+        top: impl Fn(i32, i32) -> i32,
+        chunk: [i32; 2],
+        minimum: i32,
+        layer: Layer,
+    ) -> Tile {
+        sample_with_biomes(block, top, chunk, minimum, layer, |_| None)
+    }
+
+    /// Resolve the biome at the visible top of each column, including water,
+    /// from the same snapshot as its terrain, before the game unloads it.
+    pub fn sample_with_biomes(
         mut block: impl FnMut(i32, i32, i32) -> Block,
         top: impl Fn(i32, i32) -> i32,
         chunk: [i32; 2],
         minimum: i32,
         layer: Layer,
+        mut biome: impl FnMut([i32; 3]) -> Option<Arc<str>>,
     ) -> Tile {
         let mut tile = Tile {
             pixels: vec![0; 16 * 16 * 4],
             heights: [minimum; 256],
             walls: [false; 256],
             portals: Vec::new(),
-            biomes: Vec::new(),
+            biomes: vec![None; 256],
         };
         for z in 0..16 {
             for x in 0..16 {
@@ -1834,6 +2516,7 @@ pub mod maps {
                 // the seabed keeps its shape under the tinted water.
                 let visible_y = base_y.or(top_y).unwrap_or(minimum);
                 tile.heights[i] = visible_y;
+                tile.biomes[i] = biome([wx, top_y.unwrap_or(visible_y), wz]);
                 tile.walls[i] = matches!(
                     (layer, base_y.or(top_y)),
                     (Layer::Below(c), Some(y)) if c == y
@@ -1862,18 +2545,8 @@ pub mod maps {
         pub angle: f64,
         pub round: bool,
         pub large: bool,
-        pub smooth: bool,
     }
     impl View {
-        pub fn lod(&self) -> usize {
-            if !self.smooth {
-                return 0;
-            }
-            let blocks = (self.span[0] / self.width.max(1) as f64)
-                .max(self.span[1] / self.height.max(1) as f64);
-            blocks.log2().floor().clamp(0.0, 4.0) as usize
-        }
-
         fn atlas_region(&self) -> [i64; 4] {
             let step = 2f64.powf(
                 (self.span[0].max(self.span[1]) / 4.0)
@@ -2125,6 +2798,7 @@ pub mod maps {
     pub struct Coverage {
         pub session: u64,
         pub detailed: BTreeSet<(Dimension, Layer, i32, i32)>,
+        detailed_data: BTreeMap<Key, Arc<Tile>>,
         pub lod: Vec<(Dimension, LodKey, [u64; 4])>,
         pub lod_data: BTreeMap<(Dimension, LodKey), Arc<Tile>>,
     }
@@ -2135,6 +2809,17 @@ pub mod maps {
         pub biome: Option<Arc<str>>,
     }
     impl Coverage {
+        pub fn detailed_biome(
+            &self,
+            dimension: Dimension,
+            layer: Layer,
+            at: [i32; 2],
+        ) -> Option<Arc<str>> {
+            let key = (dimension, layer, at[0].div_euclid(16), at[1].div_euclid(16));
+            let tile = self.detailed_data.get(&key)?;
+            let cell = (at[1].rem_euclid(16) * 16 + at[0].rem_euclid(16)) as usize;
+            tile.biomes.get(cell).cloned().flatten()
+        }
         pub fn lod_sample(
             &self,
             dimension: Dimension,
@@ -2249,129 +2934,14 @@ pub mod maps {
 
     /// Block-resolution terrain, uploaded only when the repository changes.
     pub struct TerrainAtlas {
-        pub serial: u64,
         pub pixels: Vec<u8>,
         pub height: usize,
         pub chunks: Vec<[i32; 2]>,
         pub coarse: Vec<LodDraw>,
         pub region: [i64; 4],
         pub width: usize,
-        pub lod: usize,
     }
     impl TerrainAtlas {
-        fn levels(self) -> Vec<Arc<Self>> {
-            // Keep original LOD texels at every zoom. Only detailed chunk
-            // textures use the optional distant smoothing levels.
-            if !self.coarse.is_empty() && self.chunks.is_empty() {
-                let atlas = Arc::new(self);
-                return vec![atlas; 5];
-            }
-            if !self.coarse.is_empty() {
-                let mut levels = vec![Arc::new(self)];
-                for lod in 1..=4 {
-                    let source = &levels[0];
-                    let step = 1usize << lod;
-                    let size = 16 / step;
-                    let columns = 1024 / size;
-                    let fine_height = source.chunks.len().div_ceil(columns) * size;
-                    let height = (fine_height + source.coarse.len().div_ceil(64) * 16).max(16);
-                    let mut pixels = vec![0; 1024 * height * 4];
-                    for slot in 0..source.chunks.len() {
-                        for y in 0..size {
-                            for x in 0..size {
-                                let mut rgba = [0u32; 4];
-                                for dy in 0..step {
-                                    for dx in 0..step {
-                                        let index = ((slot / 64 * 16 + y * step + dy) * 1024
-                                            + slot % 64 * 16
-                                            + x * step
-                                            + dx)
-                                            * 4;
-                                        let a = u32::from(source.pixels[index + 3]);
-                                        for (c, sum) in rgba[..3].iter_mut().enumerate() {
-                                            *sum += u32::from(source.pixels[index + c]) * a;
-                                        }
-                                        rgba[3] += a;
-                                    }
-                                }
-                                let index = ((slot / columns * size + y) * 1024
-                                    + slot % columns * size
-                                    + x)
-                                    * 4;
-                                for c in 0..3 {
-                                    pixels[index + c] =
-                                        ((rgba[c] + rgba[3] / 2) / rgba[3].max(1)) as u8;
-                                }
-                                pixels[index + 3] = ((rgba[3] + (step * step / 2) as u32)
-                                    / (step * step) as u32)
-                                    as u8;
-                            }
-                        }
-                    }
-                    let mut coarse = source.coarse.clone();
-                    for (i, draw) in coarse.iter_mut().enumerate() {
-                        let origin = [i % 64 * 16, fine_height + i / 64 * 16];
-                        for row in 0..16 {
-                            let from = ((draw.uv_origin[1] + row) * 1024 + draw.uv_origin[0]) * 4;
-                            let to = ((origin[1] + row) * 1024 + origin[0]) * 4;
-                            pixels[to..to + 64].copy_from_slice(&source.pixels[from..from + 64]);
-                        }
-                        draw.uv_origin = origin;
-                    }
-                    levels.push(Arc::new(Self {
-                        serial: source.serial,
-                        pixels,
-                        width: 1024,
-                        height,
-                        chunks: source.chunks.clone(),
-                        coarse,
-                        lod,
-                        region: source.region,
-                    }));
-                }
-                return levels;
-            }
-            let mut levels = vec![Arc::new(self)];
-            for lod in 1..=4 {
-                let source = &levels[lod - 1];
-                let width = source.width / 2;
-                let height = source.height / 2;
-                let mut pixels = vec![0; width * height * 4];
-                for y in 0..height {
-                    for x in 0..width {
-                        let mut rgba = [0u32; 4];
-                        for dy in 0..2 {
-                            for dx in 0..2 {
-                                let i = ((y * 2 + dy) * source.width + x * 2 + dx) * 4;
-                                let alpha = u32::from(source.pixels[i + 3]);
-                                for (channel, sum) in rgba[..3].iter_mut().enumerate() {
-                                    *sum += u32::from(source.pixels[i + channel]) * alpha;
-                                }
-                                rgba[3] += alpha;
-                            }
-                        }
-                        let i = (y * width + x) * 4;
-                        for channel in 0..3 {
-                            pixels[i + channel] =
-                                ((rgba[channel] + rgba[3] / 2) / rgba[3].max(1)) as u8;
-                        }
-                        pixels[i + 3] = ((rgba[3] + 2) / 4) as u8;
-                    }
-                }
-                levels.push(Arc::new(Self {
-                    serial: source.serial,
-                    pixels,
-                    width,
-                    height,
-                    chunks: source.chunks.clone(),
-                    coarse: source.coarse.clone(),
-                    region: source.region,
-                    lod,
-                }));
-            }
-            levels
-        }
-
         pub fn covers(&self, view: &View) -> bool {
             (0..2).all(|axis| {
                 view.center[axis] - view.span[axis] / 2.0 >= self.region[axis] as f64
@@ -2425,7 +2995,7 @@ pub mod maps {
                 if end <= start {
                     return None;
                 }
-                let size = 16usize >> self.lod;
+                let size = 16;
                 let columns = self.width / size;
                 let atlas_origin = if axis == 0 {
                     slot % columns * size
@@ -2442,7 +3012,7 @@ pub mod maps {
     }
     struct AtlasCache {
         key: (u64, Dimension, Layer, u64),
-        levels: Vec<Arc<TerrainAtlas>>,
+        terrain: Arc<TerrainAtlas>,
     }
     pub struct Frame {
         pub serial: u64,
@@ -2451,18 +3021,63 @@ pub mod maps {
         pub known: usize,
         pub atlas: Option<Arc<TerrainAtlas>>,
     }
+
+    /// Publish geometry only after its exact immutable texture is uploaded.
+    /// Keeping the previous Arc alive also makes pointer identity safe: equal
+    /// dimensions or serials alone do not identify a texture's slot layout.
+    pub fn present_frame(
+        displayed: &mut Option<Arc<Frame>>,
+        next: Arc<Frame>,
+        upload: impl FnOnce(u32, u32, &[u8]) -> bool,
+    ) -> bool {
+        let same_texture =
+            displayed
+                .as_ref()
+                .is_some_and(|previous| match (&previous.atlas, &next.atlas) {
+                    (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                    (None, None) => Arc::ptr_eq(previous, &next),
+                    _ => false,
+                });
+        if !same_texture {
+            let (width, height, pixels) = match &next.atlas {
+                Some(atlas) => (atlas.width, atlas.height, &atlas.pixels),
+                None => (next.view.width, next.view.height, &next.pixels),
+            };
+            if !upload(width as u32, height as u32, pixels) {
+                return false;
+            }
+        }
+        *displayed = Some(next);
+        true
+    }
     type Key = (Dimension, Layer, i32, i32);
     #[derive(Default)]
     pub struct Cache {
-        tiles: BTreeMap<Key, (u64, Tile)>,
+        tiles: BTreeMap<Key, (u64, Arc<Tile>)>,
         lod_tiles: BTreeMap<(Dimension, LodKey), (u64, Arc<Tile>)>,
         clock: u64,
     }
     impl Cache {
-        pub fn insert(&mut self, dimension: Dimension, layer: Layer, chunk: [i32; 2], tile: Tile) {
+        pub fn insert(
+            &mut self,
+            dimension: Dimension,
+            layer: Layer,
+            chunk: [i32; 2],
+            mut tile: Tile,
+        ) {
+            let key = (dimension, layer, chunk[0], chunk[1]);
+            if let Some((_, previous)) = self.tiles.get(&key)
+                && !previous.biomes.is_empty()
+            {
+                tile.biomes.resize(256, None);
+                for (i, biome) in tile.biomes.iter_mut().enumerate() {
+                    if biome.is_none() {
+                        *biome = previous.biomes.get(i).cloned().flatten();
+                    }
+                }
+            }
             self.clock += 1;
-            self.tiles
-                .insert((dimension, layer, chunk[0], chunk[1]), (self.clock, tile));
+            self.tiles.insert(key, (self.clock, Arc::new(tile)));
         }
         pub fn insert_lod(&mut self, dimension: Dimension, key: LodKey, tile: Tile) -> bool {
             if key.level > 22
@@ -2516,6 +3131,11 @@ pub mod maps {
             Coverage {
                 session: 0,
                 detailed: self.tiles.keys().copied().collect(),
+                detailed_data: self
+                    .tiles
+                    .iter()
+                    .map(|(key, (_, tile))| (*key, Arc::clone(tile)))
+                    .collect(),
                 lod_data: self
                     .lod_tiles
                     .iter()
@@ -2651,14 +3271,12 @@ pub mod maps {
                 }
             }
             TerrainAtlas {
-                serial,
                 pixels,
                 height,
                 chunks,
                 coarse,
                 region,
                 width: 1024,
-                lod: 0,
             }
         }
         pub fn render(&self, mut view: View, serial: u64) -> Frame {
@@ -2699,7 +3317,7 @@ pub mod maps {
                             chunk,
                             self.tiles
                                 .get(&(view.dimension, view.layer, chunk.0, chunk.1))
-                                .map(|(_, tile)| tile),
+                                .map(|(_, tile)| tile.as_ref()),
                         ));
                     }
                     let current = tile.and_then(|(_, tile)| tile);
@@ -2733,7 +3351,7 @@ pub mod maps {
                                         north_chunk.0,
                                         north_chunk.1,
                                     ))
-                                    .map(|(_, tile)| tile),
+                                    .map(|(_, tile)| tile.as_ref()),
                             ));
                         }
                         north.and_then(|(_, tile)| tile)
@@ -2748,7 +3366,7 @@ pub mod maps {
                                 west_chunk,
                                 self.tiles
                                     .get(&(view.dimension, view.layer, west_chunk.0, west_chunk.1))
-                                    .map(|(_, tile)| tile),
+                                    .map(|(_, tile)| tile.as_ref()),
                             ));
                         }
                         west.and_then(|(_, tile)| tile)
@@ -2934,14 +3552,14 @@ pub mod maps {
                             let key = (view.session, view.dimension, view.layer, cache.clock);
                             if atlas
                                 .as_ref()
-                                .is_none_or(|a| a.key != key || !a.levels[0].covers(&view))
+                                .is_none_or(|a| a.key != key || !a.terrain.covers(&view))
                             {
                                 atlas = Some(AtlasCache {
                                     key,
-                                    levels: cache.terrain_atlas(&view, serial).levels(),
+                                    terrain: Arc::new(cache.terrain_atlas(&view, serial)),
                                 });
                             }
-                            let terrain = atlas.as_ref().unwrap().levels[view.lod()].clone();
+                            let terrain = atlas.as_ref().unwrap().terrain.clone();
                             Arc::new(Frame {
                                 serial,
                                 view,
@@ -3100,7 +3718,6 @@ pub mod maps {
                 angle: 0.0,
                 round: false,
                 large: true,
-                smooth: false,
             }
         }
         #[test]
@@ -3169,42 +3786,138 @@ pub mod maps {
             cache
         }
         #[test]
-        fn lod_averages_alpha_without_bleeding_between_slots() {
-            let mut cache = Cache::default();
-            for (chunk, color) in [([0, 0], [240, 0, 0, 255]), ([1, 0], [0, 0, 240, 255])] {
-                let mut tile = Tile {
-                    pixels: color.repeat(256),
-                    ..Tile::default()
-                };
-                if chunk == [0, 0] {
-                    tile.pixels[0..4].copy_from_slice(&[0, 255, 0, 0]);
+        fn presentation_uploads_the_exact_layout_before_publishing_geometry() {
+            let mut cache = terrain_fixture();
+            cache.insert_lod(
+                Dimension::Overworld,
+                LodKey {
+                    x: 2,
+                    z: 0,
+                    level: 2,
+                },
+                coarse_tile([25, 75, 125]),
+            );
+            let mut v = view(Dimension::Overworld);
+            v.center = [64.0, 0.0];
+            v.span = [512.0; 2];
+            let make_frame = |atlas: Arc<TerrainAtlas>, view: View| {
+                Arc::new(Frame {
+                    serial: 7,
+                    view,
+                    pixels: Vec::new(),
+                    known: atlas.chunks.len() + atlas.coarse.len(),
+                    atlas: Some(atlas),
+                })
+            };
+            let first_atlas = Arc::new(cache.terrain_atlas(&v, 7));
+            let first = make_frame(first_atlas.clone(), v.clone());
+            // Same dimensions and serial, different contents and slot offsets:
+            // the old (serial, width) upload key incorrectly skipped this image.
+            cache.insert(
+                Dimension::Overworld,
+                Layer::Surface,
+                [-3, 0],
+                coarse_tile([190, 30, 15]),
+            );
+            let second_atlas = Arc::new(cache.terrain_atlas(&v, 7));
+            assert_eq!(
+                (first_atlas.width, first_atlas.height),
+                (second_atlas.width, second_atlas.height)
+            );
+            assert_ne!(first_atlas.pixels, second_atlas.pixels);
+            let second = make_frame(second_atlas.clone(), v.clone());
+            let mut shown = None;
+            let mut gpu = Vec::new();
+            assert!(present_frame(&mut shown, first.clone(), |_, _, pixels| {
+                gpu = pixels.to_vec();
+                true
+            }));
+            assert_eq!(gpu, first_atlas.pixels);
+            assert!(!present_frame(&mut shown, second.clone(), |_, _, _| false));
+            assert!(Arc::ptr_eq(shown.as_ref().unwrap(), &first));
+            assert_eq!(gpu, first_atlas.pixels);
+            assert!(present_frame(&mut shown, second.clone(), |_, _, pixels| {
+                gpu = pixels.to_vec();
+                true
+            }));
+            assert_eq!(gpu, shown.as_ref().unwrap().atlas.as_ref().unwrap().pixels);
+            // Camera-only changes reuse the immutable texture at every scale.
+            for span in [32.0, 64.0, 128.0, 256.0, 512.0, 128.0, 32.0] {
+                let mut zoomed = v.clone();
+                zoomed.span = [span; 2];
+                assert!(present_frame(
+                    &mut shown,
+                    make_frame(second_atlas.clone(), zoomed),
+                    |_, _, _| { panic!("camera movement must not upload another texture") }
+                ));
+                assert_eq!(gpu, shown.as_ref().unwrap().atlas.as_ref().unwrap().pixels);
+            }
+            // Raster fallback and return to atlas must both replace the image.
+            let raster = Arc::new(cache.render(v, 7));
+            assert!(present_frame(&mut shown, raster.clone(), |_, _, pixels| {
+                gpu = pixels.to_vec();
+                true
+            }));
+            assert_eq!(gpu, raster.pixels);
+            assert!(present_frame(&mut shown, second.clone(), |_, _, pixels| {
+                gpu = pixels.to_vec();
+                true
+            }));
+            assert_eq!(gpu, second_atlas.pixels);
+            // Resource reload invalidates both displayed geometry and texture.
+            shown = None;
+            gpu.clear();
+            assert!(present_frame(&mut shown, second, |_, _, pixels| {
+                gpu = pixels.to_vec();
+                true
+            }));
+            assert_eq!(gpu, second_atlas.pixels);
+        }
+        #[test]
+        fn detailed_texels_stay_identical_across_zoom_and_atlas_repacking() {
+            let mut cache = terrain_fixture();
+            for x in -64..64 {
+                cache.insert(
+                    Dimension::Overworld,
+                    Layer::Surface,
+                    [x, 3],
+                    coarse_tile([x as u8, 30, 120]),
+                );
+            }
+            let mut v = view(Dimension::Overworld);
+            v.center = [8.0, 8.0];
+            for span in [16.0, 32.0, 128.0, 512.0, 2048.0, 128.0, 16.0] {
+                v.span = [span; 2];
+                let atlas = cache.terrain_atlas(&v, 7);
+                for (slot, chunk) in atlas.chunks.iter().enumerate() {
+                    let tile = cache.render(
+                        View {
+                            center: chunk.map(|c| f64::from(c) * 16.0 + 8.0),
+                            span: [16.0; 2],
+                            width: 16,
+                            height: 16,
+                            ..v.clone()
+                        },
+                        0,
+                    );
+                    for row in 0..16 {
+                        let from = ((slot / 64 * 16 + row) * atlas.width + slot % 64 * 16) * 4;
+                        assert_eq!(
+                            &atlas.pixels[from..from + 64],
+                            &tile.pixels[row * 64..row * 64 + 64]
+                        );
+                    }
+                    let tile_view = View {
+                        center: tile.view.center,
+                        span: [16.0; 2],
+                        ..v.clone()
+                    };
+                    let (uv, _) = atlas
+                        .quad(&tile_view, [0.0, 0.0, 16.0, 16.0], *chunk, slot)
+                        .unwrap();
+                    assert_eq!(uv[2..], [16.0, 16.0]);
                 }
-                cache.insert(Dimension::Overworld, Layer::Surface, chunk, tile);
             }
-            let mut view = view(Dimension::Overworld);
-            let levels = cache.terrain_atlas(&view, 7).levels();
-            assert_eq!(levels.len(), 5);
-            for (lod, atlas) in levels.iter().enumerate().skip(1) {
-                let size = 16 >> lod;
-                assert_eq!(atlas.width, 64 * size);
-                assert_eq!(atlas.pixels[0], 255);
-                assert_eq!(atlas.pixels[1], 0); // transparent green does not tint red
-                assert_eq!(&atlas.pixels[size * 4..size * 4 + 4], &[0, 0, 255, 255]);
-                let (uv, _) = atlas
-                    .quad(&view, [0.0, 0.0, 16.0, 16.0], [-1, 0], 1)
-                    .unwrap();
-                assert_eq!(uv, [size as f32, 0.0, size as f32, size as f32]);
-            }
-            assert_eq!(levels[1].pixels[3], 191);
-            view.width = 100;
-            view.height = 100;
-            view.smooth = true;
-            for (span, expected) in [(100.0, 0), (200.0, 1), (800.0, 3), (6400.0, 4)] {
-                view.span = [span; 2];
-                assert_eq!(view.lod(), expected);
-            }
-            view.smooth = false;
-            assert_eq!(view.lod(), 0);
         }
         #[test]
         fn gpu_atlas_matches_cpu_pixels_and_clips_fractional_edges() {
@@ -3666,8 +4379,9 @@ pub mod maps {
             let mut v = view(Dimension::Overworld);
             v.center = [80.0, 32.0];
             v.span = [256.0; 2];
-            let levels = cache.terrain_atlas(&v, 1).levels();
-            for atlas in levels {
+            for span in [256.0, 512.0, 1024.0, 4096.0, 512.0, 256.0] {
+                v.span = [span; 2];
+                let atlas = cache.terrain_atlas(&v, 1);
                 let draw = &atlas.coarse[0];
                 for y in 0..16 {
                     let index = ((draw.uv_origin[1] + y) * atlas.width + draw.uv_origin[0]) * 4;
@@ -3682,6 +4396,109 @@ pub mod maps {
                 assert_eq!(src[2..], [16.0, 16.0]);
                 assert!(atlas.width <= 1024 && atlas.height <= 1024);
             }
+        }
+        #[test]
+        fn detailed_biomes_survive_unload_refresh_and_stay_in_their_dimension_and_layer() {
+            let mut cache = Cache::default();
+            let mut tile = coarse_tile([90, 80, 70]);
+            tile.biomes = vec![Some(Arc::from("minecraft:forest")); 256];
+            tile.biomes[15] = Some(Arc::from("minecraft:desert"));
+            cache.insert(Dimension::Overworld, Layer::Surface, [-1, -1], tile);
+            let before = cache.coverage();
+            // There is no live game chunk behind this lookup. Positions use
+            // Euclidean chunk coordinates, including negative boundaries.
+            assert_eq!(
+                before
+                    .detailed_biome(Dimension::Overworld, Layer::Surface, [-1, -16])
+                    .as_deref(),
+                Some("minecraft:desert")
+            );
+            assert_eq!(
+                before
+                    .detailed_biome(Dimension::Overworld, Layer::Surface, [-16, -16])
+                    .as_deref(),
+                Some("minecraft:forest")
+            );
+            assert!(
+                before
+                    .detailed_biome(Dimension::Nether, Layer::Surface, [-1, -16])
+                    .is_none()
+            );
+            assert!(
+                before
+                    .detailed_biome(Dimension::Overworld, Layer::Below(32), [-1, -16])
+                    .is_none()
+            );
+            assert!(
+                before
+                    .detailed_biome(Dimension::Overworld, Layer::Surface, [0, -16])
+                    .is_none()
+            );
+            cache.insert(
+                Dimension::Overworld,
+                Layer::Surface,
+                [-1, -1],
+                coarse_tile([20, 30, 40]),
+            );
+            assert_eq!(
+                cache
+                    .coverage()
+                    .detailed_biome(Dimension::Overworld, Layer::Surface, [-1, -16])
+                    .as_deref(),
+                Some("minecraft:desert")
+            );
+            let mut changed = coarse_tile([20, 30, 40]);
+            changed.biomes = vec![Some(Arc::from("minecraft:plains")); 256];
+            cache.insert(Dimension::Overworld, Layer::Surface, [-1, -1], changed);
+            assert_eq!(
+                cache
+                    .coverage()
+                    .detailed_biome(Dimension::Overworld, Layer::Surface, [-1, -16])
+                    .as_deref(),
+                Some("minecraft:plains")
+            );
+            assert_eq!(
+                before
+                    .detailed_biome(Dimension::Overworld, Layer::Surface, [-1, -16])
+                    .as_deref(),
+                Some("minecraft:desert")
+            );
+            assert!(
+                Cache::default()
+                    .coverage()
+                    .detailed_biome(Dimension::Overworld, Layer::Surface, [-1, -16])
+                    .is_none()
+            );
+        }
+        #[test]
+        fn biome_sampling_uses_the_visible_water_surface_and_selected_cave_layer() {
+            let blocks = |_: i32, y: i32, _: i32| Block {
+                rgb: if y > 40 { 0x3366aa } else { 0x888888 },
+                alpha: if y > 40 { 120 } else { 0 },
+                water: y > 40,
+                ..Block::default()
+            };
+            let names = |at: [i32; 3]| {
+                Some(Arc::from(if at[1] > 40 {
+                    "minecraft:ocean"
+                } else {
+                    "minecraft:lush_caves"
+                }))
+            };
+            let surface = sample_with_biomes(blocks, |_, _| 64, [-1, 2], 0, Layer::Surface, names);
+            assert_eq!(surface.heights[0], 40);
+            assert!(
+                surface
+                    .biomes
+                    .iter()
+                    .all(|name| name.as_deref() == Some("minecraft:ocean"))
+            );
+            let cave = sample_with_biomes(blocks, |_, _| 64, [-1, 2], 0, Layer::Below(32), names);
+            assert!(
+                cave.biomes
+                    .iter()
+                    .all(|name| name.as_deref() == Some("minecraft:lush_caves"))
+            );
         }
         #[test]
         fn lod_height_biome_and_finest_source_survive_source_changes_and_camera_turns() {
@@ -4038,7 +4855,6 @@ mod map_regressions {
             angle: 0.0,
             round: false,
             large: true,
-            smooth: false,
         }
     }
     fn wait(service: &Service, predicate: impl Fn(&Frame) -> bool) -> Arc<Frame> {
@@ -4057,35 +4873,37 @@ mod map_regressions {
         }
     }
     #[test]
-    fn biome_pictograms_classify_ids_without_guessing_unknown_names() {
-        assert_eq!(biome_symbol(None), BiomeSymbol::Unknown);
-        assert_eq!(biome_symbol(Some("custom:forest")), BiomeSymbol::Unknown);
-        assert_eq!(
-            biome_symbol(Some("minecraft:crimson_forest")),
-            BiomeSymbol::Nether
-        );
-        assert_eq!(
-            biome_symbol(Some("minecraft:snowy_taiga")),
-            BiomeSymbol::Snow
-        );
-        assert_eq!(
-            biome_symbol(Some("minecraft:end_highlands")),
-            BiomeSymbol::End
-        );
-        assert_eq!(
-            biome_symbol(Some("minecraft:birch_forest")),
-            BiomeSymbol::Forest
-        );
+    fn biome_pictograms_cover_distinct_vanilla_biomes_and_explicit_unknowns() {
+        assert_eq!(BIOME_PICTOGRAMS.len(), 67);
+        for (i, (name, icon)) in BIOME_PICTOGRAMS.iter().enumerate() {
+            let id = format!("minecraft:{name}");
+            assert!(std::ptr::eq(biome_pictogram(Some(&id)), icon));
+            assert_ne!(icon, &UNKNOWN_BIOME_PICTOGRAM);
+            assert!(icon.rows.iter().any(|row| *row != 0));
+            assert!(icon.colors.iter().all(|c| c >> 24 == 255));
+            for (other_name, other) in &BIOME_PICTOGRAMS[..i] {
+                assert_ne!(name, other_name);
+                assert_ne!(icon, other, "{name} duplicates {other_name}");
+            }
+        }
+        for id in [
+            None,
+            Some("custom:forest"),
+            Some("minecraft:unknown_forest"),
+            Some("forest"),
+        ] {
+            assert_eq!(biome_pictogram(id), &UNKNOWN_BIOME_PICTOGRAM);
+        }
     }
 
     #[test]
     fn coordinate_toggles_persist_merge_and_reset_independently() {
         let mut settings = Settings::default();
         let mut edited = settings;
-        let mask = minimap::apply(&mut edited, 10);
+        let mask = minimap::apply(&mut edited, 9);
         minimap::merge(&mut settings, edited, mask);
         assert!(!settings.overworld_coordinates && settings.nether_coordinates);
-        minimap::apply(&mut settings, 11);
+        minimap::apply(&mut settings, 10);
         assert_eq!(Settings::decode(&settings.encode()), settings);
         assert!(coordinate_lines(settings, Dimension::Overworld, [0.0; 3]).is_empty());
         let mask = minimap::apply(&mut edited, 6);
@@ -4125,14 +4943,18 @@ mod map_regressions {
     }
 
     #[test]
-    fn smoothing_defaults_on_toggles_persists_and_resets() {
-        let mut settings = Settings::decode("smooth_worldmap=invalid");
-        assert!(settings.smooth_worldmap);
-        assert_eq!(minimap::apply(&mut settings, 9), 512);
-        assert!(!Settings::decode(&settings.encode()).smooth_worldmap);
-        minimap::apply(&mut settings, 6);
-        assert!(settings.smooth_worldmap);
-        assert_eq!(settings.labels().len(), 12);
+    fn legacy_smoothing_is_ignored_without_losing_other_preferences() {
+        for old in ["true", "false", "invalid"] {
+            let settings = Settings::decode(&format!(
+                "smooth_worldmap={old}\nsize=192\nworld_dimension=nether\nnether_coordinates=false"
+            ));
+            assert_eq!(settings.size_px, 192);
+            assert_eq!(settings.world_dimension, Dimension::Nether);
+            assert!(!settings.nether_coordinates);
+            assert!(!settings.encode().contains("smooth_worldmap"));
+            assert_eq!(Settings::decode(&settings.encode()), settings);
+            assert_eq!(settings.labels().len(), 11);
+        }
     }
     #[test]
     fn dimension_preferences_roundtrip_and_are_independent() {
@@ -4219,7 +5041,7 @@ mod map_regressions {
             })
         );
         let changed = wait(&service, |f| {
-            f.atlas.as_ref().is_some_and(|a| a.serial != atlas.serial)
+            f.atlas.as_ref().is_some_and(|a| !Arc::ptr_eq(a, atlas))
         });
         assert_eq!(
             &changed.atlas.as_ref().unwrap().pixels[..4],

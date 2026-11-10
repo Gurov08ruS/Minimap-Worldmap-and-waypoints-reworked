@@ -1,10 +1,10 @@
 # Minimap, Worldmap and waypoints reworked
 
 A native Horizon mod by [daniliammo](https://github.com/daniliammo).
-Version **0.5.0** adds German localization, dimension and biome pictograms,
-converted coordinate overlays on the world map, and a Show on map action for
-waypoints. The waypoint manager is translucent without blur; the full-screen
-map skips rendering the 3D world behind it.
+Version **0.5.0** adds 67 individual biome icons at 16×16, retained biome names
+after chunk unload, LOD terrain caching, German localization, coloured waypoints
+and Show on map. The full-screen map keeps terrain detail at every zoom and
+skips rendering the 3D world behind it.
 Old unscoped waypoints from 0.3.x are deleted on first load; preferences remain.
 
 <p align="center">
@@ -87,11 +87,18 @@ language in its language settings. Saved waypoint names are preserved as entered
   LOD data is flagged in yellow, including mixed detailed/LOD region coverage.
   A LOD footprint is counted as a footprint, rather than invented detailed chunks.
   Visit dates are not recorded yet.
-- Dimension tabs and map status use original pictograms. Biome icons represent
-  biome families; hover over a waypoint's biome icon for its localized name.
+- Dimension tabs use original 16×16 pictograms for the player, Overworld, Nether
+  and End. Each of the 67 vanilla
+  biomes has its own original 16×16 pixel icon, including sulfur caves and the void;
+  hover over a waypoint's biome icon for its localized name.
   Waypoint biome samples are kept for the current connection when their chunks
   are loaded. Unavailable or unrecognized biome data uses a question mark;
   no terrain is requested from the server to fill it in.
+  Detailed terrain retains the sampled biome of each column, independently of
+  the game's loaded chunks. Names and icons stay available after chunk unload
+  and dimension changes, for that connection and sampled height layer. The
+  biome is sampled at the visible surface (including the top of water), while
+  relief continues to follow the seabed. Disconnect clears this RAM cache.
 - The waypoint manager has a translucent background with menu blur disabled.
 - **Overworld coordinates** and **Nether coordinates** independently toggle the
   coordinate lines below the minimap (both default on). X/Z convert by ×8/÷8
@@ -212,10 +219,12 @@ future stages in [PLAN.md](PLAN.md).
 The displayed camera is eased: drag and zoom targets are approached over a few
 frames, zoom keeps the world point under the cursor fixed, and markers interpolate
 player positions. The large map draws block-resolution chunk tiles as clipped,
-textured GPU quads through Horizon's existing HUD pipeline. Moving or zooming within a detail level
-changes only geometry: it no longer generates or uploads a screen-sized CPU
-image. Switching detail levels uploads the cached level once. The displayed camera does not wait for the sampling worker; pointer
-coordinates and overlays use that same camera.
+textured GPU quads through Horizon's existing HUD pipeline. Moving or zooming
+within the uploaded coverage changes only geometry. There are no zoom-dependent
+texture detail levels. When a wider area is needed, the displayed camera stays
+inside the available coverage until its replacement is ready. Pointer coordinates
+and overlays use that same displayed camera. Texture uploads and their matching
+geometry are published together; a failed upload preserves the previous frame.
 
 The worker prepares colours and relief shading once per block when the terrain
 repository changes. Up to 4,096 tiles fit in the existing 1024×1024 RGBA slot
@@ -225,13 +234,12 @@ coverage reuses it. Off-screen data stays in RAM. If visible entries exceed the
 1024×1024 GPU slot, a worker raster fallback presents the retained data without
 truncating the cache; extreme views can therefore cost more CPU. The minimap retains its
 CPU renderer for rotation and circular masking. Nearest texture sampling keeps
-block boundaries sharp near the camera; unknown terrain is transparent. The
-**World map — distant smoothing** setting defaults on: distant views select
-alpha-weighted, averaged levels (2×2 through 16×16 blocks per texel). Disable it
-for sharp block sampling at every scale. LOD textures retain their original sample resolution at every zoom; only
-detailed chunk images use the distant smoothing levels. Mixed presentation
-atlases can use up to about 20 MiB for their five cached levels; only the selected
-level occupies the GPU slot. These presentation limits do not cap terrain RAM. Relief reads neighbouring
+block boundaries sharp; unknown terrain is transparent. Detailed chunks keep one
+texel per block and LOD textures keep their original sample resolution at every
+zoom. Distant smoothing and its setting have been removed; legacy
+`smooth_worldmap` preferences are ignored. Each presentation atlas uses up to
+4 MiB of pixels, with old and new generations briefly coexisting during upload.
+These presentation limits do not cap terrain RAM. Relief reads neighbouring
 chunks to preserve lighting across tile edges. See [PERFORMANCE.md](PERFORMANCE.md)
 for measurements, limitations and further optimization options.
 
