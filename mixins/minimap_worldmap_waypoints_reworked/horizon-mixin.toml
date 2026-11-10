@@ -68,6 +68,13 @@ helper = "hud.rs"
 bindings = [{ name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" }, { name = "batch", ty = "&mut horizon_client::hud::HudBatch", value = "batch" }, { name = "corners", ty = "&mut horizon_client::extras_hud::Corners", value = "corners" }]
 
 [[injection]]
+id = "map-gui-post"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_gui_render_post"
+helper = "gui_post.rs"
+bindings = [{ name = "game", ty = "&crate::game::Game<'_>", value = "self" }, { name = "batch", ty = "&mut horizon_client::hud::HudBatch", value = "batch" }, { name = "gui_hidden", ty = "bool", value = "gui_hidden" }, { name = "focused", ty = "bool", value = "focused" }]
+
+[[injection]]
 id = "map-screen"
 kind = "HEAD"
 target = "horizon_client::game::native_hooks::Game<'_>::native_screen_render_post"

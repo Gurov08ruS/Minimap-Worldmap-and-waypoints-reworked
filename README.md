@@ -82,11 +82,11 @@ language in its language settings. Saved waypoint names are preserved as entered
   player-coordinate header. The Nether coordinate line converts the point under
   the mouse from the selected map dimension (Overworld ÷8; Nether unchanged).
   Unsupported dimension conversions are shown as unavailable.
-- Right-click a point and choose **Chunk and region information** to inspect its
-  chunk, 32×32-chunk region, block bounds, height layer and cached data source.
-  LOD data is flagged in yellow, including mixed detailed/LOD region coverage.
-  A LOD footprint is counted as a footprint, rather than invented detailed chunks.
-  Visit dates are not recorded yet.
+- Right-click a point to outline its 16×16 chunk and 32×32-chunk region. Choose
+  **Chunk and region information** to inspect the bounds, height layer, cached
+  data source and LOD quality level. LOD data is flagged in yellow, including
+  mixed detailed/LOD region coverage. A LOD footprint is counted as a footprint,
+  rather than invented detailed chunks. Visit dates are not recorded yet.
 - Dimension tabs use original 16×16 pictograms for the player, Overworld, Nether
   and End. Each of the 67 vanilla
   biomes has its own original 16×16 pixel icon, including sulfur caves and the void;
@@ -142,16 +142,19 @@ language in its language settings. Saved waypoint names are preserved as entered
   beside the name, and the dimension icon beside the dimension text. Select a
   waypoint and choose **Show on map** to open its dimension and center the map
   on it without teleporting.
-- Waypoints are saved with the preferences (newest 64 per world/server), drawn
-  as first-letter markers in their chosen colour on the HUD through walls and on
-  both maps, and their full name appears when hovering over the marker on the
-  world map.
+- Waypoints are saved with the preferences (newest 64 per world/server). In the
+  3D world they appear above the HUD as coloured first-letter markers with their
+  name and distance, through walls and only in their own dimension. On both maps
+  their full name appears when hovering over the marker.
 - Nether portals, End portals and End gateways are marked on the map; clicking
   one opens its destination. Nether destinations prefer the nearest known portal
   within the vanilla search radius, otherwise the ×8/÷8 conversion; End portals
   show the End platform and gateways the outer islands.
 - World borders are drawn on both the Overworld and Nether maps; the Nether
-  border shows the same physical area (÷8).
+  border shows the same physical area (÷8). On the player's current dimension,
+  the actual far-terrain/LOD render distance and the chunk render distance are
+  drawn in the same style. The chunk border follows the full outer chunk edges,
+  not a smaller circle. Hover a border to see its label.
 - The world map's **Player / Overworld / Nether / End** tabs select its dimension.
 - **Minimap dimension** in the mod's settings selects the minimap's dimension
   independently. **Player** follows the player's current dimension on either map.

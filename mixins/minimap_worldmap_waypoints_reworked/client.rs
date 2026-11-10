@@ -546,37 +546,85 @@ fn dimension_icon(game: &Game<'_>, batch: &mut HudBatch, dimension: Dimension, a
     let (rows, colors) = match dimension {
         Dimension::Player => (
             [
-                "................", ".......11.......", "......1111......", ".....111111.....",
-                "....11211211....", "...1122112211...", "..112221122211..", ".11222211222211.",
-                ".......11.......", ".......11.......", ".......11.......", ".......11.......",
-                "......2112......", ".....222222.....", "................", "................",
+                "................",
+                ".......11.......",
+                "......1111......",
+                ".....111111.....",
+                "....11211211....",
+                "...1122112211...",
+                "..112221122211..",
+                ".11222211222211.",
+                ".......11.......",
+                ".......11.......",
+                ".......11.......",
+                ".......11.......",
+                "......2112......",
+                ".....222222.....",
+                "................",
+                "................",
             ],
             [0xffff6262, 0xffffffff, 0xffffffff],
         ),
         Dimension::Overworld => (
             [
-                "................", "................", "..111111111111..", ".11111111111111.",
-                ".11111111111111.", ".22111221112212.", ".22212222122222.", ".22222222222222.",
-                ".22332222233222.", ".22222232222222.", ".22222222222222.", ".23222222222322.",
-                "..222233222222..", "....22222222....", "......2222......", "................",
+                "................",
+                "................",
+                "..111111111111..",
+                ".11111111111111.",
+                ".11111111111111.",
+                ".22111221112212.",
+                ".22212222122222.",
+                ".22222222222222.",
+                ".22332222233222.",
+                ".22222232222222.",
+                ".22222222222222.",
+                ".23222222222322.",
+                "..222233222222..",
+                "....22222222....",
+                "......2222......",
+                "................",
             ],
             [0xff68b34a, 0xff93643d, 0xffbc8a54],
         ),
         Dimension::Nether => (
             [
-                "................", "..111111111111..", "..111111111111..", "..112222222211..",
-                "..112233222211..", "..112333322211..", "..112233222211..", "..112222233211..",
-                "..112222333211..", "..112222233211..", "..112332222211..", "..112233222211..",
-                "..112222222211..", "..111111111111..", "..111111111111..", "................",
+                "................",
+                "..111111111111..",
+                "..111111111111..",
+                "..112222222211..",
+                "..112233222211..",
+                "..112333322211..",
+                "..112233222211..",
+                "..112222233211..",
+                "..112222333211..",
+                "..112222233211..",
+                "..112332222211..",
+                "..112233222211..",
+                "..112222222211..",
+                "..111111111111..",
+                "..111111111111..",
+                "................",
             ],
             [0xff44263f, 0xffb649cf, 0xffef9aff],
         ),
         Dimension::End => (
             [
-                "................", "................", "......2222......", "....22111122....",
-                "..221111111122..", ".22111333311122.", ".21113333331112.", ".21133333333112.",
-                ".22113333331122.", "..221133331122..", "...2211111122...", "....22211222....",
-                "......2222......", ".......22.......", "................", "................",
+                "................",
+                "................",
+                "......2222......",
+                "....22111122....",
+                "..221111111122..",
+                ".22111333311122.",
+                ".21113333331112.",
+                ".21133333333112.",
+                ".22113333331122.",
+                "..221133331122..",
+                "...2211111122...",
+                "....22211222....",
+                "......2222......",
+                ".......22.......",
+                "................",
+                "................",
             ],
             [0xffc6c78c, 0xff598f88, 0xff191d35],
         ),
@@ -614,7 +662,12 @@ fn biome_icon(game: &Game<'_>, batch: &mut HudBatch, biome: Option<&str>, at: [f
             if index != 0 {
                 game.native_fill(
                     batch,
-                    [at[0] + start as f32, at[1] + y as f32, (x - start) as f32, 1.0],
+                    [
+                        at[0] + start as f32,
+                        at[1] + y as f32,
+                        (x - start) as f32,
+                        1.0,
+                    ],
                     icon.colors[index as usize - 1],
                 );
             }
@@ -1852,42 +1905,303 @@ fn portal_near(state: &State, dimension: Dimension, block: [i32; 2]) -> Option<(
         .map(|(_, at, kind)| (*kind, *at))
 }
 
-fn draw_border(game: &Game<'_>, batch: &mut HudBatch, view: &View, rect: [f32; 4]) {
-    if !matches!(view.dimension, Dimension::Overworld | Dimension::Nether) {
+fn world_screen(view: &View, rect: [f32; 4], at: [f64; 2]) -> [f32; 2] {
+    let pixel = view.screen_at(at);
+    [
+        rect[0] + pixel[0] as f32 * rect[2] / view.width as f32,
+        rect[1] + pixel[1] as f32 * rect[3] / view.height as f32,
+    ]
+}
+
+type ScreenSegment = ([f32; 2], [f32; 2]);
+
+fn draw_segments(
+    game: &Game<'_>,
+    batch: &mut HudBatch,
+    rect: [f32; 4],
+    segments: &[ScreenSegment],
+    color: u32,
+) {
+    for &(from, to) in segments {
+        draw_line(game, batch, from, to, rect, color);
+    }
+}
+
+fn world_box_segments(view: &View, rect: [f32; 4], bounds: [f64; 4]) -> Vec<ScreenSegment> {
+    let [x0, z0, x1, z1] = bounds;
+    let corners = [[x0, z0], [x1, z0], [x1, z1], [x0, z1]];
+    let points = corners.map(|corner| world_screen(view, rect, corner));
+    (0..4)
+        .map(|index| (points[index], points[(index + 1) % 4]))
+        .collect()
+}
+
+fn draw_world_box(
+    game: &Game<'_>,
+    batch: &mut HudBatch,
+    view: &View,
+    rect: [f32; 4],
+    bounds: [f64; 4],
+    color: u32,
+) {
+    draw_segments(
+        game,
+        batch,
+        rect,
+        &world_box_segments(view, rect, bounds),
+        color,
+    );
+}
+
+fn circle_segments(
+    view: &View,
+    rect: [f32; 4],
+    center: [f64; 2],
+    radius: f64,
+) -> Vec<ScreenSegment> {
+    if radius <= 0.0 {
+        return Vec::new();
+    }
+    let count = 96;
+    let mut segments = Vec::with_capacity(count);
+    let mut previous = world_screen(view, rect, [center[0] + radius, center[1]]);
+    for index in 1..=count {
+        let angle = std::f64::consts::TAU * index as f64 / count as f64;
+        let point = world_screen(
+            view,
+            rect,
+            [
+                center[0] + angle.cos() * radius,
+                center[1] + angle.sin() * radius,
+            ],
+        );
+        segments.push((previous, point));
+        previous = point;
+    }
+    segments
+}
+
+// The outer edges of the chunks the game actually draws at this radius,
+// including the slack `in_view_distance` allows on each axis.
+fn chunk_border_segments(
+    view: &View,
+    rect: [f32; 4],
+    center: (i32, i32),
+    radius: i32,
+) -> Vec<ScreenSegment> {
+    if radius < 1 {
+        return Vec::new();
+    }
+    let mut rows = Vec::new();
+    for dz in -radius..=radius {
+        let mut min_dx = None;
+        let mut max_dx = None;
+        for dx in -radius..=radius {
+            if horizon_client::streaming::in_view_distance((0, 0), radius, dx, dz) {
+                min_dx = Some(min_dx.map_or(dx, |value: i32| value.min(dx)));
+                max_dx = Some(max_dx.map_or(dx, |value: i32| value.max(dx)));
+            }
+        }
+        if let (Some(min_dx), Some(max_dx)) = (min_dx, max_dx) {
+            rows.push((dz, min_dx, max_dx));
+        }
+    }
+    let Some(first) = rows.first().copied() else {
+        return Vec::new();
+    };
+    let last = *rows.last().unwrap();
+    let world = |dx: i32, dz: i32| {
+        [
+            f64::from(center.0 + dx) * 16.0,
+            f64::from(center.1 + dz) * 16.0,
+        ]
+    };
+    let mut segments = Vec::new();
+    segments.push((
+        world_screen(view, rect, world(first.1, first.0)),
+        world_screen(view, rect, world(first.2 + 1, first.0)),
+    ));
+    segments.push((
+        world_screen(view, rect, world(last.2 + 1, last.0 + 1)),
+        world_screen(view, rect, world(last.1, last.0 + 1)),
+    ));
+    for (index, &(dz, min_dx, max_dx)) in rows.iter().enumerate() {
+        let left = world(min_dx, dz);
+        let right = world(max_dx + 1, dz);
+        segments.push((
+            world_screen(view, rect, left),
+            world_screen(view, rect, [left[0], left[1] + 16.0]),
+        ));
+        segments.push((
+            world_screen(view, rect, right),
+            world_screen(view, rect, [right[0], right[1] + 16.0]),
+        ));
+        if let Some(&(_, next_min, next_max)) = rows.get(index + 1) {
+            if next_min != min_dx {
+                segments.push((
+                    world_screen(view, rect, [left[0], left[1] + 16.0]),
+                    world_screen(view, rect, [world(next_min, dz + 1)[0], left[1] + 16.0]),
+                ));
+            }
+            if next_max != max_dx {
+                segments.push((
+                    world_screen(view, rect, [right[0], right[1] + 16.0]),
+                    world_screen(
+                        view,
+                        rect,
+                        [world(next_max + 1, dz + 1)[0], right[1] + 16.0],
+                    ),
+                ));
+            }
+        }
+    }
+    segments
+}
+
+fn segment_distance(point: [f32; 2], from: [f32; 2], to: [f32; 2]) -> f32 {
+    let vx = to[0] - from[0];
+    let vy = to[1] - from[1];
+    let wx = point[0] - from[0];
+    let wy = point[1] - from[1];
+    let length = vx * vx + vy * vy;
+    let t = if length > 0.0 {
+        ((wx * vx + wy * vy) / length).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let dx = point[0] - (from[0] + vx * t);
+    let dy = point[1] - (from[1] + vy * t);
+    (dx * dx + dy * dy).sqrt()
+}
+
+fn segments_distance(point: [f32; 2], segments: &[ScreenSegment]) -> f32 {
+    segments
+        .iter()
+        .map(|&(from, to)| segment_distance(point, from, to))
+        .fold(f32::INFINITY, f32::min)
+}
+
+fn draw_border_hint(
+    game: &Game<'_>,
+    batch: &mut HudBatch,
+    text: &str,
+    mouse: [f32; 2],
+    rect: [f32; 4],
+) {
+    if !inside(mouse, rect) {
         return;
     }
-    let [mut min_x, mut min_z, mut max_x, mut max_z] = game.border.bounds();
-    if view.dimension == Dimension::Nether {
-        min_x /= 8.0;
-        min_z /= 8.0;
-        max_x /= 8.0;
-        max_z /= 8.0;
+    let width = game.native_text_width(text);
+    let x = (mouse[0] + 12.0)
+        .min(rect[0] + rect[2] - width - 6.0)
+        .max(rect[0] + 4.0);
+    let y = (mouse[1] - 16.0).max(rect[1] + 4.0);
+    game.native_fill(batch, [x - 4.0, y - 3.0, width + 8.0, 13.0], 0xe010151d);
+    game.native_text(batch, text, [x, y], 0xffff9a9a, true);
+}
+
+fn draw_border(
+    game: &Game<'_>,
+    batch: &mut HudBatch,
+    view: &View,
+    rect: [f32; 4],
+    mouse: Option<[f32; 2]>,
+) {
+    let border_color = 0xffe04040;
+    let mut labels = Vec::<(String, Vec<ScreenSegment>)>::new();
+    if matches!(view.dimension, Dimension::Overworld | Dimension::Nether) {
+        let [mut min_x, mut min_z, mut max_x, mut max_z] = game.border.bounds();
+        if view.dimension == Dimension::Nether {
+            min_x /= 8.0;
+            min_z /= 8.0;
+            max_x /= 8.0;
+            max_z /= 8.0;
+        }
+        let segments = world_box_segments(view, rect, [min_x, min_z, max_x, max_z]);
+        draw_segments(game, batch, rect, &segments, border_color);
+        if view.large {
+            labels.push((
+                tr(
+                    "World border",
+                    "Граница мира",
+                    "Bordure du monde",
+                    "Borde del mundo",
+                    "Weltgrenze",
+                )
+                .to_owned(),
+                segments,
+            ));
+        }
     }
-    let corners = [
-        [min_x, min_z],
-        [max_x, min_z],
-        [max_x, max_z],
-        [min_x, max_z],
+
+    let Some(player) = game.native_player() else {
+        return;
+    };
+    if view.dimension != Dimension::from_id(player.dimension) {
+        return;
+    }
+    let center = game.streaming.center;
+    let center_blocks = [
+        f64::from(center.0) * 16.0 + 8.0,
+        f64::from(center.1) * 16.0 + 8.0,
     ];
-    let points: Vec<[f32; 2]> = corners
-        .iter()
-        .map(|corner| {
-            let pixel = view.screen_at(*corner);
-            [
-                rect[0] + pixel[0] as f32 * rect[2] / view.width as f32,
-                rect[1] + pixel[1] as f32 * rect[3] / view.height as f32,
-            ]
-        })
-        .collect();
-    for index in 0..4 {
-        draw_line(
-            game,
-            batch,
-            points[index],
-            points[(index + 1) % 4],
-            rect,
-            0xffe04040,
-        );
+    let chunk_radius = match &game.remote {
+        Some(remote) => game.streaming.radius.min(remote.view_distance + 1),
+        None => game.streaming.radius,
+    }
+    .max(0);
+    let full_radius = if game.lod.is_some() {
+        chunk_radius.max(game.lod_distance() as i32)
+    } else {
+        chunk_radius
+    };
+    let chunk_segments = chunk_border_segments(view, rect, center, chunk_radius);
+    draw_segments(game, batch, rect, &chunk_segments, border_color);
+    if view.large {
+        labels.push((
+            localized_format!(
+                "Chunk render: {} chunks",
+                "Прорисовка чанков: {} чанков",
+                "Rendu des chunks : {} chunks",
+                "Render de chunks: {} chunks",
+                "Chunk-Sichtweite: {} Chunks",
+                chunk_radius
+            ),
+            chunk_segments,
+        ));
+    }
+    if full_radius > chunk_radius {
+        let lod_segments =
+            circle_segments(view, rect, center_blocks, f64::from(full_radius) * 16.0);
+        draw_segments(game, batch, rect, &lod_segments, border_color);
+        if view.large {
+            labels.push((
+                localized_format!(
+                    "Actual render (LOD): {} chunks",
+                    "Фактическая прорисовка (LOD): {} чанков",
+                    "Rendu réel (LOD) : {} chunks",
+                    "Render real (LOD): {} chunks",
+                    "Tatsächliche Sichtweite (LOD): {} Chunks",
+                    full_radius
+                ),
+                lod_segments,
+            ));
+        }
+    }
+    if view.large
+        && let Some(mouse) = mouse
+    {
+        let mut nearest: Option<(f32, &String)> = None;
+        for (text, segments) in &labels {
+            let distance = segments_distance(mouse, segments);
+            let closer = nearest.is_none_or(|(best, _)| distance < best);
+            if distance <= 8.0 && closer {
+                nearest = Some((distance, text));
+            }
+        }
+        if let Some((_, text)) = nearest {
+            draw_border_hint(game, batch, text, mouse, rect);
+        }
     }
 }
 
@@ -2028,6 +2342,33 @@ fn draw_world_waypoints(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             [x - game.native_text_width(&letter) / 2.0, y - 4.0],
             0xff201800,
             false,
+        );
+        let dx = f64::from(waypoint.x) + 0.5 - player.x;
+        let dy = f64::from(waypoint.y) + 1.5 - player.y;
+        let dz = f64::from(waypoint.z) + 0.5 - player.z;
+        let label = format!(
+            "{}  {} m",
+            waypoint.name,
+            (dx * dx + dy * dy + dz * dz).sqrt().round() as i64
+        );
+        let width = game.native_text_width(&label);
+        let label_x = if x + width + 12.0 > batch.width {
+            x - width - 10.0
+        } else {
+            x + 9.0
+        };
+        let label_y = y - 4.0;
+        game.native_fill(
+            batch,
+            [label_x - 3.0, label_y - 2.0, width + 6.0, 11.0],
+            0xd010151d,
+        );
+        game.native_text(
+            batch,
+            &label,
+            [label_x, label_y],
+            waypoint_argb(waypoint.color),
+            true,
         );
     }
 }
@@ -2579,7 +2920,12 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
                         |at| {
                             let id = snapshot.biome(at)?.0;
                             let info = biome_palette.list.get(id as usize)?;
-                            Some(names.entry(id).or_insert_with(|| Arc::from(info.name.as_str())).clone())
+                            Some(
+                                names
+                                    .entry(id)
+                                    .or_insert_with(|| Arc::from(info.name.as_str()))
+                                    .clone(),
+                            )
                         },
                     )
                 },
@@ -2737,6 +3083,24 @@ pub(super) fn hud(game: &mut Game<'_>, batch: &mut HudBatch, corners: &mut Corne
             }
         }
     }
+}
+
+pub(super) fn gui_render_post(
+    game: &Game<'_>,
+    batch: &mut HudBatch,
+    gui_hidden: bool,
+    focused: bool,
+) {
+    if gui_hidden
+        || !focused
+        || !game.native_window()
+        || !game.native_on(runtime::MOD_ID)
+        || game.native_mod_screen().is_some()
+        || game.screen != crate::game::Screen::Playing
+        || game.native_player().is_none()
+    {
+        return;
+    }
     let state = state();
     draw_world_waypoints(game, batch, &state);
 }
@@ -2787,7 +3151,7 @@ fn draw(
                 rect,
             );
         }
-        draw_border(game, batch, &frame.view, rect);
+        draw_border(game, batch, &frame.view, rect, mouse);
         let mut drawn: Vec<[i32; 2]> = Vec::new();
         for (dimension, at, kind) in &state.portals {
             if *dimension != frame.view.dimension {
@@ -2809,6 +3173,35 @@ fn draw(
                 .or_else(|| mouse.and_then(|mouse| hovered_block(&frame.view, rect, mouse)));
             if let Some(block) = hover {
                 highlight(game, batch, &frame.view, rect, block);
+            }
+            if let Some(menu) = state.menu {
+                let (chunk, region) = maps::chunk_region(menu.block);
+                draw_world_box(
+                    game,
+                    batch,
+                    &frame.view,
+                    rect,
+                    [
+                        f64::from(chunk[0] * 16),
+                        f64::from(chunk[1] * 16),
+                        f64::from(chunk[0] * 16 + 16),
+                        f64::from(chunk[1] * 16 + 16),
+                    ],
+                    0xffffd45c,
+                );
+                draw_world_box(
+                    game,
+                    batch,
+                    &frame.view,
+                    rect,
+                    [
+                        f64::from(region[0] * 512),
+                        f64::from(region[1] * 512),
+                        f64::from(region[0] * 512 + 512),
+                        f64::from(region[1] * 512 + 512),
+                    ],
+                    0xff58c7ff,
+                );
             }
         }
         for waypoint in state
@@ -2999,13 +3392,14 @@ fn information_lines(game: &Game<'_>, state: &State, menu: Menu, width: f32) -> 
     ]);
     if let Some(key) = lod {
         let stride = 1_i64 << key.level;
+        let level = key.level;
         lines.push((
             localized_format!(
-                "LOD: 1 sample per {stride}×{stride} blocks",
-                "LOD: 1 отсчёт на {stride}×{stride} блоков",
-                "LOD : 1 échantillon pour {stride}×{stride} blocs",
-                "LOD: 1 muestra por {stride}×{stride} bloques",
-                "LOD: 1 Abtastwert je {stride}×{stride} Blöcke"
+                "LOD quality: level {level} (1 sample per {stride}×{stride} blocks)",
+                "Качество LOD: уровень {level} (1 отсчёт на {stride}×{stride} блоков)",
+                "Qualité LOD : niveau {level} (1 échantillon pour {stride}×{stride} blocs)",
+                "Calidad LOD: nivel {level} (1 muestra por {stride}×{stride} bloques)",
+                "LOD-Qualität: Stufe {level} (1 Abtastwert je {stride}×{stride} Blöcke)",
             ),
             yellow,
         ));
@@ -4069,6 +4463,28 @@ mod render_tests {
         };
         assert_eq!(oak.map_color(None, Some(0x77ab2f)), Some(0x3b5517));
         assert_eq!(oak.map_color(None, None), None);
+    }
+
+    #[test]
+    fn a_waypoint_in_front_projects_onto_the_screen() {
+        let camera = horizon_client::mod_api::NativeCamera {
+            position: [0.0; 3],
+            eye_height: 1.62,
+            partial_tick: 1.0,
+            yaw: 0.0,
+            pitch: 0.0,
+            fov_degrees: 70.0,
+            near: 0.05,
+            far: 2048.0,
+            view: horizon_client::camera::view_matrix(0.0, 0.0).to_cols_array(),
+            projection: horizon_client::camera::perspective(
+                70.0, 1920.0, 1080.0, 2048.0, 0.05, true,
+            ),
+            dimension: "minecraft:overworld".into(),
+        };
+        let at = project(&camera, [0.0, 1.5, 10.0], [1920.0, 1080.0]).unwrap();
+        assert!((at[0] - 960.0).abs() < 1.0, "{at:?}");
+        assert!(at[1] < 540.0, "{at:?}");
     }
 
     #[test]

@@ -2,6 +2,16 @@
 
 ## 0.5.0 — 2026-11-10
 
+- Draw the world border, the actual far-terrain/LOD render distance and the
+  chunk render distance in the world-border style. The chunk border follows the
+  full outer edges of the chunks the game really draws, including its view
+  slack. Border labels appear only while the pointer is near a border.
+- Right-clicking a point now outlines its 16×16 chunk and 32×32-chunk region.
+- The chunk/region information card shows the LOD quality level together with
+  its sample stride.
+- Waypoints are drawn in the 3D world again, above the finished HUD: a coloured
+  first-letter marker, name and distance, through walls and only in their own
+  dimension.
 - Preserve per-column biome names with detailed terrain in the session cache.
   Unloading a game chunk or browsing another dimension no longer removes its
   known biome name/icon. Missing resamples preserve known names; new known

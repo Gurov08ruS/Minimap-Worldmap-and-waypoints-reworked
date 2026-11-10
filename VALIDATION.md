@@ -12,10 +12,17 @@ their older package sizes and hashes do not identify the release artifact.
 - Regressions cover retained detailed biome names after chunk unload, negative
   chunk coordinates, dimension/layer isolation, missing and updated resamples,
   immutable coverage snapshots, and water-surface versus cave biome sampling.
+- World, actual-render/LOD and chunk-render borders are drawn in world-border
+  style; the chunk border follows full chunk edges and its slack. Labels appear
+  only while hovering a border. Right-click outlines the hovered chunk and
+  region, and the information card reports the LOD quality level and stride.
+- 3D-world waypoints are drawn in the final GUI overlay with their coloured
+  marker, name and distance, through walls and only in their dimension.
 - Template integration, deterministic AST staging and full source audit: pass;
   the original Horizon checkout remains unchanged.
 - Actual pinned Horizon client check: pass without warnings.
-- Runtime tests inside the pinned client: pass (55 tests).
+- Runtime tests inside the pinned client: pass (55 tests); injected client
+  adapter tests pass (9).
 - Reproducible source-only package and official package check: pass.
   Artifact: `minimap_worldmap_waypoints_reworked-0.5.0.hnmod`, 103,330 bytes.
   SHA-256: `41969c9bdfc128b6e995784060d68c01ceda2987e9476f08f7a52dc36e6cfce0`.
