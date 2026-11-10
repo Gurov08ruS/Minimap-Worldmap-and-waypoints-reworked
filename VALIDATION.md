@@ -1,5 +1,59 @@
 # Validation
 
+## Unreleased — biome blending, water and fluid hover, 2026-11-10
+
+- Hovering a detailed water or lava column reports its surface Y first and the
+  lowest liquid Y in parentheses, in the world-map footer, the point menu title
+  and the information card.
+- Water follows the biome water colour; lily pads use the biome grass colour;
+  vines use the biome foliage colour, removing the bright grass-green vines in
+  swamps.
+- Grass, foliage and water tints are averaged over a small radius on detailed
+  tiles; LOD tiles blend the neighbouring 16×16 samples. Biome borders therefore
+  fade rather than switching in hard bands.
+- Formatting, clippy with warnings denied and locked offline workspace tests:
+  pass (52 runtime tests, one ignored manual benchmark; one source-audit test).
+- Template integration, deterministic AST staging and full source audit: pass.
+  The original Horizon checkout is unchanged.
+- Actual pinned Horizon client check: pass without warnings. Runtime tests pass
+  in the pinned client (52); injected client adapter tests pass (9).
+- No live-game visual review, FPS profiling or macOS/Windows run was performed.
+
+## Unreleased — real leaf colours, 2026-11-09
+
+- Leaf states get their map colour from the game's own block sprites: the mean
+  texture colour is multiplied by the state's `TintSource`. Oak, jungle, acacia,
+  dark oak and mangrove therefore follow the biome foliage colour; birch and
+  spruce use the mesher's fixed shades (distinct from oak); cherry, pale oak and
+  azalea keep their untinted texture colours. Resource-pack textures are read
+  and the palette refreshes with `native_block_sprites_version`.
+- Formatting, clippy with warnings denied and locked offline workspace tests:
+  pass (52 runtime tests, one ignored manual benchmark; one source-audit test).
+- Template integration, deterministic AST staging and full source audit: pass.
+  The original Horizon checkout is unchanged.
+- Actual pinned Horizon client check: pass without warnings. Runtime tests pass
+  in the pinned client (52); injected client adapter tests pass (7, including
+  texture-tint multiplication and colour-swatch layout).
+- No live-game visual review, FPS profiling or macOS/Windows run was performed.
+
+## Unreleased — waypoint colours and compact map footer, 2026-11-09
+
+- World-map cursor and Nether coordinates share one footer line; the biome
+  keeps its own line.
+- Waypoints gained a persisted `0xRRGGBB` colour chosen from an eight-colour
+  palette in the create/edit form. `waypoint_v2` records load with the default
+  gold and migrate to `waypoint_v3`; map and HUD markers, list initials and
+  hover labels use the selected colour.
+- Waypoint rows show the dimension icon beside its text and the biome beside
+  the name. The Edit action renames a waypoint and changes its colour.
+- Formatting, clippy with warnings denied and locked offline workspace tests:
+  pass (52 runtime tests, one ignored manual benchmark; one source-audit test).
+- Template integration, deterministic AST staging and full source audit: pass.
+  The original Horizon checkout is unchanged.
+- Actual pinned Horizon client check: pass without warnings; the injected
+  runtime tests pass inside the pinned client (52 tests).
+- No live-game visual review, FPS profiling or macOS/Windows run was performed.
+
 ## Unreleased — biome-tinted grass, 2026-11-09
 
 - Grass blocks on detailed and LOD map tiles now use the biome's grass tint,

@@ -710,8 +710,15 @@ pub fn text_input_active() -> bool {
 }
 const MAX_WAYPOINT_NAME: usize = 32;
 
-/// A point on a map: the dimension it belongs to, its block coordinates and
-/// the name the player gave it.
+/// Marker colours a player can choose, as 0xRRGGBB. The first is the default
+/// of waypoints saved before colours existed.
+pub const WAYPOINT_COLORS: [u32; 8] = [
+    0xffd24a, 0xff6b6b, 0x6bd66b, 0x5aa9ff, 0xc78cff, 0xff9f43, 0x4dd0e1, 0xf2f2f2,
+];
+pub const DEFAULT_WAYPOINT_COLOR: u32 = WAYPOINT_COLORS[0];
+
+/// A point on a map: the dimension it belongs to, its block coordinates, the
+/// name and marker colour the player gave it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Waypoint {
     pub world: String,
@@ -720,6 +727,8 @@ pub struct Waypoint {
     pub y: i32,
     pub z: i32,
     pub name: String,
+    /// 0xRRGGBB, never carrying alpha.
+    pub color: u32,
 }
 
 impl Waypoint {
@@ -738,8 +747,23 @@ impl Waypoint {
         }
     }
 
+    /// Keeps a stored colour inside 0xRRGGBB; zero means an older or damaged
+    /// entry and falls back to the default marker colour.
+    pub fn clean_color(color: u32) -> u32 {
+        match color & 0x00ff_ffff {
+            0 => DEFAULT_WAYPOINT_COLOR,
+            color => color,
+        }
+    }
+
     fn decode(text: &str) -> Option<Self> {
-        let mut parts = text.strip_prefix("waypoint_v2=")?.splitn(6, ':');
+        let (version, rest) = text.split_once('=')?;
+        let (fields, has_color) = match version {
+            "waypoint_v3" => (7, true),
+            "waypoint_v2" => (6, false),
+            _ => return None,
+        };
+        let mut parts = rest.splitn(fields, ':');
         let world = unescape_name(parts.next()?);
         if !valid_waypoint_world(&world) {
             return None;
@@ -751,24 +775,38 @@ impl Waypoint {
         if dimension == Dimension::Player {
             return None;
         }
+        let x = parts.next()?.parse().ok()?;
+        let y = parts.next()?.parse().ok()?;
+        let z = parts.next()?.parse().ok()?;
+        let color = if has_color {
+            parts
+                .next()
+                .and_then(|color| u32::from_str_radix(color, 16).ok())
+                .map(Self::clean_color)
+                .unwrap_or(DEFAULT_WAYPOINT_COLOR)
+        } else {
+            DEFAULT_WAYPOINT_COLOR
+        };
         Some(Self {
             world,
             dimension,
-            x: parts.next()?.parse().ok()?,
-            y: parts.next()?.parse().ok()?,
-            z: parts.next()?.parse().ok()?,
+            x,
+            y,
+            z,
+            color,
             name: Self::clean_name(&unescape_name(parts.next().unwrap_or(""))),
         })
     }
 
     fn encode(&self) -> String {
         format!(
-            "waypoint_v2={}:{}:{}:{}:{}:{}\n",
+            "waypoint_v3={}:{}:{}:{}:{}:{:06x}:{}\n",
             escape_name(&self.world),
             self.dimension.name(),
             self.x,
             self.y,
             self.z,
+            Self::clean_color(self.color),
             escape_name(&self.name)
         )
     }
@@ -832,10 +870,11 @@ fn push_waypoint(waypoints: &mut Vec<Waypoint>, waypoint: Waypoint) -> bool {
             && existing.x == waypoint.x
             && existing.z == waypoint.z
     }) {
-        if existing.name == waypoint.name {
+        if existing.name == waypoint.name && existing.color == waypoint.color {
             return false;
         }
         existing.name = waypoint.name;
+        existing.color = waypoint.color;
         return true;
     }
     if waypoints
@@ -979,6 +1018,7 @@ impl Controller {
             return false;
         }
         waypoint.name = Waypoint::clean_name(&waypoint.name);
+        waypoint.color = Waypoint::clean_color(waypoint.color);
         let notify = self.notify.lock().unwrap_or_else(|e| e.into_inner());
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if !push_waypoint(&mut state.waypoints, waypoint) {
@@ -1016,15 +1056,17 @@ impl Controller {
         true
     }
 
-    pub fn rename_waypoint(
+    pub fn update_waypoint(
         &self,
         world: &str,
         dimension: Dimension,
         x: i32,
         z: i32,
         name: &str,
+        color: u32,
     ) -> bool {
         let name = Waypoint::clean_name(name);
+        let color = Waypoint::clean_color(color);
         let notify = self.notify.lock().unwrap_or_else(|e| e.into_inner());
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let Some(waypoint) = state.waypoints.iter_mut().find(|waypoint| {
@@ -1035,10 +1077,11 @@ impl Controller {
         }) else {
             return false;
         };
-        if waypoint.name == name {
+        if waypoint.name == name && waypoint.color == color {
             return false;
         }
         waypoint.name = name;
+        waypoint.color = color;
         state.revision += 1;
         drop(state);
         if let Some(notify) = notify.as_ref() {
@@ -1071,8 +1114,8 @@ fn settings_worker(directory: &Path, shared: &Mutex<State>, rx: mpsc::Receiver<(
     {
         let mut state = shared.lock().unwrap_or_else(|e| e.into_inner());
         match loaded {
-            Ok((mut settings, loaded, discarded_legacy)) => {
-                if discarded_legacy {
+            Ok((mut settings, loaded, needs_migration)) => {
+                if needs_migration {
                     state.revision += 1;
                 }
                 minimap::merge(&mut settings, state.settings, state.touched);
@@ -1142,8 +1185,10 @@ fn read_profile_migration(path: &Path) -> io::Result<(Settings, Vec<Waypoint>, b
     Ok((
         Settings::decode(&text),
         decode_waypoints(&text),
-        text.lines()
-            .any(|line| line.trim().starts_with("waypoint=")),
+        text.lines().any(|line| {
+            let line = line.trim();
+            line.starts_with("waypoint=") || line.starts_with("waypoint_v2=")
+        }),
     ))
 }
 
@@ -1264,6 +1309,7 @@ mod tests {
             y: 64,
             z: -5,
             name: name.into(),
+            color: DEFAULT_WAYPOINT_COLOR,
         }
     }
 
@@ -1279,7 +1325,14 @@ mod tests {
         }
         assert_eq!(controller.waypoints(&a), vec![point(&a, "A")]);
         assert_eq!(controller.waypoints(&b), vec![point(&b, "B")]);
-        assert!(controller.rename_waypoint(&b, Dimension::Overworld, 10, -5, "B renamed"));
+        assert!(controller.update_waypoint(
+            &b,
+            Dimension::Overworld,
+            10,
+            -5,
+            "B renamed",
+            DEFAULT_WAYPOINT_COLOR
+        ));
         assert!(controller.remove_waypoint(&server, Dimension::Overworld, 10, -5));
         assert_eq!(controller.waypoints(&a), vec![point(&a, "A")]);
         assert!(controller.waypoints("").is_empty());
@@ -1348,7 +1401,7 @@ mod tests {
         assert!(controller.waypoints("save:A").is_empty());
         let file = fs::read_to_string(directory.join(SETTINGS_FILE)).unwrap();
         assert!(!file.lines().any(|l| l.starts_with("waypoint=")));
-        assert!(file.contains("waypoint_v2="));
+        assert!(file.contains("waypoint_v3="));
         let reopened = Controller::open(directory.clone());
         reopened.shutdown();
         assert_eq!(reopened.waypoints(&scoped.world), vec![scoped]);
@@ -1356,6 +1409,28 @@ mod tests {
             fs::read_to_string(directory.join(SETTINGS_FILE)).unwrap(),
             file
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn scoped_v2_records_gain_the_default_colour_and_migrate_to_v3() {
+        let directory = scratch();
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join(SETTINGS_FILE),
+            "waypoint_v2=save%3Atest:overworld:1:2:3:Старый\n",
+        )
+        .unwrap();
+        let controller = Controller::open(directory.clone());
+        controller.shutdown();
+        let file = fs::read_to_string(directory.join(SETTINGS_FILE)).unwrap();
+        assert!(file.contains("waypoint_v3="));
+        assert!(!file.contains("waypoint_v2="));
+        let reopened = Controller::open(directory.clone());
+        reopened.shutdown();
+        let waypoint = reopened.waypoints("save:test")[0].clone();
+        assert_eq!(waypoint.name, "Старый");
+        assert_eq!(waypoint.color, DEFAULT_WAYPOINT_COLOR);
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -1370,6 +1445,7 @@ mod tests {
             y: 64,
             z: -5,
             name: "База".into(),
+            color: DEFAULT_WAYPOINT_COLOR,
         };
         assert!(controller.add_waypoint(point.clone()));
         assert!(!controller.add_waypoint(point.clone()));
@@ -1381,6 +1457,7 @@ mod tests {
                 y: 64,
                 z: 0,
                 name: format!("Точка {x}"),
+                color: WAYPOINT_COLORS[(x as usize) % WAYPOINT_COLORS.len()],
             }));
         }
         controller.shutdown();
@@ -1404,11 +1481,16 @@ mod tests {
             y: 2,
             z: 3,
             name: "Дом: у % реки".into(),
+            color: 0x5aa9ff,
         };
         assert_eq!(
             Waypoint::decode(waypoint.encode().trim()).unwrap(),
             waypoint
         );
+        // 0.5.0 wrote v2 lines without a colour; they keep the default marker.
+        let legacy = Waypoint::decode("waypoint_v2=save%3Atest:overworld:1:2:3:Старое").unwrap();
+        assert_eq!(legacy.name, "Старое");
+        assert_eq!(legacy.color, DEFAULT_WAYPOINT_COLOR);
         let controller = Controller::open(directory.clone());
         assert!(controller.add_waypoint(waypoint));
         let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -1416,7 +1498,14 @@ mod tests {
             assert!(std::time::Instant::now() < until);
             thread::sleep(std::time::Duration::from_millis(1));
         }
-        assert!(controller.rename_waypoint("save:test", Dimension::Overworld, 1, 3, "Новое имя"));
+        assert!(controller.update_waypoint(
+            "save:test",
+            Dimension::Overworld,
+            1,
+            3,
+            "Новое имя",
+            0xff6b6b
+        ));
         controller.shutdown();
         let reopened = Controller::open(directory.clone());
         let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -1424,7 +1513,9 @@ mod tests {
             assert!(std::time::Instant::now() < until);
             thread::sleep(std::time::Duration::from_millis(1));
         }
-        assert_eq!(reopened.waypoints("save:test")[0].name, "Новое имя");
+        let saved_waypoint = reopened.waypoints("save:test")[0].clone();
+        assert_eq!(saved_waypoint.name, "Новое имя");
+        assert_eq!(saved_waypoint.color, 0xff6b6b);
         assert!(reopened.remove_waypoint("save:test", Dimension::Overworld, 1, 3));
         reopened.shutdown();
         let (_, saved) = read_profile(&directory.join(SETTINGS_FILE)).unwrap();
@@ -1596,12 +1687,44 @@ pub mod maps {
         (channel(16) << 16) | (channel(8) << 8) | channel(0)
     }
 
+    /// Whether a block's map colour needs the biome's grass tint.
+    pub fn needs_grass_tint(name: &str) -> bool {
+        matches!(
+            name,
+            "minecraft:grass_block" | "minecraft:grass" | "minecraft:lily_pad"
+        )
+    }
+
+    /// Whether a block's map colour needs the biome's foliage tint.
+    pub fn needs_foliage_tint(name: &str) -> bool {
+        matches!(
+            name,
+            "minecraft:oak_leaves"
+                | "minecraft:jungle_leaves"
+                | "minecraft:acacia_leaves"
+                | "minecraft:dark_oak_leaves"
+                | "minecraft:mangrove_leaves"
+                | "minecraft:vine"
+        )
+    }
+
     /// The map colour of a block after its biome tint: a grass block's top is
-    /// drawn with the biome's grass colour, as the world tints it, while every
-    /// other block keeps its own map colour. Unknown biomes keep `base`.
-    pub fn block_map_color(name: &str, base: u32, grass: Option<u32>) -> u32 {
-        match (name, grass) {
-            ("minecraft:grass_block" | "minecraft:grass", Some(grass)) => grass & 0x00ff_ffff,
+    /// drawn with the biome's grass colour, foliage leaves and vines with its
+    /// foliage colour, and birch and spruce keep the fixed shades the world
+    /// gives them. Unknown biomes keep `base`.
+    pub fn block_map_color(name: &str, base: u32, grass: Option<u32>, foliage: Option<u32>) -> u32 {
+        match name {
+            "minecraft:grass_block" | "minecraft:grass" | "minecraft:lily_pad" => {
+                grass.map_or(base, |grass| grass & 0x00ff_ffff)
+            }
+            "minecraft:birch_leaves" => 0x80a755,
+            "minecraft:spruce_leaves" => 0x619961,
+            "minecraft:oak_leaves"
+            | "minecraft:jungle_leaves"
+            | "minecraft:acacia_leaves"
+            | "minecraft:dark_oak_leaves"
+            | "minecraft:mangrove_leaves"
+            | "minecraft:vine" => foliage.map_or(base, |foliage| foliage & 0x00ff_ffff),
             _ => base,
         }
     }
@@ -2981,23 +3104,45 @@ pub mod maps {
             }
         }
         #[test]
-        fn grass_blocks_take_the_biome_grass_colour() {
+        fn grass_and_leaves_take_the_biome_colour_with_distinct_birch_and_oak() {
             assert_eq!(
-                block_map_color("minecraft:grass_block", 0x7fb238, Some(0x91bd59)),
+                block_map_color("minecraft:grass_block", 0x7fb238, Some(0x91bd59), None),
                 0x91bd59
             );
             assert_eq!(
-                block_map_color("minecraft:grass_block", 0x7fb238, None),
+                block_map_color("minecraft:grass_block", 0x7fb238, None, None),
                 0x7fb238
             );
             assert_eq!(
-                block_map_color("minecraft:stone", 0x707070, Some(0x91bd59)),
+                block_map_color("minecraft:stone", 0x707070, Some(0x91bd59), Some(0x59ae30)),
                 0x707070
             );
             assert_eq!(
-                block_map_color("minecraft:grass", 0x7fb238, Some(0xffffff)),
+                block_map_color("minecraft:grass", 0x7fb238, Some(0xffffff), None),
                 0xffffff
             );
+            assert_eq!(
+                block_map_color("minecraft:oak_leaves", 0x7fb238, None, Some(0x59ae30)),
+                0x59ae30
+            );
+            assert_eq!(
+                block_map_color("minecraft:birch_leaves", 0x7fb238, None, Some(0x59ae30)),
+                0x80a755
+            );
+            assert_eq!(
+                block_map_color("minecraft:spruce_leaves", 0x7fb238, None, None),
+                0x619961
+            );
+            assert_eq!(
+                block_map_color("minecraft:lily_pad", 0x3f7f3f, Some(0x91bd59), None),
+                0x91bd59
+            );
+            assert_eq!(
+                block_map_color("minecraft:vine", 0x3f6f2f, None, Some(0x4c763c)),
+                0x4c763c
+            );
+            assert!(needs_grass_tint("minecraft:lily_pad"));
+            assert!(needs_foliage_tint("minecraft:vine"));
         }
         fn terrain_fixture() -> Cache {
             let mut cache = Cache::default();

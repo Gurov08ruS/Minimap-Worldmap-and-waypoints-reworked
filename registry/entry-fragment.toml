@@ -1,0 +1,9 @@
+icon = "icons/minimap_worldmap_waypoints_reworked.png"
+screenshots = [
+  "screenshots/minimap_worldmap_waypoints_reworked/world-map.png",
+  "screenshots/minimap_worldmap_waypoints_reworked/world-map-overview.png",
+  "screenshots/minimap_worldmap_waypoints_reworked/nether-portal.png",
+  "screenshots/minimap_worldmap_waypoints_reworked/end.png",
+  "screenshots/minimap_worldmap_waypoints_reworked/create-waypoint.png",
+  "screenshots/minimap_worldmap_waypoints_reworked/waypoint-on-map.png",
+]

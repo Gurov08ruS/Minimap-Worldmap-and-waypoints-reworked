@@ -2,8 +2,30 @@
 
 ## Unreleased — LOD and point information
 
+- Added a new mod icon built from the in-game map with a thin, single-colour
+  square frame, plus world-map, Nether, End, waypoint and waypoint-creation
+  screenshots under `assets/screenshots`. Registry-ready copies and an entry
+  fragment are in `registry/`; Horizon's mod browser reads images from its
+  registry, not from this README.
+- Put the cursor and converted Nether coordinates on one line in the world-map
+  footer, with the biome line below.
+- Let waypoints be edited with a colour palette; markers, map labels and list
+  initials use the chosen colour. List rows now pair the dimension icon with
+  its text and show the biome beside the waypoint name. Older scoped waypoint
+  records without a colour keep the default gold and migrate to `waypoint_v3`.
 - Draw grass blocks with their biome's grass colour on detailed and LOD map
   tiles, so plains, forests, swamps and other biomes no longer share one green.
+- Draw every leaf block from its real texture colour multiplied by the game's
+  own tint source: oak, jungle, acacia, dark oak and mangrove follow the biome
+  foliage colour, birch and spruce keep their distinct fixed shades, and cherry,
+  pale oak and azalea keep their untinted texture colours. Resource-pack
+  textures are read too, and the cached palette refreshes when sprites reload.
+- Blend grass, foliage and water tints over a small radius instead of switching
+  them in hard biome bands, both on detailed tiles and on LOD tiles.
+- Tint water and lily pads with the biome's water and grass colours. Vines use
+  the biome foliage colour, fixing the bright grass-green vines in swamps.
+- Hovering a water or lava column shows its surface Y first and the bottom Y in
+  parentheses in the world-map footer and the point menu.
 - Temporarily removed terrain/LOD RAM eviction limits until the persistent
   container is available. Camera changes and incoming LOD levels retain old data.
 - Preserve original LOD texels at all map zoom levels; smooth detailed chunk

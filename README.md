@@ -7,31 +7,39 @@ waypoints. The waypoint manager is translucent without blur; the full-screen
 map skips rendering the 3D world behind it.
 Old unscoped waypoints from 0.3.x are deleted on first load; preferences remain.
 
+<p align="center">
+  <img src="assets/icon.png" width="128" alt="Minimap, Worldmap and waypoints reworked mod icon">
+</p>
+
 ## Screenshots
-
-### Minimap
-
-> Screenshot placeholder: minimap during gameplay, with the player arrow and waypoints.
-
-<!-- Add assets/screenshots/minimap.png, then replace the placeholder above with:
-![Minimap with player direction and waypoints](assets/screenshots/minimap.png)
--->
 
 ### World map
 
-> Screenshot placeholder: full-screen world map with terrain, dimension tabs and waypoints.
+![Full-screen world map with dimension tabs and coordinates](assets/screenshots/world-map.png)
 
-<!-- Add assets/screenshots/world-map.png, then replace the placeholder above with:
-![Full-screen world map](assets/screenshots/world-map.png)
--->
+### Whole-map overview
 
-### Waypoint manager
+![Whole-map overview with terrain and biome colours](assets/screenshots/world-map-overview.png)
 
-> Screenshot placeholder: waypoint list with the Show on map action.
+### Nether and portal linking
 
-<!-- Add assets/screenshots/waypoints.png, then replace the placeholder above with:
-![Waypoint manager](assets/screenshots/waypoints.png)
--->
+![Nether map with a linked portal menu](assets/screenshots/nether-portal.png)
+
+### The End
+
+![The End dimension map](assets/screenshots/end.png)
+
+### Creating a waypoint
+
+![Waypoint name and colour picker](assets/screenshots/create-waypoint.png)
+
+### Waypoint on the map
+
+![Waypoint marker and tooltip on the world map](assets/screenshots/waypoint-on-map.png)
+
+> Horizon's mod browser shows images from the registry, not from this README.
+> `registry/` holds the exact icon, screenshots and entry fragment for
+> `horizon-mods`; see `registry/README.md`.
 
 ## Install
 
@@ -111,20 +119,26 @@ language in its language settings. Saved waypoint names are preserved as entered
   Panning, zooming, the minimap's follow and the player marker ease between
   frames instead of snapping to mouse steps or server ticks.
 - The world map outlines the block under the pointer with a thin black border
-  and a translucent white fill, and shows the pointed-at coordinates and the
-  localised biome name.
+  and a translucent white fill. The footer puts the pointed-at coordinates and
+  the converted Nether coordinates on one line, with the localised biome on the
+  line below. Over water or lava, Y is the liquid surface and the bottom Y of
+  the column is shown in parentheses, both there and in the point menu.
 - Right-click the world map for a menu at the pointed-at block: **Copy
   coordinates**, **Create waypoint** (the name prompt opens next) and, when the
   client knows the player may run `/tp`, **Teleport here**. The teleport
   entry is hidden without game-master permission (vanilla level 2 or higher).
   Teleporting to another selected dimension uses `/execute in … run tp`.
 - The menu also shows **Delete waypoint** when the point is a waypoint. The
-  waypoint manager (**N**) lists, renames and deletes waypoints; creation from
-  there uses the player's position. Select a waypoint and choose **Show on map**
-  to open its dimension and center the map on it without teleporting.
-- Waypoints are saved with the preferences (newest 64 per world/server), drawn as first-letter
-  markers on the HUD through walls, on both maps, and their full name appears
-  when hovering over the marker on the world map.
+  waypoint manager (**N**) lists, edits and deletes waypoints; creation from
+  there uses the player's position. **Edit** changes both the name and marker
+  colour. Each row shows the first letter in the waypoint's colour, the biome
+  beside the name, and the dimension icon beside the dimension text. Select a
+  waypoint and choose **Show on map** to open its dimension and center the map
+  on it without teleporting.
+- Waypoints are saved with the preferences (newest 64 per world/server), drawn
+  as first-letter markers in their chosen colour on the HUD through walls and on
+  both maps, and their full name appears when hovering over the marker on the
+  world map.
 - Nether portals, End portals and End gateways are marked on the map; clicking
   one opens its destination. Nether destinations prefer the nearest known portal
   within the vanilla search radius, otherwise the ×8/÷8 conversion; End portals
@@ -165,7 +179,15 @@ Y and biome names are retained with LOD samples, independently of Horizon’s
 current camera/frustum; approximate heights are marked with `≈`.
 
 The sampler uses ordinary client-loaded chunks and map colours; underground/Nether
-views sample below the player's head. Translucent columns are composited instead
+views sample below the player's head. Leaf blocks use the mean colour of their
+actual game texture multiplied by the same tint source the world applies: oak,
+jungle, acacia, dark oak and mangrove follow the biome foliage colour, birch and
+spruce keep their fixed shades, and cherry, pale oak and azalea keep their
+untinted texture colours. Water uses the biome water colour, lily pads use the
+biome grass colour, and vines use the biome foliage colour. Grass, foliage and
+water tints are averaged over a small radius, so biome boundaries fade instead
+of forming hard bands; LOD tiles blend neighbouring samples in the same way.
+The leaf palette follows resource-pack reloads. Translucent columns are composited instead
 of stopping at their top block: water (including bubble columns) and the
 glass-family blocks (glass, stained glass and panes, ice, copper grates,
 honey/slime blocks, tinted glass) keep their map tint as a semi-transparent
@@ -223,8 +245,9 @@ have Horizon's public invite identity, which can change between sharings.
 
 Migration deliberately deletes old `waypoint=` records without a world identity,
 as requested by the author; it never guesses a destination world. Valid scoped
-`waypoint_v2=` records and preferences survive. The migration is persisted even
-without joining a world or editing settings. Each world keeps its newest 64
+`waypoint_v2=` records survive with the default marker colour and are rewritten
+as `waypoint_v3=` with their colour; preferences also survive. The migration is
+persisted even without joining a world or editing settings. Each world keeps its newest 64
 points; at 4,096 total points new worlds/points are refused rather than evicting
 another world's records. Portal
 destinations are computed on the client: a Nether portal prefers the nearest

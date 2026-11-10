@@ -19,7 +19,11 @@ use super::minimap_worldmap_waypoints_reworked::{
     self as runtime, Dimension, Waypoint,
     maps::{self, Layer, Portal, View},
 };
-use horizon_client::{chunk::Chunk, extras::Corner, extras_hud::Corners, hud::HudBatch};
+use horizon_client::{
+    chunk::Chunk, client_resources::ClientResources, extras::Corner, extras_hud::Corners,
+    hud::HudBatch, mesher::TintSource,
+};
+use horizon_core::geometry::Direction;
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex, OnceLock, Weak},
@@ -50,9 +54,28 @@ struct Target {
 
 struct NameForm {
     text: String,
+    color: u32,
     target: Option<Target>,
     rename: Option<Spot>,
     background: Mode,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FluidKind {
+    Water,
+    Lava,
+}
+
+#[derive(Clone, Copy)]
+struct FluidColumn {
+    kind: FluidKind,
+    bottom: i32,
+}
+
+#[derive(Clone, Copy)]
+struct ColumnInfo {
+    height: i32,
+    fluid: Option<FluidColumn>,
 }
 
 #[derive(Clone, Copy)]
@@ -60,6 +83,7 @@ struct Menu {
     height_approximate: bool,
     block: [i32; 2],
     height: Option<i32>,
+    fluid: Option<FluidColumn>,
     dimension: Dimension,
     at: [f32; 2],
     portal: Option<Portal>,
@@ -75,6 +99,205 @@ enum MenuAction {
     TeleportDestination,
     DeleteWaypoint,
     Information,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LeafTint {
+    None,
+    Fixed(u32),
+    Grass,
+    Foliage,
+}
+
+#[derive(Clone, Copy)]
+struct LeafColor {
+    /// Mean colour of the leaf texture, without its tint.
+    rgb: u32,
+    tint: LeafTint,
+}
+
+impl LeafColor {
+    fn map_color(self, grass: Option<u32>, foliage: Option<u32>) -> Option<u32> {
+        let tint = match self.tint {
+            LeafTint::None => 0x00ff_ffff,
+            LeafTint::Fixed(color) => color,
+            LeafTint::Grass => grass?,
+            LeafTint::Foliage => foliage?,
+        };
+        Some(multiply_color(self.rgb, tint))
+    }
+}
+
+fn multiply_color(base: u32, tint: u32) -> u32 {
+    let channel = |shift: u32| ((((base >> shift) & 255) * ((tint >> shift) & 255)) / 255) & 255;
+    (channel(16) << 16) | (channel(8) << 8) | channel(0)
+}
+
+#[derive(Default)]
+struct LeafPalette {
+    /// Block state id → the texture colour the game draws with, before tint.
+    states: BTreeMap<u32, LeafColor>,
+}
+
+fn average_texture(resources: &ClientResources, name: &str) -> Option<u32> {
+    let pixels = resources.texture(name)?;
+    let mut sum = [0u64; 3];
+    let mut weight = 0u64;
+    for pixel in pixels.rgba.chunks_exact(4) {
+        let alpha = u64::from(pixel[3]);
+        if alpha == 0 {
+            continue;
+        }
+        for (total, value) in sum.iter_mut().zip(&pixel[..3]) {
+            *total += u64::from(*value) * alpha;
+        }
+        weight += alpha;
+    }
+    if weight == 0 {
+        return None;
+    }
+    let red = (sum[0] / weight) as u32;
+    let green = (sum[1] / weight) as u32;
+    let blue = (sum[2] / weight) as u32;
+    Some((red << 16) | (green << 8) | blue)
+}
+
+/// Mean texture colour and the game's tint source for every leaf block,
+/// including vines and lily pads, whose tint the map takes from the biome.
+/// Resource packs move the textures, so the result follows
+/// `native_block_sprites_version`.
+fn build_leaf_palette(game: &Game<'_>) -> LeafPalette {
+    let states = game.native_block_states();
+    let resources = game.native_client_resources();
+    let book = game.res.facts();
+    let mut textures = BTreeMap::<String, Option<u32>>::new();
+    let mut palette = LeafPalette::default();
+    for (id, facts) in states.iter() {
+        let name = facts.name.as_ref();
+        let tinted_block = name.contains("leaves")
+            || matches!(name, "minecraft:vine" | "minecraft:lily_pad")
+            || book.states.get(id.0 as usize).is_some_and(|state| {
+                state
+                    .classes
+                    .iter()
+                    .any(|class| class.as_ref() == "LeavesBlock")
+            });
+        if !tinted_block {
+            continue;
+        }
+        let Some(sprites) = states.sprites(id) else {
+            continue;
+        };
+        let face = sprites.sides[Direction::Up as usize]
+            .first()
+            .or_else(|| sprites.sides.iter().find_map(|side| side.first()));
+        let Some(face) = face else {
+            continue;
+        };
+        let Some(texture) = states.texture(face.sprite) else {
+            continue;
+        };
+        let rgb = *textures
+            .entry(texture.to_owned())
+            .or_insert_with(|| average_texture(&resources, texture));
+        let Some(rgb) = rgb else {
+            continue;
+        };
+        let tint = if name == "minecraft:lily_pad" {
+            // Vanilla tints a lily pad with the biome's grass colour; the
+            // mesher's constant is only a fallback for its own drawing pass.
+            LeafTint::Grass
+        } else {
+            match face.tint {
+                None => LeafTint::None,
+                Some(TintSource::Fixed(color)) => LeafTint::Fixed(color),
+                Some(TintSource::Grass) => LeafTint::Grass,
+                Some(TintSource::Foliage) => LeafTint::Foliage,
+                // Dry foliage and water belong to non-leaf blocks; keep their
+                // map colour instead of pretending a wrong tint.
+                Some(TintSource::DryFoliage | TintSource::Water) => continue,
+            }
+        };
+        palette.states.insert(id.0, LeafColor { rgb, tint });
+    }
+    palette
+}
+
+#[derive(Clone, Copy, Default)]
+struct BiomeTints {
+    grass: Option<u32>,
+    foliage: Option<u32>,
+    water: Option<u32>,
+}
+
+// Minecraft blends the biome colours over a radius instead of switching at a
+// line. Sample a small grid around the block and average each requested tint.
+const BIOME_BLEND_RADIUS: i32 = 4;
+const BIOME_BLEND_STEP: i32 = 2;
+
+fn blend_biome_tints(
+    palette: &horizon_client::biome::Biomes,
+    at: [i32; 2],
+    radius: i32,
+    step: i32,
+    grass: bool,
+    foliage: bool,
+    water: bool,
+    mut biome: impl FnMut(i32, i32) -> Option<u16>,
+) -> BiomeTints {
+    if !(grass || foliage || water) {
+        return BiomeTints::default();
+    }
+    let step = step.max(1);
+    let mut sums = [[0u64; 3]; 3];
+    let mut counts = [0u64; 3];
+    let mut dz = -radius;
+    while dz <= radius {
+        let mut dx = -radius;
+        while dx <= radius {
+            let x = at[0].saturating_add(dx);
+            let z = at[1].saturating_add(dz);
+            if let Some(id) = biome(x, z)
+                && let Some(info) = palette.list.get(usize::from(id))
+            {
+                if grass {
+                    add_color(
+                        &mut sums[0],
+                        &mut counts[0],
+                        palette.grass(id, f64::from(x), f64::from(z)),
+                    );
+                }
+                if foliage {
+                    add_color(&mut sums[1], &mut counts[1], info.foliage);
+                }
+                if water {
+                    add_color(&mut sums[2], &mut counts[2], info.water);
+                }
+            }
+            dx += step;
+        }
+        dz += step;
+    }
+    BiomeTints {
+        grass: average_color(sums[0], counts[0]),
+        foliage: average_color(sums[1], counts[1]),
+        water: average_color(sums[2], counts[2]),
+    }
+}
+
+fn add_color(sum: &mut [u64; 3], count: &mut u64, color: u32) {
+    for (channel, shift) in sum.iter_mut().zip([16, 8, 0]) {
+        *channel += u64::from((color >> shift) & 255);
+    }
+    *count += 1;
+}
+
+fn average_color(sum: [u64; 3], count: u64) -> Option<u32> {
+    if count == 0 {
+        return None;
+    }
+    let channel = |index: usize| (sum[index] / count) as u32;
+    Some((channel(0) << 16) | (channel(1) << 8) | channel(2))
 }
 
 struct State {
@@ -104,6 +327,7 @@ struct State {
     pending_command: Option<String>,
     map_focus: Option<Spot>,
     waypoint_biomes: BTreeMap<Spot, String>,
+    leaves: Option<(u64, Arc<LeafPalette>)>,
     lod_elapsed: f64,
     lod_sources:
         BTreeMap<(Dimension, maps::LodKey), (Weak<Vec<horizon_client::lod::Column>>, Instant)>,
@@ -139,6 +363,7 @@ impl Default for State {
             pending_command: None,
             map_focus: None,
             waypoint_biomes: BTreeMap::new(),
+            leaves: None,
             lod_elapsed: 1.0,
             lod_sources: BTreeMap::new(),
             info: None,
@@ -230,13 +455,12 @@ fn plant_color(name: &str) -> Option<u32> {
         "crimson_roots" => 0x8a3030,
         "warped_roots" => 0x3f7f7f,
         "nether_sprouts" => 0x3f8f5f,
-        "vine" | "cave_vines" | "cave_vines_plant" => 0x3f6f2f,
+        "cave_vines" | "cave_vines_plant" => 0x3f6f2f,
         "twisting_vines" | "twisting_vines_plant" => 0x3fa0a0,
         "weeping_vines" | "weeping_vines_plant" => 0x8a3030,
         "sugar_cane" => 0x8fbf5a,
         "bamboo" => 0xb7c65a,
         "cactus" => 0x3f7f3f,
-        "lily_pad" => 0x3f7f3f,
         "sea_pickle" => 0x6a8f3f,
         "seagrass" | "tall_seagrass" | "kelp" | "kelp_plant" => 0x3f9f3f,
         "moss_carpet" | "pale_moss_carpet" | "moss_block" => 0x5f8f3f,
@@ -579,6 +803,32 @@ fn first_letter(name: &str) -> char {
         .unwrap_or('?')
 }
 
+fn waypoint_argb(color: u32) -> u32 {
+    0xff00_0000 | (color & 0x00ff_ffff)
+}
+
+fn default_waypoint_color(state: &State) -> u32 {
+    runtime::WAYPOINT_COLORS[state.waypoints.len() % runtime::WAYPOINT_COLORS.len()]
+}
+
+fn fit_text(game: &Game<'_>, text: &str, width: f32) -> String {
+    if game.native_text_width(text) <= width {
+        return text.to_owned();
+    }
+    let mut out = String::new();
+    for c in text.chars() {
+        let mut candidate = out.clone();
+        candidate.push(c);
+        candidate.push('…');
+        if game.native_text_width(&candidate) > width {
+            break;
+        }
+        out.push(c);
+    }
+    out.push('…');
+    out
+}
+
 fn draw_waypoint(
     game: &Game<'_>,
     batch: &mut HudBatch,
@@ -599,7 +849,11 @@ fn draw_waypoint(
         [x - half - 1.0, y - half - 1.0, size + 2.0, size + 2.0],
         0xff101010,
     );
-    game.native_fill(batch, [x - half, y - half, size, size], 0xffffd24a);
+    game.native_fill(
+        batch,
+        [x - half, y - half, size, size],
+        waypoint_argb(waypoint.color),
+    );
     let letter = first_letter(&waypoint.name).to_string();
     game.native_text(
         batch,
@@ -642,8 +896,9 @@ fn draw_portal_marker(
 }
 
 // The visible height at a hovered column, in the player's current dimension
-// (the only one whose loaded chunks the client holds).
-fn hovered_height(game: &Game<'_>, layer: Layer, block: [i32; 2]) -> Option<i32> {
+// (the only one whose loaded chunks the client holds). Water and lava also
+// report the lowest block of their column.
+fn hovered_column(game: &Game<'_>, layer: Layer, block: [i32; 2]) -> Option<ColumnInfo> {
     let chunk = game
         .world
         .chunks
@@ -654,7 +909,7 @@ fn hovered_height(game: &Game<'_>, layer: Layer, block: [i32; 2]) -> Option<i32>
         Layer::Surface => i32::MAX,
         Layer::Below(y) => y,
     };
-    chunk.highest(game.world.air.0, |y| {
+    let height = chunk.highest(game.world.air.0, |y| {
         if y > ceiling {
             return false;
         }
@@ -666,12 +921,42 @@ fn hovered_height(game: &Game<'_>, layer: Layer, block: [i32; 2]) -> Option<i32>
             return false;
         }
         !facts.is_air(id)
-            && horizon_client::blocks::MAP_COLORS
+            && (matches!(
+                entry.fluid,
+                horizon_client::blocks::Fluid::Water | horizon_client::blocks::Fluid::Lava
+            ) || horizon_client::blocks::MAP_COLORS
                 .get(entry.map_color as usize)
                 .copied()
                 .unwrap_or(0)
-                != 0
-    })
+                != 0)
+    })?;
+    let fluid = facts
+        .states
+        .get(chunk.block(x, height, z).0 as usize)
+        .and_then(|entry| match entry.fluid {
+            horizon_client::blocks::Fluid::Water => Some(FluidKind::Water),
+            horizon_client::blocks::Fluid::Lava => Some(FluidKind::Lava),
+            horizon_client::blocks::Fluid::None => None,
+        })
+        .map(|kind| {
+            let mut bottom = height;
+            while bottom > chunk.min_y() {
+                let below = chunk.block(x, bottom - 1, z);
+                let Some(entry) = facts.states.get(below.0 as usize) else {
+                    break;
+                };
+                let same = match kind {
+                    FluidKind::Water => entry.fluid == horizon_client::blocks::Fluid::Water,
+                    FluidKind::Lava => entry.fluid == horizon_client::blocks::Fluid::Lava,
+                };
+                if !same {
+                    break;
+                }
+                bottom -= 1;
+            }
+            FluidColumn { kind, bottom }
+        });
+    Some(ColumnInfo { height, fluid })
 }
 
 const MENU_HEADER: f32 = 19.0;
@@ -784,13 +1069,26 @@ fn portal_target_text(target: PortalTarget) -> String {
 
 fn menu_title(menu: Menu) -> String {
     match menu.height {
-        Some(y) => format!(
-            "X: {}  Y: {}{}  Z: {}",
-            menu.block[0],
-            if menu.height_approximate { "≈" } else { "" },
-            y,
-            menu.block[1]
-        ),
+        Some(y) => {
+            let bottom = menu.fluid.map_or_else(String::new, |fluid| {
+                localized_format!(
+                    " (bottom {})",
+                    " (дно {})",
+                    " (fond {})",
+                    " (fondo {})",
+                    " (Grund {})",
+                    fluid.bottom
+                )
+            });
+            format!(
+                "X: {}  Y: {}{}{}  Z: {}",
+                menu.block[0],
+                if menu.height_approximate { "≈" } else { "" },
+                y,
+                bottom,
+                menu.block[1]
+            )
+        }
         None => format!("X: {}  Z: {}", menu.block[0], menu.block[1]),
     }
 }
@@ -1021,6 +1319,7 @@ fn perform_menu(game: &Game<'_>, state: &mut State, menu: Menu, action: MenuActi
             };
             state.name_form = Some(NameForm {
                 text: default_waypoint_name(state),
+                color: default_waypoint_color(state),
                 target: Some(target),
                 rename: None,
                 background: Mode::Map,
@@ -1328,11 +1627,22 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         } else if inside(mouse, row) {
             game.native_fill(batch, row, 0xff222b35);
         }
-        dimension_icon(
-            game,
+        let letter = first_letter(&waypoint.name).to_string();
+        let letter_x = row[0] + 6.0;
+        game.native_text(
             batch,
-            waypoint.dimension,
-            [row[0] + 5.0, row[1] + 4.0],
+            &letter,
+            [letter_x, row[1] + 3.0],
+            waypoint_argb(waypoint.color),
+            false,
+        );
+        let name_x = letter_x + game.native_text_width(&letter).max(6.0) + 6.0;
+        game.native_text(
+            batch,
+            &waypoint.name,
+            [name_x, row[1] + 3.0],
+            0xffffff,
+            false,
         );
         let spot = Spot {
             dimension: waypoint.dimension,
@@ -1340,13 +1650,30 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             z: waypoint.z,
         };
         let biome = state.waypoint_biomes.get(&spot).map(String::as_str);
-        biome_icon(game, batch, biome, [row[0] + 18.0, row[1] + 4.0]);
-        game.native_text(
+        let biome_x = name_x + game.native_text_width(&waypoint.name) + 7.0;
+        let right = row[0] + row[2] - 4.0;
+        if biome_x + 8.0 < right {
+            biome_icon(game, batch, biome, [biome_x, row[1] + 3.0]);
+            if let Some(biome) = biome {
+                let label_x = biome_x + 12.0;
+                if label_x < right {
+                    let label = fit_text(game, &localized_biome(biome), right - label_x);
+                    game.native_text(batch, &label, [label_x, row[1] + 3.0], 0x8fcf86, false);
+                }
+            }
+            if inside(mouse, [biome_x, row[1] + 2.0, right - biome_x, 12.0]) {
+                let label = biome.map_or_else(
+                    || tr("Biome: —", "биом: —", "Biome : —", "Bioma: —", "Biom: —").to_owned(),
+                    localized_biome,
+                );
+                biome_tooltip = Some(label);
+            }
+        }
+        dimension_icon(
+            game,
             batch,
-            &waypoint.name,
-            [row[0] + 32.0, row[1] + 3.0],
-            0xffffff,
-            false,
+            waypoint.dimension,
+            [row[0] + 6.0, row[1] + 16.0],
         );
         game.native_text(
             batch,
@@ -1357,17 +1684,10 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
                 waypoint.y,
                 waypoint.z
             ),
-            [row[0] + 32.0, row[1] + 15.0],
+            [row[0] + 18.0, row[1] + 15.0],
             0xaaaaaa,
             false,
         );
-        if inside(mouse, [row[0] + 17.0, row[1] + 3.0, 10.0, 10.0]) {
-            let label = biome.map_or_else(
-                || tr("Biome: —", "биом: —", "Biome : —", "Bioma: —", "Biom: —").to_owned(),
-                localized_biome,
-            );
-            biome_tooltip = Some(label);
-        }
     }
     let bottom = batch.height - 42.0;
     let selected = state
@@ -1378,13 +1698,7 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         game,
         batch,
         rename,
-        tr(
-            "Rename",
-            "Переименовать",
-            "Renommer",
-            "Cambiar nombre",
-            "Umbenennen",
-        ),
+        tr("Edit", "Изменить", "Modifier", "Editar", "Bearbeiten"),
         mouse,
         selected.is_some(),
     );
@@ -1411,17 +1725,38 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         selected.is_some(),
     );
     let hint = tr(
-        "Select a waypoint to see its name and coordinates",
-        "Выберите точку, чтобы увидеть её имя и координаты",
-        "Sélectionnez un repère pour voir son nom et ses coordonnées",
-        "Selecciona un marcador para ver su nombre y coordenadas",
-        "Wegpunkt auswählen, um Namen und Koordinaten anzuzeigen",
+        "Select a waypoint to see its colour, name, biome and coordinates",
+        "Выберите точку, чтобы увидеть её цвет, имя, биом и координаты",
+        "Sélectionnez un repère pour voir sa couleur, son nom, son biome et ses coordonnées",
+        "Selecciona un marcador para ver su color, nombre, bioma y coordenadas",
+        "Wegpunkt auswählen, um Farbe, Namen, Biom und Koordinaten anzuzeigen",
     );
     game.native_text(batch, hint, [12.0, bottom + 24.0], 0x888f98, true);
     draw_notice(game, batch, state);
     if let Some(label) = biome_tooltip {
         draw_tooltip(game, batch, &label, mouse);
     }
+}
+
+const NAME_FORM_HEIGHT: f32 = 126.0;
+
+fn name_form_rect(viewport_width: f32, height: f32) -> [f32; 4] {
+    let width = 340.0_f32.min(viewport_width - 24.0);
+    [
+        (viewport_width - width) / 2.0,
+        height / 2.0 - NAME_FORM_HEIGHT / 2.0,
+        width,
+        NAME_FORM_HEIGHT,
+    ]
+}
+
+fn color_swatch_at(rect: [f32; 4], index: usize) -> [f32; 4] {
+    [
+        rect[0] + 10.0 + index as f32 * 22.0,
+        rect[1] + 61.0,
+        18.0,
+        18.0,
+    ]
 }
 
 fn draw_name_form(game: &Game<'_>, batch: &mut HudBatch, state: &State, form: &NameForm) {
@@ -1431,13 +1766,7 @@ fn draw_name_form(game: &Game<'_>, batch: &mut HudBatch, state: &State, form: &N
         Mode::Name => {}
     }
     game.native_fill(batch, [0.0, 0.0, batch.width, batch.height], 0x70000000);
-    let width = 340.0_f32.min(batch.width - 24.0);
-    let rect = [
-        (batch.width - width) / 2.0,
-        batch.height / 2.0 - 45.0,
-        width,
-        90.0,
-    ];
+    let rect = name_form_rect(batch.width, batch.height);
     game.native_fill(batch, rect, 0xf01b2028);
     game.native_fill(batch, [rect[0], rect[1], rect[2], 1.0], 0xff3a4553);
     game.native_fill(
@@ -1449,11 +1778,11 @@ fn draw_name_form(game: &Game<'_>, batch: &mut HudBatch, state: &State, form: &N
         batch,
         if form.rename.is_some() {
             tr(
-                "Rename waypoint",
-                "Новое имя вейпоинта",
-                "Renommer le repère",
-                "Cambiar nombre del marcador",
-                "Wegpunkt umbenennen",
+                "Edit waypoint",
+                "Изменить вейпоинт",
+                "Modifier le repère",
+                "Editar marcador",
+                "Wegpunkt bearbeiten",
             )
         } else {
             tr(
@@ -1477,6 +1806,29 @@ fn draw_name_form(game: &Game<'_>, batch: &mut HudBatch, state: &State, form: &N
         0xffffff,
         false,
     );
+    game.native_text(
+        batch,
+        tr("Colour", "Цвет", "Couleur", "Color", "Farbe"),
+        [rect[0] + 10.0, rect[1] + 49.0],
+        0xaaaaaa,
+        false,
+    );
+    for (index, &color) in runtime::WAYPOINT_COLORS.iter().enumerate() {
+        let swatch = color_swatch_at(rect, index);
+        if form.color == color {
+            game.native_fill(
+                batch,
+                [
+                    swatch[0] - 2.0,
+                    swatch[1] - 2.0,
+                    swatch[2] + 4.0,
+                    swatch[3] + 4.0,
+                ],
+                0xffffffff,
+            );
+        }
+        game.native_fill(batch, swatch, waypoint_argb(color));
+    }
     let mouse = game.native_cursor();
     let save = [
         rect[0] + rect[2] - 184.0,
@@ -1515,7 +1867,7 @@ fn draw_name_form(game: &Game<'_>, batch: &mut HudBatch, state: &State, form: &N
             "Intro — guardar, Esc — cancelar",
             "Eingabe — speichern, Esc — abbrechen",
         ),
-        [rect[0] + 10.0, rect[1] + rect[3] - 19.0],
+        [rect[0] + 10.0, rect[1] + 86.0],
         0x888f98,
         false,
     );
@@ -1728,7 +2080,11 @@ fn draw_world_waypoints(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             continue;
         }
         game.native_fill(batch, [x - 6.0, y - 6.0, 12.0, 12.0], 0xff101010);
-        game.native_fill(batch, [x - 5.0, y - 5.0, 10.0, 10.0], 0xffffd24a);
+        game.native_fill(
+            batch,
+            [x - 5.0, y - 5.0, 10.0, 10.0],
+            waypoint_argb(waypoint.color),
+        );
         let letter = first_letter(&waypoint.name).to_string();
         game.native_text(
             batch,
@@ -1799,6 +2155,10 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
         game.click_command(&command);
     }
     let mut state = state();
+    let sprites_version = game.native_block_sprites_version();
+    if state.leaves.as_ref().map(|(version, _)| *version) != Some(sprites_version) {
+        state.leaves = Some((sprites_version, Arc::new(build_leaf_palette(game))));
+    }
     if state.close {
         state.close = false;
         runtime::set_text_input(false);
@@ -1913,6 +2273,7 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
                     .as_ref()
                     .unwrap_or_else(|| game.res.biomes())
                     .clone();
+                let leaves = state.leaves.as_ref().map(|(_, leaves)| Arc::clone(leaves));
                 let resources = Arc::clone(&game.res);
                 let key = maps::LodKey {
                     x: key.x,
@@ -1925,9 +2286,20 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
                         .submit_lod(state.session, dimension, key, move || {
                             let mut biome_names = BTreeMap::<u16, Arc<str>>::new();
                             let book = resources.facts();
+                            let [origin_x, origin_z, size, _] = key.bounds();
+                            let stride = size / 16;
+                            let blend_step = stride.clamp(1, i64::from(i32::MAX)) as i32;
+                            let biome_at = |wx: i32, wz: i32| -> Option<u16> {
+                                let dx = i64::from(wx) - origin_x;
+                                let dz = i64::from(wz) - origin_z;
+                                if dx < 0 || dz < 0 || dx >= size || dz >= size {
+                                    return None;
+                                }
+                                let cell = ((dz / stride) * 16 + (dx / stride)) as usize;
+                                columns.get(cell)?.surface.map(|surface| surface.biome)
+                            };
                             let color = |id: horizon_world::registry::BlockStateId,
-                                         biome: u16,
-                                         at: [i64; 2]| {
+                                         at: [i32; 2]| {
                                 let state = book.states.get(id.0 as usize)?;
                                 if book.is_air(id) {
                                     return None;
@@ -1938,34 +2310,65 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
                                         .copied()
                                         .unwrap_or(0)
                                 });
-                                let grass = biome_palette
-                                    .list
-                                    .get(usize::from(biome))
-                                    .map(|_| {
-                                        biome_palette.grass(biome, at[0] as f64, at[1] as f64)
-                                    });
-                                Some(maps::block_map_color(state.name.as_ref(), base, grass))
+                                let leaf = leaves
+                                    .as_ref()
+                                    .and_then(|leaves| leaves.states.get(&id.0))
+                                    .copied();
+                                let water =
+                                    matches!(state.fluid, horizon_client::blocks::Fluid::Water);
+                                let needs_grass = leaf
+                                    .is_some_and(|leaf| leaf.tint == LeafTint::Grass)
+                                    || maps::needs_grass_tint(state.name.as_ref());
+                                let needs_foliage = leaf
+                                    .is_some_and(|leaf| leaf.tint == LeafTint::Foliage)
+                                    || maps::needs_foliage_tint(state.name.as_ref());
+                                let blend = blend_biome_tints(
+                                    &biome_palette,
+                                    at,
+                                    blend_step,
+                                    blend_step,
+                                    needs_grass,
+                                    needs_foliage,
+                                    water,
+                                    |wx, wz| biome_at(wx, wz),
+                                );
+                                let rgb = if water {
+                                    blend
+                                        .water
+                                        .unwrap_or_else(|| if base == 0 { 0x3f76e4 } else { base })
+                                } else {
+                                    leaf.and_then(|leaf| leaf.map_color(blend.grass, blend.foliage))
+                                        .unwrap_or_else(|| {
+                                            plant_color(state.name.as_ref()).unwrap_or_else(|| {
+                                                maps::block_map_color(
+                                                    state.name.as_ref(),
+                                                    base,
+                                                    blend.grass,
+                                                    blend.foliage,
+                                                )
+                                            })
+                                        })
+                                };
+                                Some(rgb)
                             };
                             let mut tile = maps::Tile {
                                 pixels: vec![0; 1024],
                                 biomes: vec![None; 256],
                                 ..maps::Tile::default()
                             };
-                            let [origin_x, origin_z, size, _] = key.bounds();
-                            let stride = size / 16;
                             for (i, column) in columns.iter().enumerate() {
                                 let Some(surface) = column.surface else {
                                     continue;
                                 };
                                 let at = [
-                                    origin_x + (i as i64 % 16) * stride + stride / 2,
-                                    origin_z + (i as i64 / 16) * stride + stride / 2,
+                                    (origin_x + (i as i64 % 16) * stride + stride / 2) as i32,
+                                    (origin_z + (i as i64 / 16) * stride + stride / 2) as i32,
                                 ];
-                                let Some(mut rgb) = color(surface.state, surface.biome, at) else {
+                                let Some(mut rgb) = color(surface.state, at) else {
                                     continue;
                                 };
                                 if let Some((height, water)) = surface.water
-                                    && let Some(water) = color(water, surface.biome, at)
+                                    && let Some(water) = color(water, at)
                                 {
                                     let depth = (height - surface.height).max(0);
                                     let alpha = (90 + depth * 8).clamp(90, 210) as u32;
@@ -2073,7 +2476,9 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
             }) {
                 continue;
             }
-            let Ok(snapshot) = game.native_client_chunks([pos.0, pos.1], [pos.0, pos.1]) else {
+            let Ok(snapshot) =
+                game.native_client_chunks([pos.0 - 1, pos.1 - 1], [pos.0 + 1, pos.1 + 1])
+            else {
                 continue;
             };
             let resources = Arc::clone(&game.res);
@@ -2082,6 +2487,7 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
                 .as_ref()
                 .unwrap_or_else(|| game.res.biomes())
                 .clone();
+            let leaves = state.leaves.as_ref().map(|(_, leaves)| Arc::clone(leaves));
             let accepted = controller.maps.submit(
                 state.session,
                 dimension,
@@ -2154,23 +2560,42 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
                                 .get(state.map_color as usize)
                                 .copied()
                                 .unwrap_or(0);
-                            let grass = matches!(
-                                state.name.as_ref(),
-                                "minecraft:grass_block" | "minecraft:grass"
-                            )
-                            .then(|| {
-                                snapshot.biome([x, y, z]).map(|biome| {
-                                    biome_palette.grass(
-                                        biome.0,
-                                        f64::from(x),
-                                        f64::from(z),
-                                    )
-                                })
-                            })
-                            .flatten();
-                            let rgb = plant_color(state.name.as_ref()).unwrap_or_else(|| {
-                                maps::block_map_color(state.name.as_ref(), base, grass)
-                            });
+                            let leaf = leaves
+                                .as_ref()
+                                .and_then(|leaves| leaves.states.get(&id.0))
+                                .copied();
+                            let needs_grass = leaf.is_some_and(|leaf| leaf.tint == LeafTint::Grass)
+                                || maps::needs_grass_tint(state.name.as_ref());
+                            let needs_foliage = leaf
+                                .is_some_and(|leaf| leaf.tint == LeafTint::Foliage)
+                                || maps::needs_foliage_tint(state.name.as_ref());
+                            let blend = blend_biome_tints(
+                                &biome_palette,
+                                [x, z],
+                                BIOME_BLEND_RADIUS,
+                                BIOME_BLEND_STEP,
+                                needs_grass,
+                                needs_foliage,
+                                water,
+                                |wx, wz| snapshot.biome([wx, y, wz]).map(|biome| biome.0),
+                            );
+                            let rgb = if water {
+                                blend
+                                    .water
+                                    .unwrap_or_else(|| if base == 0 { 0x3f76e4 } else { base })
+                            } else {
+                                leaf.and_then(|leaf| leaf.map_color(blend.grass, blend.foliage))
+                                    .unwrap_or_else(|| {
+                                        plant_color(state.name.as_ref()).unwrap_or_else(|| {
+                                            maps::block_map_color(
+                                                state.name.as_ref(),
+                                                base,
+                                                blend.grass,
+                                                blend.foliage,
+                                            )
+                                        })
+                                    })
+                            };
                             let glass = state.classes.iter().any(|class| {
                                 class.as_ref() == "TransparentBlock"
                                     || class.as_ref() == "HalfTransparentBlock"
@@ -2591,6 +3016,26 @@ fn information_lines(game: &Game<'_>, state: &State, menu: Menu, width: f32) -> 
             format!("X: {}  Z: {}", menu.block[0], menu.block[1]),
             normal,
         ),
+    ];
+    if let (Some(y), Some(fluid)) = (menu.height, menu.fluid) {
+        let kind = match fluid.kind {
+            FluidKind::Water => tr("Water", "Вода", "Eau", "Agua", "Wasser"),
+            FluidKind::Lava => tr("Lava", "Лава", "Lave", "Lava", "Lava"),
+        };
+        lines.push((
+            localized_format!(
+                "{}: surface Y {y}, bottom Y {}",
+                "{}: поверхность Y {y}, дно Y {}",
+                "{} : surface Y {y}, fond Y {}",
+                "{}: superficie Y {y}, fondo Y {}",
+                "{}: Oberfläche Y {y}, Grund Y {}",
+                kind,
+                fluid.bottom
+            ),
+            normal,
+        ));
+    }
+    lines.extend([
         (
             localized_format!(
                 "Chunk: {} / {}",
@@ -2621,7 +3066,7 @@ fn information_lines(game: &Game<'_>, state: &State, menu: Menu, width: f32) -> 
                 normal
             },
         ),
-    ];
+    ]);
     if let Some(key) = lod {
         let stride = 1_i64 << key.level;
         lines.push((
@@ -2823,9 +3268,9 @@ fn draw_information(game: &Game<'_>, batch: &mut HudBatch, state: &State, menu: 
 fn map_footer(width: f32, height: f32) -> [f32; 4] {
     [
         8.0,
-        (height - 54.0).max(0.0),
+        (height - 41.0).max(0.0),
         (width - 16.0).max(1.0),
-        46.0_f32.min(height),
+        33.0_f32.min(height),
     ]
 }
 fn over_map_controls(mouse: [f32; 2], width: f32, height: f32) -> bool {
@@ -2836,19 +3281,19 @@ fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     let rect = rectangle(batch.width, batch.height);
     draw(game, batch, state, rect, true, Some(mouse));
     let mut coordinates = tr(
-        "Point under cursor: —",
-        "Точка под мышью: —",
-        "Point sous le curseur : —",
-        "Punto bajo el cursor: —",
-        "Punkt unter dem Mauszeiger: —",
+        "Cursor: —",
+        "Курсор: —",
+        "Curseur : —",
+        "Cursor: —",
+        "Mauszeiger: —",
     )
     .to_owned();
     let mut nether = tr(
-        "Nether (cursor): —",
-        "Незер (точка под мышью): —",
-        "Nether (curseur) : —",
-        "Nether (cursor): —",
-        "Nether (Mauszeiger): —",
+        "Nether: —",
+        "Незер: —",
+        "Nether : —",
+        "Nether: —",
+        "Nether: —",
     )
     .to_owned();
     let mut biome = None;
@@ -2860,11 +3305,14 @@ fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         })
         && let Some(block) = hovered_block(&frame.view, rect, mouse)
     {
-        let height = if state.dimension == frame.view.dimension {
-            hovered_height(game, frame.view.layer, block)
+        let column = if state.dimension == frame.view.dimension {
+            hovered_column(game, frame.view.layer, block)
         } else {
             match frame.view.layer {
-                Layer::Below(y) => Some(y),
+                Layer::Below(y) => Some(ColumnInfo {
+                    height: y,
+                    fluid: None,
+                }),
                 Layer::Surface => None,
             }
         };
@@ -2876,17 +3324,33 @@ fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         } else {
             coverage.lod_sample(frame.view.dimension, frame.view.layer, block)
         };
-        let height_approximate = height.is_none() && rough.is_some();
-        let height = height.or_else(|| rough.as_ref().map(|p| p.height));
+        let height_approximate = column.is_none() && rough.is_some();
+        let height = column
+            .map(|column| column.height)
+            .or_else(|| rough.as_ref().map(|p| p.height));
+        let bottom = column.and_then(|column| column.fluid.map(|fluid| fluid.bottom));
         coordinates = match height {
-            Some(y) => format!(
-                "{}: X {}  Y {}{}  Z {}",
-                frame.view.dimension.label(),
-                block[0],
-                if height_approximate { "≈" } else { "" },
-                y,
-                block[1]
-            ),
+            Some(y) => {
+                let bottom = bottom.map_or_else(String::new, |bottom| {
+                    localized_format!(
+                        " (bottom {})",
+                        " (дно {})",
+                        " (fond {})",
+                        " (fondo {})",
+                        " (Grund {})",
+                        bottom
+                    )
+                });
+                format!(
+                    "{}: X {}  Y {}{}{}  Z {}",
+                    frame.view.dimension.label(),
+                    block[0],
+                    if height_approximate { "≈" } else { "" },
+                    y,
+                    bottom,
+                    block[1]
+                )
+            }
             None => format!(
                 "{}: X {}  Z {}",
                 frame.view.dimension.label(),
@@ -2900,11 +3364,11 @@ fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             [f64::from(block[0]), 0.0, f64::from(block[1])],
         ) {
             nether = localized_format!(
-                "Nether (cursor): X {x}  Z {z}",
-                "Незер (точка под мышью): X {x}  Z {z}",
-                "Nether (curseur) : X {x}  Z {z}",
-                "Nether (cursor): X {x}  Z {z}",
-                "Nether (Mauszeiger): X {x}  Z {z}"
+                "Nether: X {x}  Z {z}",
+                "Незер: X {x}  Z {z}",
+                "Nether : X {x}  Z {z}",
+                "Nether: X {x}  Z {z}",
+                "Nether: X {x}  Z {z}"
             );
         }
         if state.dimension == frame.view.dimension {
@@ -2947,6 +3411,7 @@ fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     }
     let footer = map_footer(batch.width, batch.height);
     game.native_fill(batch, footer, 0xdf10151d);
+    let coordinates = fit_text(game, &format!("{coordinates}   {nether}"), footer[2] - 12.0);
     game.native_text(
         batch,
         &coordinates,
@@ -2954,24 +3419,11 @@ fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         0xffffff,
         true,
     );
-    dimension_icon(
-        game,
-        batch,
-        Dimension::Nether,
-        [footer[0] + 6.0, footer[1] + 18.0],
-    );
-    game.native_text(
-        batch,
-        &nether,
-        [footer[0] + 18.0, footer[1] + 18.0],
-        0xffffff,
-        true,
-    );
     biome_icon(
         game,
         batch,
         biome.as_deref(),
-        [footer[0] + 6.0, footer[1] + 31.0],
+        [footer[0] + 6.0, footer[1] + 18.0],
     );
     let mut label = biome.as_deref().map_or_else(
         || tr("Biome: —", "биом: —", "Biome : —", "Bioma: —", "Biom: —").to_owned(),
@@ -2989,7 +3441,7 @@ fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     game.native_text(
         batch,
         &label,
-        [footer[0] + 18.0, footer[1] + 31.0],
+        [footer[0] + 18.0, footer[1] + 18.0],
         if lod_warning { 0xffffd45c } else { 0xffffff },
         true,
     );
@@ -3207,15 +3659,26 @@ fn menu_target_at(
     })?;
     let block = hovered_block(&frame.view, rect, at)?;
     let portal = portal_near(state, state.selected, block);
-    let height = if let Some((_, at)) = portal {
-        Some(at[1])
-    } else if state.dimension == frame.view.dimension {
-        hovered_height(game, frame.view.layer, block)
+    let column = if state.dimension == frame.view.dimension {
+        hovered_column(game, frame.view.layer, block)
     } else {
         match frame.view.layer {
-            Layer::Below(y) => Some(y),
+            Layer::Below(y) => Some(ColumnInfo {
+                height: y,
+                fluid: None,
+            }),
             Layer::Surface => None,
         }
+    };
+    let height = if let Some((_, at)) = portal {
+        Some(at[1])
+    } else {
+        column.map(|column| column.height)
+    };
+    let fluid = if portal.is_some() {
+        None
+    } else {
+        column.and_then(|column| column.fluid)
     };
     let rough = runtime::initialize(game.native_data_dir(runtime::MOD_ID))
         .maps
@@ -3227,6 +3690,7 @@ fn menu_target_at(
         height_approximate,
         block,
         height,
+        fluid,
         dimension: state.selected,
         at,
         portal: portal.map(|(kind, _)| kind),
@@ -3264,6 +3728,7 @@ fn waypoint_press(
         };
         state.name_form = Some(NameForm {
             text: default_waypoint_name(state),
+            color: default_waypoint_color(state),
             target: Some(Target {
                 dimension: Dimension::from_id(player.dimension),
                 x: player.x.floor() as i32,
@@ -3307,6 +3772,7 @@ fn waypoint_press(
     {
         state.name_form = Some(NameForm {
             text: waypoint.name.clone(),
+            color: waypoint.color,
             target: None,
             rename: Some(Spot {
                 dimension: waypoint.dimension,
@@ -3356,13 +3822,16 @@ fn name_press(
     if button != 0 {
         return;
     }
-    let width = 340.0_f32.min(screen.rect[2] - 24.0);
-    let rect = [
-        (screen.rect[2] - width) / 2.0,
-        screen.rect[3] / 2.0 - 45.0,
-        width,
-        90.0,
-    ];
+    let rect = name_form_rect(screen.rect[2], screen.rect[3]);
+    for (index, &color) in runtime::WAYPOINT_COLORS.iter().enumerate() {
+        if inside(screen.mouse, color_swatch_at(rect, index)) {
+            if let Some(form) = state.name_form.as_mut() {
+                form.color = color;
+            }
+            *canceled = true;
+            return;
+        }
+    }
     let save = [
         rect[0] + rect[2] - 184.0,
         rect[1] + rect[3] - 24.0,
@@ -3390,20 +3859,21 @@ fn save_name(game: &Game<'_>, state: &mut State) {
     };
     let controller = runtime::initialize(game.native_data_dir(runtime::MOD_ID));
     if let Some(rename) = form.rename {
-        controller.rename_waypoint(
+        controller.update_waypoint(
             &state.world,
             rename.dimension,
             rename.x,
             rename.z,
             &form.text,
+            form.color,
         );
         state.notice = Some((
             tr(
-                "Waypoint renamed",
-                "Имя вейпоинта изменено",
-                "Repère renommé",
-                "Nombre del marcador cambiado",
-                "Wegpunkt umbenannt",
+                "Waypoint updated",
+                "Вейпоинт обновлён",
+                "Repère modifié",
+                "Marcador actualizado",
+                "Wegpunkt aktualisiert",
             )
             .into(),
             Instant::now(),
@@ -3416,6 +3886,7 @@ fn save_name(game: &Game<'_>, state: &mut State) {
             y: target.y,
             z: target.z,
             name: Waypoint::clean_name(&form.text),
+            color: form.color,
         });
         state.notice = Some((
             if saved {
@@ -3619,6 +4090,7 @@ mod render_tests {
             y: 64,
             z: 230,
             name: "Base".into(),
+            color: 0xff6b6b,
         });
         state.waypoint_selected = Some(0);
         let zoom = state.camera.zoom;
@@ -3649,6 +4121,59 @@ mod render_tests {
                 let row = waypoint_row_at(&state, width, height, rows - 1).unwrap();
                 assert!(row[1] + row[3] < actions[0][1]);
                 assert!(waypoint_row_at(&state, width, height, rows).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn leaf_colours_multiply_the_texture_by_the_game_tint() {
+        let birch = LeafColor {
+            rgb: 0x808080,
+            tint: LeafTint::Fixed(0x80a755),
+        };
+        assert_eq!(birch.map_color(None, None), Some(0x40532a));
+        let oak = LeafColor {
+            rgb: 0x808080,
+            tint: LeafTint::Foliage,
+        };
+        assert_eq!(oak.map_color(None, Some(0x77ab2f)), Some(0x3b5517));
+        assert_eq!(oak.map_color(None, None), None);
+    }
+
+    #[test]
+    fn fluid_hover_shows_the_surface_and_bottom_y() {
+        let menu = Menu {
+            height_approximate: false,
+            block: [4, -7],
+            height: Some(62),
+            fluid: Some(FluidColumn {
+                kind: FluidKind::Water,
+                bottom: 40,
+            }),
+            dimension: Dimension::Overworld,
+            at: [0.0; 2],
+            portal: None,
+            waypoint: None,
+        };
+        let title = menu_title(menu);
+        assert!(title.contains("Y: 62"), "{title}");
+        assert!(title.contains("40"), "{title}");
+    }
+
+    #[test]
+    fn biome_tint_average_keeps_each_channel() {
+        assert_eq!(average_color([255 * 4, 128 * 4, 0], 4), Some(0xff8000));
+        assert_eq!(average_color([0; 3], 0), None);
+    }
+
+    #[test]
+    fn waypoint_colour_swatches_fit_the_name_form() {
+        for width in [320.0, 640.0] {
+            for height in [240.0, 480.0] {
+                let rect = name_form_rect(width, height);
+                let last = color_swatch_at(rect, runtime::WAYPOINT_COLORS.len() - 1);
+                assert!(last[0] + last[2] <= rect[0] + rect[2] - 10.0);
+                assert!(last[1] + last[3] < rect[1] + rect[3] - 24.0);
             }
         }
     }
@@ -3726,6 +4251,7 @@ mod render_tests {
         assert!(!map_covers_world(&state));
         state.name_form = Some(NameForm {
             text: String::new(),
+            color: runtime::DEFAULT_WAYPOINT_COLOR,
             target: None,
             rename: None,
             background: Mode::Map,
