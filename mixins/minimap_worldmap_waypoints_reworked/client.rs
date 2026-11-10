@@ -2145,11 +2145,14 @@ fn draw_border(
         f64::from(center.0) * 16.0 + 8.0,
         f64::from(center.1) * 16.0 + 8.0,
     ];
+    // The game's view still shows the first ring outside the nominal radius
+    // while chunks arrive, so draw one extra chunk to contain it.
     let chunk_radius = match &game.remote {
         Some(remote) => game.streaming.radius.min(remote.view_distance + 1),
         None => game.streaming.radius,
     }
-    .max(0);
+    .max(0)
+        + 1;
     let full_radius = if game.lod.is_some() {
         chunk_radius.max(game.lod_distance() as i32)
     } else {
