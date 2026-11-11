@@ -1,6 +1,6 @@
 [mod]
 id = "minimap_worldmap_waypoints_reworked"
-version = "0.5.0"
+version = "0.5.1"
 priority = 100
 
 [compatibility]

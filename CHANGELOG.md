@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.1 — 2026-11-11
+
+- Publish from the Gurov08ruS repository while preserving the original signed
+  development history and GPG signing key.
+- Sign release packages with minisign and distribute the public key with its
+  detached signature from the original GPG key. Include verification instructions.
+- Include the post-0.5.0 fixes for full chunk-render borders and coloured 3D-world
+  waypoint overlays; no additional gameplay changes in this release.
+- Keep the existing Horizon and Horizon Mixins compatibility pins.
+
 ## 0.5.0 — 2026-11-10
 
 - Draw the world border, the actual far-terrain/LOD render distance and the

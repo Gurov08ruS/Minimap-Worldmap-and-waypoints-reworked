@@ -1,5 +1,28 @@
 # Validation
 
+## 0.5.1 — signed release validation, 2026-11-11
+
+Validated on Linux with Rust 1.95.0 and the unchanged compatibility pins.
+
+- Formatting and clippy with warnings denied: pass.
+- Locked offline workspace tests: 55 runtime tests and one source-audit test
+  passed; one manual benchmark ignored.
+- Template integration, full source audit and deterministic AST staging: pass;
+  the original Horizon checkout and its existing changes are preserved.
+- Actual pinned Horizon client check: pass.
+- Runtime tests inside the pinned client: 55 passed, one benchmark ignored.
+- Packaging twice produces identical bytes and SHA-256.
+- Official `cargo horizon-mod check` with the pinned minisign public key and
+  `.minisig`: `ok: true`, `signed: true`.
+- GPG signatures of the package, SHA256SUMS and minisign public key: verified
+  using the original key `9FDE42EE71F7AB70D1767C13215D4C2574068FCC`.
+- Artifact: `minimap_worldmap_waypoints_reworked-0.5.1.hnmod`, 106,415 bytes.
+  SHA-256: `12420822b03b9584cc970eb3ae7e4924eb9b07b1c3f5df4c9a48614072913ad7`.
+
+No new live-game visual review, FPS profiling or macOS/Windows run was performed.
+Publishing the release does not change the Horizon registry entry or its owners.
+
+
 ## 0.5.0 — release validation, 2026-11-10
 
 Validated on Linux with Rust 1.95.0 and the unchanged Horizon/Mixins pins in

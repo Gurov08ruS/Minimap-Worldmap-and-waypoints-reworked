@@ -1,7 +1,7 @@
 # Minimap, Worldmap and waypoints reworked
 
-A native Horizon mod by [daniliammo](https://github.com/daniliammo).
-Version **0.5.0** adds 67 individual biome icons at 16×16, retained biome names
+A native Horizon mod by daniliammo, continued as [Gurov08ruS](https://github.com/Gurov08ruS).
+Version **0.5.1** includes 67 individual biome icons at 16×16, retained biome names
 after chunk unload, LOD terrain caching, German localization, coloured waypoints
 and Show on map. The full-screen map keeps terrain detail at every zoom and
 skips rendering the 3D world behind it.
@@ -66,6 +66,14 @@ The installer resolves and validates that instance's game directory and builds
 its installed native mod set. `--launcher /path/to/horizon-launcher` selects a
 launcher executable. A source `.hnmod` needs one game build before it can run.
 The script does not update a published release or registry entry.
+
+## Release signatures
+
+Download the `.hnmod` and its matching `.hnmod.minisig` from this repository's
+[releases](https://github.com/Gurov08ruS/Minimap-Worldmap-and-waypoints-reworked/releases).
+Packages are signed with minisign; release commits and tags use the original
+GPG signing key. See [SIGNING.md](SIGNING.md) for verification commands and the
+GPG-signed minisign public key.
 
 ## Language
 
@@ -328,7 +336,7 @@ python3 tools/package.py
 
 Fetch the pinned Mixins checkout's dependencies with `cargo fetch --locked`
 before the offline checks. The output is
-`target/minimap_worldmap_waypoints_reworked-0.5.0.hnmod`.
+`target/minimap_worldmap_waypoints_reworked-0.5.1.hnmod`.
 Check it with `cargo horizon-mod check <file>` using Horizon's official
 `cargo-horizon-mod` tool. The [validation workflow](.github/workflows/validate.yml)
 runs the standalone tests, source audit, real client check and tests, and official

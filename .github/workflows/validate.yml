@@ -15,7 +15,10 @@ concurrency:
 
 jobs:
   validate:
-    runs-on: ubuntu-latest
+    # Pinned LTS rather than ubuntu-latest: a brand-new Ubuntu release reaches
+    # the runner's azure mirror and the security archive unevenly for weeks, so
+    # `ubuntu-latest` can hand apt stale indexes and unresolvable package hosts.
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
       CARGO_BUILD_JOBS: "2"
@@ -29,10 +32,23 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install Rust and Linux build dependencies
+        timeout-minutes: 20
         run: |
           rustup toolchain install 1.95.0 --profile minimal --component rustfmt --component clippy
-          sudo apt-get update
-          sudo apt-get install -y libasound2-dev libudev-dev pkg-config
+          # apt is the only network step without built-in retries: a short DNS or
+          # mirror outage must not fail the PR on the first attempt. Every real
+          # failure still fails the job after the retries are exhausted.
+          export DEBIAN_FRONTEND=noninteractive
+          for attempt in 1 2 3 4 5; do
+            if sudo apt-get -o Acquire::Retries=5 update \
+              && sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+                   libasound2-dev libudev-dev pkg-config; then
+              exit 0
+            fi
+            echo "apt attempt ${attempt} failed; retrying in $((attempt * 15))s"
+            sleep $((attempt * 15))
+          done
+          exit 1
       - name: Read compatibility pins
         id: pins
         run: |
@@ -87,7 +103,7 @@ jobs:
           cmp target/package-first.json target/package-second.json
           cargo build --locked --offline --manifest-path target/mixins/modded/Cargo.toml -p cargo-horizon-mod --target-dir target/horizon-cargo
           export PATH="$PWD/target/horizon-cargo/debug:$PATH"
-          cargo horizon-mod check target/minimap_worldmap_waypoints_reworked-0.5.0.hnmod --json | tee target/package-check.json
+          cargo horizon-mod check target/minimap_worldmap_waypoints_reworked-0.5.1.hnmod --json | tee target/package-check.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
