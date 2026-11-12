@@ -637,10 +637,10 @@ pub static BIOME_PICTOGRAMS: &[(&str, BiomePictogram)] = &[
         BiomePictogram {
             rows: [
                 0x00055000, 0x00155400, 0x015f5500, 0x055f57c0, 0x155557d0, 0x17d55550, 0x17d57d50,
-                0x05557d40, 0x01555500, 0x0017d000, 0x000a8000, 0x000a8000, 0x000bc000, 0x000a8000,
+                0x05557d40, 0x01555500, 0x0017d000, 0x000a8000, 0x000a8000, 0x000a8000, 0x000a8000,
                 0x000a8000, 0x00000000,
             ],
-            colors: [0xffb9ce6a, 0xffe9d9b1, 0xff69763c],
+            colors: [0xffcf5f21, 0xff6f4a2f, 0xffa4281f],
         },
     ),
     (
