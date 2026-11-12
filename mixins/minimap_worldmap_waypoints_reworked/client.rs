@@ -25,7 +25,7 @@ use horizon_client::{
 };
 use horizon_core::geometry::Direction;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex, OnceLock, Weak},
     time::{Duration, Instant},
 };
@@ -325,6 +325,9 @@ struct State {
     pending_copy: Option<String>,
     pending_command: Option<String>,
     map_focus: Option<Spot>,
+    /// Chunks the server sent since the last sampling pass. A waypoint's biome
+    /// is sampled when its chunk arrives, rather than polling every point.
+    biome_chunks: BTreeSet<(i32, i32)>,
     leaves: Option<(u64, Arc<LeafPalette>)>,
     lod_elapsed: f64,
     lod_sources:
@@ -359,6 +362,7 @@ impl Default for State {
             pending_copy: None,
             pending_command: None,
             map_focus: None,
+            biome_chunks: BTreeSet::new(),
             leaves: None,
             lod_elapsed: 1.0,
             lod_sources: BTreeMap::new(),
@@ -1483,6 +1487,25 @@ fn draw_menu(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
 }
 
 fn draw_notice(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
+    if let Some(error) = runtime::initialize(game.native_data_dir(runtime::MOD_ID))
+        .maps
+        .status()
+    {
+        let text = localized_format!(
+            "Map cache: {}",
+            "Кеш карты: {}",
+            "Cache carte : {}",
+            "Caché: {}",
+            "Karten-Cache: {}",
+            error
+        );
+        game.native_fill(
+            batch,
+            [0.0, batch.height - 20.0, batch.width, 20.0],
+            0xe0402020,
+        );
+        game.native_text(batch, &text, [6.0, batch.height - 15.0], 0xffffd24a, false);
+    }
     let Some((text, since)) = state.notice.as_ref() else {
         return;
     };
@@ -2418,15 +2441,9 @@ fn draw_world_waypoints(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     }
 }
 
-// A frame may advance only within the atlas that is actually uploaded. Keep
-// the last displayed camera while a wider atlas is being prepared, but always
-// pair the chosen camera with the *new* texture's metadata after an upload.
-fn complete_map_view(
-    atlas: &maps::TerrainAtlas,
-    desired: View,
-    previous: Option<&View>,
-    prepared: &View,
-) -> View {
+// Camera motion never waits for terrain preparation. Newly exposed areas may
+// be empty until the next atlas arrives; existing tiles retain world positions.
+fn complete_map_view(desired: View, prepared: &View) -> View {
     if desired.session != prepared.session
         || desired.dimension != prepared.dimension
         || desired.layer != prepared.layer
@@ -2434,18 +2451,7 @@ fn complete_map_view(
     {
         return prepared.clone();
     }
-    if atlas.covers(&desired) {
-        return desired;
-    }
-    if let Some(previous) = previous
-        && previous.session == desired.session
-        && previous.dimension == desired.dimension
-        && previous.layer == desired.layer
-        && atlas.covers(previous)
-    {
-        return previous.clone();
-    }
-    prepared.clone()
+    desired
 }
 
 fn waypoint_identity(
@@ -2465,36 +2471,43 @@ pub(super) fn client_packet(
     packet: &horizon_client::mod_api::ClientboundPlayPacket,
 ) {
     use horizon_client::mod_api::ClientboundPlayPacket;
-    if !matches!(packet, ClientboundPlayPacket::PlayerCombatKill(_))
-        || !game.native_window()
-        || !game.native_on(runtime::MOD_ID)
-    {
+    if !game.native_window() || !game.native_on(runtime::MOD_ID) {
         return;
     }
-    let controller = runtime::initialize(game.native_data_dir(runtime::MOD_ID));
-    if !controller.settings().death_waypoints {
-        return;
+    match packet {
+        // The chunk is handled by the game after this hook, so sampling waits
+        // for the next frame instead of reading a chunk that is still absent.
+        ClientboundPlayPacket::LevelChunkWithLight(chunk) => {
+            state().biome_chunks.insert((chunk.x, chunk.z));
+        }
+        ClientboundPlayPacket::PlayerCombatKill(_) => {
+            let controller = runtime::initialize(game.native_data_dir(runtime::MOD_ID));
+            if !controller.settings().death_waypoints {
+                return;
+            }
+            let Some(player) = game.native_player() else {
+                return;
+            };
+            let Some(identity) = game.native_client_state() else {
+                return;
+            };
+            let Some(world) = waypoint_identity(&identity) else {
+                return;
+            };
+            let dimension = Dimension::from_id(player.dimension);
+            if dimension == Dimension::Player {
+                return;
+            }
+            let at = [
+                player.x.floor() as i32,
+                player.y.floor() as i32,
+                player.z.floor() as i32,
+            ];
+            let biome = known_biome(game, dimension, at);
+            controller.add_death_waypoint(&world, dimension, at[0], at[1], at[2], biome.as_deref());
+        }
+        _ => {}
     }
-    let Some(player) = game.native_player() else {
-        return;
-    };
-    let Some(identity) = game.native_client_state() else {
-        return;
-    };
-    let Some(world) = waypoint_identity(&identity) else {
-        return;
-    };
-    let dimension = Dimension::from_id(player.dimension);
-    if dimension == Dimension::Player {
-        return;
-    }
-    let at = [
-        player.x.floor() as i32,
-        player.y.floor() as i32,
-        player.z.floor() as i32,
-    ];
-    let biome = known_biome(game, dimension, at);
-    controller.add_death_waypoint(&world, dimension, at[0], at[1], at[2], biome.as_deref());
 }
 
 pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
@@ -2570,7 +2583,17 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
     }
     state.waypoints = controller.waypoints(&state.world);
     let dimension = Dimension::from_id(player.dimension);
+    controller.maps.configure(
+        state.session,
+        &state.world,
+        dimension,
+        controller.settings().cache_ram_mib,
+    );
     if state.dimension != dimension {
+        state.lod_sources.clear();
+        state.frame = None;
+        state.portals.clear();
+
         state.seen.clear();
         state.dimension = dimension;
     }
@@ -2792,8 +2815,11 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
     state.elapsed += dt;
     if state.elapsed >= 0.05 {
         state.elapsed = 0.0;
-        // Persist each newly sampled biome with its waypoint. Only a change
-        // reaches the settings worker, so an unchanged sample writes nothing.
+        // Persist each newly sampled biome with its waypoint. A known biome is
+        // only refreshed when its chunk arrives; an unknown one is retried
+        // until the chunk is loaded. Only a change reaches the settings
+        // worker, so an unchanged sample writes nothing.
+        let arrived = std::mem::take(&mut state.biome_chunks);
         for index in 0..state.waypoints.len() {
             let (world, dimension, x, y, z, current) = {
                 let waypoint = &state.waypoints[index];
@@ -2806,6 +2832,9 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
                     waypoint.biome.clone(),
                 )
             };
+            if current.is_some() && !arrived.contains(&(x.div_euclid(16), z.div_euclid(16))) {
+                continue;
+            }
             let Some(biome) = known_biome(game, dimension, [x, y, z]) else {
                 continue;
             };
@@ -3101,19 +3130,24 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
         }
         // Camera movement is independent of worker sampling/upload latency.
         // Pointer queries and overlays use this exact same displayed view.
-        let next = if let (Some(atlas), Some(view)) = (&image.atlas, current_view) {
-            let view = complete_map_view(
-                atlas,
-                view,
-                state.frame.as_ref().map(|frame| &frame.view),
-                &image.view,
-            );
+        let next = if let (Some(atlas), Some(view)) = (&image.atlas, current_view.clone()) {
+            let view = complete_map_view(view, &image.view);
             Arc::new(maps::Frame {
+                raster_source: None,
                 serial: image.serial,
                 view,
                 pixels: Vec::new(),
                 known: image.known,
                 atlas: Some(atlas.clone()),
+            })
+        } else if let Some(view) = current_view.filter(|view| view.large) {
+            Arc::new(maps::Frame {
+                raster_source: Some(image.clone()),
+                serial: image.serial,
+                view: complete_map_view(view, &image.view),
+                pixels: Vec::new(),
+                known: image.known,
+                atlas: None,
             })
         } else {
             image
@@ -3238,6 +3272,12 @@ fn draw(
                     game.native_sprite(batch, horizon_client::hud::MOD_IMAGE_SPRITE, src, dst);
                     terrain_visible = true;
                 }
+            }
+        } else if let Some(source) = &frame.raster_source {
+            if let Some((src, dst)) = maps::raster_quad(&source.view, &frame.view, rect) {
+                game.native_sprite(batch, horizon_client::hud::MOD_IMAGE_SPRITE, src, dst);
+            } else {
+                terrain_visible = false;
             }
         } else {
             game.native_sprite(
@@ -4627,15 +4667,7 @@ mod render_tests {
     }
 
     #[test]
-    fn map_camera_never_advances_beyond_the_uploaded_atlas() {
-        let atlas = maps::TerrainAtlas {
-            pixels: Vec::new(),
-            width: 1024,
-            height: 16,
-            chunks: Vec::new(),
-            coarse: Vec::new(),
-            region: [-128, -128, 256, 256],
-        };
+    fn map_camera_moves_while_wider_terrain_is_still_preparing() {
         let prepared = View {
             session: 1,
             dimension: Dimension::Overworld,
@@ -4650,26 +4682,13 @@ mod render_tests {
         };
         let mut other = prepared.clone();
         other.dimension = Dimension::Nether;
-        assert_eq!(complete_map_view(&atlas, other, None, &prepared), prepared);
-        let mut previous = prepared.clone();
-        previous.center = [16.0, 0.0];
-        let mut desired = prepared.clone();
-        desired.span = [1024.0; 2];
-        assert_eq!(
-            complete_map_view(&atlas, desired.clone(), Some(&previous), &prepared),
-            previous
-        );
-        previous.session = 2;
-        assert_eq!(
-            complete_map_view(&atlas, desired, Some(&previous), &prepared),
-            prepared
-        );
-        let mut desired = prepared.clone();
-        desired.center = [12.0, 0.0];
-        assert_eq!(
-            complete_map_view(&atlas, desired.clone(), None, &prepared),
-            desired
-        );
+        assert_eq!(complete_map_view(other, &prepared), prepared);
+        for center in [[0.0; 2], [2048.0, -4096.0]] {
+            let mut desired = prepared.clone();
+            desired.center = center;
+            desired.span = [1024.0; 2];
+            assert_eq!(complete_map_view(desired.clone(), &prepared), desired);
+        }
     }
 
     #[test]

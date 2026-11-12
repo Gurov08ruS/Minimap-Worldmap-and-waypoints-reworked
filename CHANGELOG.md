@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Persist detailed terrain, sampled height layers, LOD, biome names and portal
+  samples across reconnects and game restarts in one `.mwwr` container per
+  single-player save/server address. Use checked dual roots, a paged index and
+  safe in-file extent reuse; write on the background worker.
+- Add a draggable 16–512 MiB map RAM setting, default 64 MiB. Evict off-screen
+  payloads and page historical terrain from disk. Commit before unloading the
+  previous dimension; pause new sampling after write failures.
+
 - Place a black skull waypoint automatically where the player dies. Repeated
   deaths add `Death 2`, `Death 3` and so on. Creation and proximity removal can
   be switched off independently in the mod settings; reaching a death waypoint

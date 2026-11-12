@@ -1,5 +1,45 @@
 # Validation
 
+## Unreleased — persistent map container, 2026-11-12
+
+Validated on Linux with Rust 1.95.0. Horizon and Mixins revisions are unchanged;
+`compatibility.json` additionally checks the pinned renderer `ui.rs` because the
+RAM slider uses a new declarative HEAD hook there.
+
+- `cargo fmt --all --check`, clippy with warnings denied, and `git diff --check`:
+  pass. Injected adapter/helper files were also formatted with Rustfmt.
+- Locked offline workspace tests: 75 runtime tests and one source-audit test
+  passed; one manual benchmark ignored.
+- New regressions cover disk reopen, multiple index pages, record checksums,
+  unknown schema and mismatched identity rejection, safe reuse of old extents,
+  short writes in data/index/root phases, retained pending bytes after failure,
+  and sampling pause. Unknown world identities are verified to use RAM without
+  creating an unscoped cache directory. Process tests cover simultaneous first creation, busy,
+  independent worlds, abrupt owner death and reacquisition.
+- Service tests flush on dimension change, verify that the old tile's Weak
+  reference expires, reopen a fresh service from the disk file and recover the
+  same terrain. Separate cases preserve layer Y, LOD, biomes and portals, and
+  page a wide view without exceeding the synthetic payload budget.
+- Template integration and deterministic AST staging/source audit: pass;
+  the original Horizon checkout and its existing changes were preserved.
+- Actual pinned Horizon client check: pass.
+- Runtime tests inside the pinned client: 75 passed, one benchmark ignored.
+- The actual renderer's cache-slider mouse/drag/release test: one passed.
+- Source package passes official `cargo horizon-mod check`; it is an unsigned
+  local development artifact, not a published release.
+  Final archive: 130006 bytes; SHA-256
+  `dd209a47b1faf722fa47989005faa6410dd8a7e98fbb0f33f17f773f9448ace6`.
+  All 29 bundled source/manifest files match the working tree.
+
+The RAM setting budgets terrain payloads, the read LRU and pending record bytes;
+index metadata, input snapshots and current display/GPU snapshots are extra.
+The index currently materializes both roots' key/reference metadata and rewrites
+its pages at commit. Very large cache metadata, slow-disk latency and live FPS
+have not been profiled. Raw codec 0 is implemented; Zstd, transactional manager
+operations, compaction, full vertical pages and physical unlink are not claimed.
+No live game window, power-loss hardware test, macOS/Windows run or network-FS
+qualification was performed. See `CONTAINER.md` for the format and limits.
+
 ## Unreleased — death waypoints and persistent biome samples, 2026-11-12
 
 Validated on Linux with Rust 1.95.0 and the unchanged compatibility pins.

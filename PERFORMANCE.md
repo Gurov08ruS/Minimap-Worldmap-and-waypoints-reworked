@@ -12,8 +12,8 @@ textured quad per visible cached chunk, in the HUD batch. Terrain colours and
 relief are baked at one texel per block. Pan/zoom updates geometry immediately on
 the client, independently of the sampling worker. Pointer/marker/overlay mapping
 uses the same displayed view. Camera movement inside uploaded coverage needs no
-terrain raster or texture upload. The camera stays within that coverage until a
-wider replacement is ready. The minimap still uses its previous CPU path.
+terrain raster or texture upload. The camera advances while wider coverage is
+prepared. The minimap still uses its previous CPU path.
 
 Zoom-dependent averaged texture levels and their setting have been removed.
 Detailed chunks always use one texel per block; LOD uses its original samples.
@@ -66,7 +66,48 @@ chunk sampling and the rest of the game. They are not an FPS prediction.
 The shared 1024×1024 slot holds up to 4,096 full-resolution tiles (detailed and
 LOD rows are packed separately). One atlas generation consumes at most 4 MiB
 of pixels; old/new generations can coexist briefly during publication. Terrain
-RAM is temporarily uncapped until the persistent container exists. Other mods
+payloads and pending writes now use the configurable RAM budget; historical
+tiles remain on disk. Disk-index metadata and current presentation snapshots are
+accounted separately. The current index is loaded as compact key/reference metadata
+for both recoverable roots and rewritten on commit: very large histories still
+need a bounded index-page cache and incremental index updates. Other mods
 using this same global slot still need coordination.
 No native game window or GPU frame capture has been exercised by these checks;
 visual behavior and FPS need an in-game run, including macOS/Windows.
+
+## Persistent-cache work (2026-11-12)
+
+An 8.1 MiB user cache inspected on 2026-11-12 has 1,606 terrain records
+(1,172 detailed and 434 LOD), below the atlas tile limit. Admission now checks
+actual decoded tile size instead of reserving 128 KiB for the next tile. The old
+check did not charge 128 KiB for every resident tile; the earlier explanation
+and inferred 255-tile limit were incorrect. No measured FPS gain is attributed
+to this admission change.
+
+Camera motion now advances beyond uploaded atlas coverage without waiting for
+worker preparation. In raster fallback, the existing texture is clipped and
+reprojected into the current camera on the GPU, sharing its original frame
+without copying pixels or uploading again. Newly exposed areas remain empty
+until the replacement arrives. Regression tests cover pan/zoom clipping,
+texture reuse and camera movement beyond prepared coverage. In-game FPS is
+not measured by these tests.
+
+Implemented optimizations:
+
+- A bounded working set and disk-read LRU replace unlimited terrain retention.
+  Visible-area candidate lists are bounded even for extremely wide views.
+- Pending records replace earlier updates for the same key before commit.
+  A five-second batch or pending-byte pressure triggers persistence.
+- Per-tile biome palettes store each distinct name once and share decoded names
+  through Arc; immutable display snapshots also share tile payloads.
+- A physical dimension change flushes and drops the former payloads, coverage
+  and worker atlas; only an explicitly requested view is loaded again.
+- Read-LRU byte accounting is maintained incrementally rather than rescanning
+  all cached payloads for every disk miss.
+
+Next useful measurements and optimizations are a bounded index-page cache,
+incremental index updates instead of a full index rewrite, and separating disk
+I/O from sampling/raster preparation so a slow disk cannot delay the terrain
+worker's other work. These are not claimed implemented. The render callback
+does not perform disk I/O in the current version. The existing source audit and
+unit tests do not substitute for profiling a live game on a large real cache.

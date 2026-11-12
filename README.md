@@ -106,7 +106,7 @@ language in its language settings. Saved waypoint names are preserved as entered
   Detailed terrain retains the sampled biome of each column, independently of
   the game's loaded chunks. The biome is sampled at the visible surface
   (including the top of water), while relief continues to follow the seabed.
-  The terrain's own per-column biome cache still lives in RAM until disconnect.
+  Terrain biome samples are also retained in the world's persistent map container.
 - The waypoint manager has a translucent background with menu blur disabled.
 - **Overworld coordinates** and **Nether coordinates** independently toggle the
   coordinate lines below the minimap (both default on). X/Z convert by ×8/÷8
@@ -184,13 +184,36 @@ language in its language settings. Saved waypoint names are preserved as entered
 
 ## Current map implementation
 
-Both views use one background sampler and a shared **RAM** repository,
-keyed by connection/session, dimension, chunk and sampled height layer. Terrain
-from previously visited dimensions remains browsable within the same connection,
-with temporary uncapped retention until the persistent container is implemented.
-Turning the camera, changing zoom and receiving new LOD levels do not evict
-previous terrain. Memory usage grows as more territory is retained.
-Disconnect/relogin retires the old session. No permanent world cache is written.
+Both views use one background sampler and a persistent repository. One
+`cache/<world-id-hash>.mwwr` file holds all dimensions and sampled height layers
+of a single-player save or server address. The directory is inside Horizon's
+mod data folder: `horizon-mods/.horizon-mod-data/minimap_worldmap_waypoints_reworked/`
+under the game directory. The exact world identity is checked inside the file;
+save and server identities remain separate. Rejoining or restarting the game
+restores map data from this file. Server wipes require manual cache clearing;
+no automatic server epochs are created. Close the game before manually deleting
+its cache file.
+
+Terrain changes are committed in batches at a five-second interval and on
+world/dimension changes and normal shutdown. Sampling and disk operations run on
+the map worker. A physical dimension change commits pending data before clearing
+old terrain, biome snapshots, portal snapshots and the worker's display atlas.
+Previously visited dimensions are loaded again when selected on the map.
+
+**Map RAM** in the mod settings is a draggable slider from 16 to 512 MiB,
+defaulting to 64 MiB. It budgets retained terrain, the LRU read cache and pending
+record bytes; active display/coverage snapshots, queued game snapshots, disk-index
+metadata and GPU textures are additional memory. It is not a cap on the whole
+game process. Off-screen tiles are evicted and reloaded on demand; large views
+use a paged raster fallback rather than loading the entire explored world.
+A write failure pauses sampling and retains accepted unsaved records instead of
+evicting them. The map and mod settings expose the error. A busy container is
+left untouched and uses a bounded temporary RAM map, with a visible warning.
+
+The initial format uses CRC32C, two recoverable roots, checked index pages and
+in-file free-space reuse. It currently stores raw records (codec 0); Zstd,
+transactional deletion, compaction and cache-manager controls remain future work.
+See [CONTAINER.md](CONTAINER.md) for the format and its current limits.
 
 The map also reads Horizon’s existing CPU LOD columns through an injected adapter.
 It neither requests extra terrain nor drives LOD generation. LOD is stored as
@@ -199,7 +222,7 @@ layer. It does not substitute surface terrain for caves or Nether underground
 layers. Detailed cached chunks always win, including known void; newer LOD never
 overwrites them. Unchanged CPU snapshots are ignored; a changed snapshot can fill unknown LOD
 cells, while existing samples and all detailed data keep priority. Up to four
-LOD snapshots are queued every 250 ms, prioritizing the map camera. The previous 512-LOD and 4,096-terrain RAM limits are temporarily removed.
+LOD snapshots are queued every 250 ms, prioritizing the map camera. The disk repository retains off-screen terrain; RAM retention is budgeted by the Map RAM slider.
 Work queues and snapshot submission rates remain bounded. Approximate surface
 Y and biome names are retained with LOD samples, independently of Horizon’s
 current camera/frustum; approximate heights are marked with `≈`.
@@ -231,7 +254,7 @@ single generic plant green. Render-invisible blocks such as barriers, light
 blocks and moving pistons leave no map pixel. Nether portals, End portals and End
 gateways are recorded as map features and get their own markers.
 
-Unknown dimensions are not fetched from the server. Persistent
+Unknown dimensions are not fetched from the server. Visit
 history, manual Y selection and rectangle shape remain
 future stages in [PLAN.md](PLAN.md).
 
@@ -240,8 +263,9 @@ frames, zoom keeps the world point under the cursor fixed, and markers interpola
 player positions. The large map draws block-resolution chunk tiles as clipped,
 textured GPU quads through Horizon's existing HUD pipeline. Moving or zooming
 within the uploaded coverage changes only geometry. There are no zoom-dependent
-texture detail levels. When a wider area is needed, the displayed camera stays
-inside the available coverage until its replacement is ready. Pointer coordinates
+texture detail levels. When a wider area is needed, the camera continues moving immediately; newly
+exposed areas appear when their terrain is ready. Raster fallback also reprojects
+the existing image during pan and zoom without waiting for the worker. Pointer coordinates
 and overlays use that same displayed camera. Texture uploads and their matching
 geometry are published together; a failed upload preserves the previous frame.
 
@@ -249,7 +273,7 @@ The worker prepares colours and relief shading once per block when the terrain
 repository changes. Up to 4,096 tiles fit in the existing 1024×1024 RGBA slot
 (4 MiB); the current implementation rebuilds/uploads the selected layer's atlas
 when its data or padded visible coverage changes. Camera movement inside that
-coverage reuses it. Off-screen data stays in RAM. If visible entries exceed the
+coverage reuses it. Off-screen data stays in the world container and is read on demand. If visible entries exceed the
 1024×1024 GPU slot, a worker raster fallback presents the retained data without
 truncating the cache; extreme views can therefore cost more CPU. The minimap retains its
 CPU renderer for rotation and circular masking. Nearest texture sampling keeps
@@ -258,7 +282,7 @@ texel per block and LOD textures keep their original sample resolution at every
 zoom. Distant smoothing and its setting have been removed; legacy
 `smooth_worldmap` preferences are ignored. Each presentation atlas uses up to
 4 MiB of pixels, with old and new generations briefly coexisting during upload.
-These presentation limits do not cap terrain RAM. Relief reads neighbouring
+These presentation limits are separate from the terrain RAM setting. Relief reads neighbouring
 chunks to preserve lighting across tile edges. See [PERFORMANCE.md](PERFORMANCE.md)
 for measurements, limitations and further optimization options.
 
@@ -292,11 +316,11 @@ limited to the available viewport. Another provider's active native minimap slot
 is respected. The world map and minimap are not drawn simultaneously.
 
 Preferences and waypoints load/save asynchronously in `settings.ini` under the
-mod data folder provided by Horizon. Normal exit flushes accepted changes. The
-only filesystem writes performed by the running mod are its settings file and
-its short-lived atomic-replacement file. Map history currently lives in memory,
-while waypoints are part of the settings file (bounded to 64 per world/server and 4,096 total). No
-network requests are made by the mod.
+mod data folder provided by Horizon. Normal exit flushes accepted changes. The running mod writes its settings file, its short-lived settings replacement
+file, and one persistent map container per world/server. Containers never use
+external journals, lock files or temporary copies. Waypoints remain in the
+settings file (bounded to 64 per world/server and 4,096 total). No network
+requests are made by the mod.
 
 The two views use Horizon's shared native RGBA atlas slot. Mods that independently
 write that same global slot may require integration to coexist; this release does

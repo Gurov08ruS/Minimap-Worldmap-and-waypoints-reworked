@@ -202,3 +202,36 @@ file = "crates/horizon-client-render/src/lod.rs"
 name = "minimap_lod_adapter"
 source = "lod_adapter.rs"
 visibility = "pub"
+
+[[injection]]
+id="cache-slider-draw"
+kind="HEAD"
+cancellable=true
+target="horizon_client_render::ui::button"
+helper="cache_slider_draw.rs"
+bindings=[
+ {name="batch",ty="&mut crate::hud::HudBatch",value="batch"},
+ {name="atlas",ty="&crate::hud::HudAtlas",value="atlas"},
+ {name="x",ty="f32",value="x"}, {name="y",ty="f32",value="y"},
+ {name="w",ty="f32",value="w"}, {name="h",ty="f32",value="h"},
+ {name="label",ty="&crate::text::Text",value="label"},
+ {name="active",ty="bool",value="active"}, {name="hover",ty="bool",value="hover"},
+]
+[[injection]]
+id="cache-slider-click"
+kind="HEAD"
+cancellable=true
+target="horizon_client_render::options_ui::OptionsUi::click"
+helper="cache_slider_click.rs"
+bindings=[
+ {name="ui",ty="&mut crate::options_ui::OptionsUi",value="self"},
+ {name="settings",ty="&crate::settings::Settings",value="s"},
+ {name="x",ty="f32",value="x"}, {name="y",ty="f32",value="y"},
+ {name="size",ty="(f32,f32)",value="size"},
+ {name="drag",ty="bool",value="drag"}, {name="right",ty="bool",value="right"},
+]
+[[injection]]
+id="cache-slider-release"
+kind="HEAD"
+target="horizon_client_render::options_ui::OptionsUi::release"
+helper="cache_slider_release.rs"

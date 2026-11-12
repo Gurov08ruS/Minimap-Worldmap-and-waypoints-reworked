@@ -167,8 +167,9 @@ def main():
             log.write_text(result.stdout + result.stderr)
             report["cargo_log"] = str(log)
             if args.action == "test" and not result.returncode:
-                summary = re.search(r"test result: ok\. (\d+) passed;", result.stdout)
-                passed = int(summary[1]) if summary else 0
+                summaries = re.findall(r"test result: ok\. (\d+) passed;", result.stdout)
+                # Process tests print child summaries before the parent summary.
+                passed = int(summaries[-1]) if summaries else 0
                 report["runtime_tests_passed"] = passed
                 if not passed:
                     report["error"] = "the native runtime test filter selected no passing tests"

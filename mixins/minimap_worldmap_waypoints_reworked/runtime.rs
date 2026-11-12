@@ -21,6 +21,7 @@ pub const WORLD_MAP_DEFAULT: &str = "key.keyboard.m";
 pub const WAYPOINTS_KEY: &str = "waypoints";
 pub const WAYPOINTS_DEFAULT: &str = "key.keyboard.n";
 pub const SETTINGS_FILE: &str = "settings.ini";
+
 const SIZES: [u16; 7] = [64, 96, 128, 160, 192, 224, 256];
 const ZOOMS: [f32; 7] = [0.1, 0.25, 0.5, 0.75, 1.0, 2.0, 4.0];
 
@@ -225,6 +226,7 @@ pub mod minimap {
 
     #[derive(Debug, Clone, Copy, PartialEq)]
     pub struct Settings {
+        pub cache_ram_mib: u16,
         pub enabled: bool,
         pub corner: Corner,
         pub size_px: u16,
@@ -242,6 +244,7 @@ pub mod minimap {
     impl Default for Settings {
         fn default() -> Self {
             Self {
+                cache_ram_mib: 64,
                 enabled: true,
                 corner: Corner::TopRight,
                 size_px: 128,
@@ -292,6 +295,13 @@ pub mod minimap {
                         value.death_waypoint_auto_remove =
                             raw.parse().unwrap_or(value.death_waypoint_auto_remove)
                     }
+                    "cache_ram_mib" => {
+                        if let Ok(n) = raw.parse::<u16>()
+                            && (16..=512).contains(&n)
+                        {
+                            value.cache_ram_mib = n;
+                        }
+                    }
                     "enabled" => value.enabled = raw.parse().unwrap_or(value.enabled),
                     "corner" => {
                         if let Some(corner) = Corner::ALL.into_iter().find(|c| c.name() == raw) {
@@ -328,7 +338,7 @@ pub mod minimap {
 
         pub fn encode(self) -> String {
             format!(
-                "# Minimap Reworked settings\nenabled={}\ncorner={}\nsize={}\nshape={}\nzoom={}\nrotate={}\nmini_dimension={}\nworld_dimension={}\noverworld_coordinates={}\nnether_coordinates={}\ndeath_waypoints={}\ndeath_waypoint_auto_remove={}\n",
+                "# Minimap Reworked settings\nenabled={}\ncorner={}\nsize={}\nshape={}\nzoom={}\nrotate={}\nmini_dimension={}\nworld_dimension={}\noverworld_coordinates={}\nnether_coordinates={}\ndeath_waypoints={}\ndeath_waypoint_auto_remove={}\ncache_ram_mib={}\n",
                 self.enabled,
                 self.corner.name(),
                 self.size_px,
@@ -341,6 +351,7 @@ pub mod minimap {
                 self.nether_coordinates,
                 self.death_waypoints,
                 self.death_waypoint_auto_remove,
+                self.cache_ram_mib,
             )
         }
 
@@ -361,7 +372,7 @@ pub mod minimap {
                 5 => self.rotate_with_player = !self.rotate_with_player,
                 6 => {
                     *self = Self::default();
-                    return 0x1fbf;
+                    return 0x3fbf;
                 }
                 7 => {
                     self.mini_dimension = super::cycle(self.mini_dimension, &super::Dimension::ALL)
@@ -381,6 +392,9 @@ pub mod minimap {
 
         // Only locally edited fields override settings loaded asynchronously.
         fn overlay(&mut self, edited: Self, mask: u16) {
+            if mask & 8192 != 0 {
+                self.cache_ram_mib = edited.cache_ram_mib;
+            }
             if mask & 1 != 0 {
                 self.enabled = edited.enabled;
             }
@@ -1734,6 +1748,7 @@ impl Controller {
         let state = Arc::new(Mutex::new(State::default()));
         let (tx, rx) = mpsc::sync_channel(1);
         let shared = Arc::clone(&state);
+        let cache_directory = directory.join("cache");
         let worker = thread::Builder::new()
             .name("minimap-settings".into())
             .spawn(move || {
@@ -1750,7 +1765,7 @@ impl Controller {
             state,
             notify: Mutex::new(notify),
             worker: Mutex::new(worker),
-            maps: maps::Service::new(),
+            maps: maps::Service::with_directory(Some(cache_directory)),
         }
     }
 
@@ -1764,6 +1779,27 @@ impl Controller {
     pub fn labels(&self) -> Vec<String> {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let mut labels = state.settings.labels();
+        labels.push(localized_format!(
+            "Map RAM: {} MiB…",
+            "RAM карты: {} МиБ…",
+            "RAM carte : {} Mio…",
+            "RAM del mapa: {} MiB…",
+            "Karten-RAM: {} MiB…",
+            state.settings.cache_ram_mib
+        ));
+        if self.maps.status().is_some() {
+            labels.push(
+                tr(
+                    "Map cache unavailable: see map status",
+                    "Кеш карты недоступен: см. статус на карте",
+                    "Cache indisponible : voir la carte",
+                    "Caché no disponible: consulta el mapa",
+                    "Karten-Cache nicht verfügbar: siehe Karte",
+                )
+                .into(),
+            );
+        }
+
         if state.error.is_some() {
             labels.push(
                 tr(
@@ -1799,6 +1835,25 @@ impl Controller {
         }
     }
 
+    pub fn set_cache_ram_mib(&self, value: u16) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let value = value.clamp(16, 512);
+        if state.settings.cache_ram_mib == value {
+            return;
+        }
+        state.settings.cache_ram_mib = value;
+        state.touched |= 8192;
+        state.revision += 1;
+        drop(state);
+        if let Some(tx) = self
+            .notify
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            let _ = tx.try_send(());
+        }
+    }
     pub fn choose_dimension(&self, large: bool, dimension: Dimension) {
         let notify = self.notify.lock().unwrap_or_else(|e| e.into_inner());
         let Some(notify) = notify.as_ref() else {
@@ -2212,6 +2267,20 @@ mod tests {
         reopened.shutdown();
         assert_eq!(reopened.settings(), saved);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn cache_ram_slider_roundtrips_and_merges_early_edits() {
+        let value = Settings::decode("cache_ram_mib=128");
+        assert_eq!(Settings::decode(&value.encode()).cache_ram_mib, 128);
+        assert_eq!(Settings::decode("cache_ram_mib=0").cache_ram_mib, 64);
+        let mut loaded = Settings::decode("cache_ram_mib=256");
+        let edited = Settings {
+            cache_ram_mib: 32,
+            ..Settings::default()
+        };
+        minimap::merge(&mut loaded, edited, 8192);
+        assert_eq!(loaded.cache_ram_mib, 32);
     }
 
     fn point(world: &str, name: &str) -> Waypoint {
@@ -2632,6 +2701,920 @@ mod tests {
 
 // Shared in-memory terrain repository; retention is temporarily uncapped until the container.
 // No game objects cross the worker boundary.
+/// Checked single-file terrain storage, owned exclusively by the map worker.
+/// Physical unlink/rename and concurrent file readers are deliberately absent.
+pub mod container {
+    use std::{
+        fs::{File, OpenOptions, TryLockError},
+        io,
+        path::Path,
+    };
+
+    #[derive(Debug)]
+    pub enum LeaseError {
+        Busy,
+        Io(io::Error),
+    }
+
+    /// Owns exactly one descriptor; never clones it or lends it to readers.
+    /// This primitive only opens existing files. Creation and physical deletion
+    /// require the future directory/name coordinator and are deliberately absent.
+    #[derive(Debug)]
+    pub struct ContainerLease {
+        file: File,
+    }
+
+    impl ContainerLease {
+        /// Call on an I/O worker. No bytes are read or changed before ownership.
+        /// Unsupported locking is an error, never permission to continue unlocked.
+        pub fn open_existing(path: &Path) -> Result<Self, LeaseError> {
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)
+                .map_err(LeaseError::Io)?;
+            file.try_lock().map_err(|error| match error {
+                TryLockError::WouldBlock => LeaseError::Busy,
+                TryLockError::Error(error) => LeaseError::Io(error),
+            })?;
+            Ok(Self { file })
+        }
+
+        pub fn file_len(&self) -> io::Result<u64> {
+            self.file.metadata().map(|metadata| metadata.len())
+        }
+    }
+
+    impl Drop for ContainerLease {
+        fn drop(&mut self) {
+            // All I/O is synchronous under this owner and has finished now.
+            // Explicit release also prevents a transient fork-before-exec copy
+            // from extending the lease after the owning worker has stopped.
+            let _ = self.file.unlock();
+        }
+    }
+
+    /// A half-open byte range, validated before arithmetic or allocation.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Extent {
+        start: u64,
+        end: u64,
+    }
+
+    impl Extent {
+        pub fn new(start: u64, len: u64) -> Option<Self> {
+            let end = start.checked_add(len)?;
+            (len != 0).then_some(Self { start, end })
+        }
+
+        pub fn start(self) -> u64 {
+            self.start
+        }
+
+        pub fn byte_len(self) -> u64 {
+            self.end - self.start
+        }
+    }
+
+    /// Rebuild the free-space view from all protected extents: both recoverable
+    /// roots, reader pins, and reservations of the in-flight transaction.
+    /// Reserved header bytes are never available for reuse. This function does
+    /// not persist or trust a free list from disk.
+    pub fn free_extents(
+        file_len: u64,
+        reserved_prefix: u64,
+        protected: impl IntoIterator<Item = Extent>,
+    ) -> Option<Vec<Extent>> {
+        if reserved_prefix > file_len {
+            return None;
+        }
+        let mut protected: Vec<_> = protected.into_iter().collect();
+        if protected.iter().any(|extent| extent.end > file_len) {
+            return None;
+        }
+        protected.sort_unstable_by_key(|extent| extent.start);
+        let mut cursor = reserved_prefix;
+        let mut free = Vec::new();
+        for extent in protected {
+            if extent.start > cursor {
+                free.push(Extent {
+                    start: cursor,
+                    end: extent.start,
+                });
+            }
+            cursor = cursor.max(extent.end);
+        }
+        if cursor < file_len {
+            free.push(Extent {
+                start: cursor,
+                end: file_len,
+            });
+        }
+        Some(free)
+    }
+
+    /// Reserve one best-fit gap. On failure the free-space view is unchanged;
+    /// the caller must grow the file or postpone maintenance, never overwrite
+    /// a protected extent. Append/growth is a separate commit responsibility.
+    pub fn reserve(free: &mut Vec<Extent>, len: u64) -> Option<Extent> {
+        if len == 0 {
+            return None;
+        }
+        let index = free
+            .iter()
+            .enumerate()
+            .filter(|(_, extent)| extent.byte_len() >= len)
+            .min_by_key(|(_, extent)| (extent.byte_len(), extent.start))?
+            .0;
+        let allocation = Extent::new(free[index].start, len)?;
+        free[index].start = allocation.end;
+        if free[index].start == free[index].end {
+            free.remove(index);
+        }
+        Some(allocation)
+    }
+
+    // Version 2: page-aligned allocations, two checked roots, independently checked sorted index pages,
+    // checked records. All integer encodings are little endian.
+    use std::{
+        collections::BTreeMap,
+        io::{Read, Seek, SeekFrom, Write},
+        path::PathBuf,
+    };
+    const PAGE: usize = 4096;
+    const PREFIX: u64 = (PAGE * 2) as u64;
+    const MAX_RECORD: usize = 1024 * 1024;
+    pub type RecordKey = [i32; 6];
+    #[derive(Clone, Copy, Debug)]
+    struct RecordRef {
+        offset: u64,
+        len: u32,
+        checksum: u32,
+    }
+    #[derive(Clone, Default)]
+    struct Root {
+        generation: u64,
+        entries: BTreeMap<RecordKey, RecordRef>,
+        pages: Vec<Extent>,
+    }
+    pub struct Store {
+        lease: ContainerLease,
+        world: String,
+        roots: [Root; 2],
+        current: usize,
+        pending: BTreeMap<RecordKey, Vec<u8>>,
+        poisoned: bool,
+        #[cfg(test)]
+        pub(super) write_budget: Option<usize>,
+    }
+    fn invalid(message: &str) -> io::Error {
+        io::Error::new(io::ErrorKind::InvalidData, message)
+    }
+    fn allocated_len(len: u64) -> io::Result<u64> {
+        len.checked_add(PAGE as u64 - 1)
+            .map(|n| n / (PAGE as u64) * (PAGE as u64))
+            .ok_or_else(|| invalid("allocation length overflow"))
+    }
+    fn crc(bytes: &[u8]) -> u32 {
+        let mut value = !0u32;
+        for byte in bytes {
+            value ^= u32::from(*byte);
+            for _ in 0..8 {
+                value = (value >> 1) ^ (0x82f63b78 & 0u32.wrapping_sub(value & 1));
+            }
+        }
+        !value
+    }
+    fn u32_at(bytes: &[u8], at: usize) -> u32 {
+        u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
+    }
+    fn u64_at(bytes: &[u8], at: usize) -> u64 {
+        u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap())
+    }
+    fn put32(bytes: &mut [u8], at: usize, n: u32) {
+        bytes[at..at + 4].copy_from_slice(&n.to_le_bytes());
+    }
+    fn put64(bytes: &mut [u8], at: usize, n: u64) {
+        bytes[at..at + 8].copy_from_slice(&n.to_le_bytes());
+    }
+    fn seal(bytes: &mut [u8]) {
+        let end = bytes.len() - 4;
+        let c = crc(&bytes[..end]);
+        put32(bytes, end, c);
+    }
+    fn checked(bytes: &[u8]) -> bool {
+        crc(&bytes[..bytes.len() - 4]) == u32_at(bytes, bytes.len() - 4)
+    }
+    fn read_at(file: &mut File, at: u64, bytes: &mut [u8]) -> io::Result<()> {
+        file.seek(SeekFrom::Start(at))?;
+        file.read_exact(bytes)
+    }
+    fn write_at(file: &mut File, at: u64, bytes: &[u8]) -> io::Result<()> {
+        file.seek(SeekFrom::Start(at))?;
+        file.write_all(bytes)
+    }
+    fn write_with_budget(
+        file: &mut File,
+        at: u64,
+        bytes: &[u8],
+        budget: &mut Option<usize>,
+    ) -> io::Result<()> {
+        if let Some(left) = budget {
+            let n = (*left).min(bytes.len());
+            write_at(file, at, &bytes[..n])?;
+            *left -= n;
+            if n < bytes.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::StorageFull,
+                    "injected short write",
+                ));
+            }
+            Ok(())
+        } else {
+            write_at(file, at, bytes)
+        }
+    }
+    pub fn world_path(directory: &Path, world: &str) -> PathBuf {
+        // The exact identity is also checked in each root: a hash collision never merges worlds.
+        let mut a = 0xcbf29ce484222325u64;
+        let mut b = 0x84222325cbf29ce4u64;
+        for byte in world.bytes() {
+            a = (a ^ u64::from(byte)).wrapping_mul(0x100000001b3);
+            b = (b ^ u64::from(byte)).wrapping_mul(0x100000001b3);
+        }
+        directory.join(format!("{a:016x}{b:016x}.mwwr"))
+    }
+    impl Store {
+        pub fn open(directory: &Path, world: &str) -> Result<Self, LeaseError> {
+            if world.is_empty() || world.len() > 2048 {
+                return Err(LeaseError::Io(invalid("invalid world identity")));
+            }
+            std::fs::create_dir_all(directory).map_err(LeaseError::Io)?;
+            // No participant renames/unlinks these files. A create race converges
+            // on one inode; initialization happens only after try_lock succeeds.
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(world_path(directory, world))
+                .map_err(LeaseError::Io)?;
+            file.try_lock().map_err(|e| match e {
+                TryLockError::WouldBlock => LeaseError::Busy,
+                TryLockError::Error(e) => LeaseError::Io(e),
+            })?;
+            let mut store = Self {
+                lease: ContainerLease { file },
+                world: world.into(),
+                roots: Default::default(),
+                current: 0,
+                pending: BTreeMap::new(),
+                poisoned: false,
+                #[cfg(test)]
+                write_budget: None,
+            };
+            store.load().map_err(LeaseError::Io)?;
+            Ok(store)
+        }
+        fn load(&mut self) -> io::Result<()> {
+            let len = self.lease.file.metadata()?.len();
+            if len == 0 {
+                self.lease.file.set_len(PREFIX)?;
+                self.commit_inner()?;
+                return Ok(());
+            }
+            if len < PREFIX {
+                return Err(invalid("truncated container header"));
+            }
+            let mut valid = [false; 2];
+            for (slot, validity) in valid.iter_mut().enumerate() {
+                let mut header = vec![0; PAGE];
+                read_at(&mut self.lease.file, (slot * PAGE) as u64, &mut header)?;
+                if &header[..8] == b"MWWRC002" && u32_at(&header, 8) != 2 {
+                    return Err(invalid("unsupported container version"));
+                }
+                if &header[..8] != b"MWWRC002" || !checked(&header) {
+                    continue;
+                }
+                let world_len = u32_at(&header, 40) as usize;
+                if world_len > 2048 || header[48..48 + world_len] != *self.world.as_bytes() {
+                    return Err(invalid("world identity mismatch"));
+                }
+                if let Ok(root) = self.read_root(&header, len) {
+                    self.roots[slot] = root;
+                    *validity = true;
+                }
+            }
+            self.current = match valid {
+                [false, false] if len == PREFIX => {
+                    let mut bytes = vec![0; PREFIX as usize];
+                    read_at(&mut self.lease.file, 0, &mut bytes)?;
+                    if bytes.iter().any(|b| *b != 0) {
+                        return Err(invalid("no recoverable container root"));
+                    }
+                    self.commit_inner()?;
+                    return Ok(());
+                }
+                [false, false] => return Err(invalid("no recoverable container root")),
+                [true, false] => 0,
+                [false, true] => 1,
+                [true, true] => usize::from(self.roots[1].generation > self.roots[0].generation),
+            };
+            Ok(())
+        }
+        fn read_root(&mut self, header: &[u8], file_len: u64) -> io::Result<Root> {
+            let generation = u64_at(header, 16);
+            if generation == 0 {
+                return Err(invalid("zero generation"));
+            }
+            let mut root = Root {
+                generation,
+                ..Root::default()
+            };
+            let mut next = u64_at(header, 24);
+            let count = u64_at(header, 32);
+            if count > file_len / 40 {
+                return Err(invalid("invalid index count"));
+            }
+            let mut previous = None;
+            while next != 0 {
+                if root.pages.len() as u64 > count / 100 + 1
+                    || next < PREFIX
+                    || !next.is_multiple_of(PAGE as u64)
+                    || next
+                        .checked_add(PAGE as u64)
+                        .is_none_or(|end| end > file_len)
+                {
+                    return Err(invalid("invalid index extent"));
+                }
+                let mut page = vec![0; PAGE];
+                read_at(&mut self.lease.file, next, &mut page)?;
+                if &page[..8] != b"MWWRIDX1" || !checked(&page) || u64_at(&page, 8) != generation {
+                    return Err(invalid("invalid index page"));
+                }
+                root.pages.push(Extent::new(next, PAGE as u64).unwrap());
+                let n = u32_at(&page, 24) as usize;
+                if n == 0 || n > 100 {
+                    return Err(invalid("invalid index page size"));
+                }
+                for i in 0..n {
+                    let at = 32 + i * 40;
+                    let key = std::array::from_fn(|j| u32_at(&page, at + j * 4) as i32);
+                    if previous.is_some_and(|old| old >= key) {
+                        return Err(invalid("unsorted index"));
+                    }
+                    previous = Some(key);
+                    let value = RecordRef {
+                        offset: u64_at(&page, at + 24),
+                        len: u32_at(&page, at + 32),
+                        checksum: u32_at(&page, at + 36),
+                    };
+                    if value.offset < PREFIX
+                        || !value.offset.is_multiple_of(PAGE as u64)
+                        || value.len as usize > MAX_RECORD
+                        || value.len == 0
+                        || value
+                            .offset
+                            .checked_add(allocated_len(u64::from(value.len))?)
+                            .is_none_or(|end| end > file_len)
+                    {
+                        return Err(invalid("invalid record extent"));
+                    }
+                    root.entries.insert(key, value);
+                }
+                next = u64_at(&page, 16);
+            }
+            if root.entries.len() as u64 != count {
+                return Err(invalid("incomplete index"));
+            }
+            // Reject overlapping records/pages, including self-overlapping indexes.
+            let mut extents = root.pages.clone();
+            extents.extend(
+                root.entries.values().map(|r| {
+                    Extent::new(r.offset, allocated_len(u64::from(r.len)).unwrap()).unwrap()
+                }),
+            );
+            extents.sort_unstable_by_key(|e| e.start);
+            if extents.windows(2).any(|e| e[0].end > e[1].start) {
+                return Err(invalid("overlapping extents"));
+            }
+            Ok(root)
+        }
+        pub fn keys(&self) -> impl Iterator<Item = RecordKey> + '_ {
+            self.roots[self.current].entries.keys().copied().chain(
+                self.pending
+                    .keys()
+                    .filter(|k| !self.roots[self.current].entries.contains_key(*k))
+                    .copied(),
+            )
+        }
+        pub fn read(&mut self, key: RecordKey) -> io::Result<Option<Vec<u8>>> {
+            if let Some(data) = self.pending.get(&key) {
+                return Ok(Some(data.clone()));
+            }
+            let Some(record) = self.roots[self.current].entries.get(&key).copied() else {
+                return Ok(None);
+            };
+            let mut bytes = vec![0; record.len as usize];
+            read_at(&mut self.lease.file, record.offset, &mut bytes)?;
+            if crc(&bytes) != record.checksum {
+                return Err(invalid("record checksum mismatch"));
+            }
+            Ok(Some(bytes))
+        }
+        pub fn put(&mut self, key: RecordKey, bytes: Vec<u8>) -> io::Result<()> {
+            if self.poisoned {
+                return Err(invalid("writer needs recovery after an I/O failure"));
+            }
+            if bytes.is_empty() || bytes.len() > MAX_RECORD {
+                return Err(invalid("invalid record length"));
+            }
+            self.pending.insert(key, bytes);
+            Ok(())
+        }
+        pub fn pending_bytes(&self) -> usize {
+            self.pending.values().map(Vec::len).sum()
+        }
+        pub fn dirty(&self) -> bool {
+            !self.pending.is_empty()
+        }
+        pub fn commit(&mut self) -> io::Result<()> {
+            if self.poisoned {
+                return Err(invalid("writer needs recovery after an I/O failure"));
+            }
+            if !self.dirty() {
+                return Ok(());
+            }
+            let result = self.commit_inner();
+            if result.is_err() {
+                self.poisoned = true;
+            }
+            result
+        }
+        fn commit_inner(&mut self) -> io::Result<()> {
+            #[cfg(test)]
+            let mut write_budget = self.write_budget.take();
+            #[cfg(not(test))]
+            let mut write_budget = None;
+
+            let generation = self.roots[self.current]
+                .generation
+                .checked_add(1)
+                .ok_or_else(|| invalid("generation overflow"))?;
+            let file_len = allocated_len(self.lease.file.metadata()?.len())?;
+            let protected = self.roots.iter().flat_map(|root| {
+                root.pages
+                    .iter()
+                    .copied()
+                    .chain(root.entries.values().map(|r| {
+                        Extent::new(r.offset, allocated_len(u64::from(r.len)).unwrap()).unwrap()
+                    }))
+            });
+            let mut free = free_extents(file_len, PREFIX, protected)
+                .ok_or_else(|| invalid("bad free-space view"))?;
+            let mut end = file_len;
+            let mut allocate = |len: u64| -> io::Result<Extent> {
+                if let Some(e) = reserve(&mut free, len) {
+                    return Ok(e);
+                }
+                let e = Extent::new(end, len).ok_or_else(|| invalid("file offset overflow"))?;
+                end = e.end;
+                Ok(e)
+            };
+            let mut root = Root {
+                generation,
+                entries: self.roots[self.current].entries.clone(),
+                pages: Vec::new(),
+            };
+            for (&key, bytes) in &self.pending {
+                let extent = allocate(allocated_len(bytes.len() as u64)?)?;
+                write_with_budget(&mut self.lease.file, extent.start, bytes, &mut write_budget)?;
+                root.entries.insert(
+                    key,
+                    RecordRef {
+                        offset: extent.start,
+                        len: bytes.len() as u32,
+                        checksum: crc(bytes),
+                    },
+                );
+            }
+            let entries: Vec<_> = root.entries.iter().collect();
+            for _ in entries.chunks(100) {
+                root.pages.push(allocate(PAGE as u64)?);
+            }
+            for (i, chunk) in entries.chunks(100).enumerate() {
+                let mut page = vec![0; PAGE];
+                page[..8].copy_from_slice(b"MWWRIDX1");
+                put64(&mut page, 8, generation);
+                put64(&mut page, 16, root.pages.get(i + 1).map_or(0, |e| e.start));
+                put32(&mut page, 24, chunk.len() as u32);
+                for (j, (key, r)) in chunk.iter().enumerate() {
+                    let at = 32 + j * 40;
+                    for (k, n) in key.iter().enumerate() {
+                        put32(&mut page, at + k * 4, *n as u32);
+                    }
+                    put64(&mut page, at + 24, r.offset);
+                    put32(&mut page, at + 32, r.len);
+                    put32(&mut page, at + 36, r.checksum);
+                }
+                seal(&mut page);
+                write_with_budget(
+                    &mut self.lease.file,
+                    root.pages[i].start,
+                    &page,
+                    &mut write_budget,
+                )?;
+            }
+            self.lease.file.set_len(end)?;
+            self.lease.file.sync_all()?;
+            let slot = 1 - self.current;
+            let mut header = vec![0; PAGE];
+            header[..8].copy_from_slice(b"MWWRC002");
+            put32(&mut header, 8, 2);
+            put64(&mut header, 16, generation);
+            put64(&mut header, 24, root.pages.first().map_or(0, |e| e.start));
+            put64(&mut header, 32, root.entries.len() as u64);
+            put32(&mut header, 40, self.world.len() as u32);
+            header[48..48 + self.world.len()].copy_from_slice(self.world.as_bytes());
+            seal(&mut header);
+            write_with_budget(
+                &mut self.lease.file,
+                (slot * PAGE) as u64,
+                &header,
+                &mut write_budget,
+            )?;
+            self.lease.file.sync_all()?;
+            self.roots[slot] = root;
+            self.current = slot;
+            self.pending.clear();
+            Ok(())
+        }
+    }
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn store_creation_child() {
+            let Some(dir) = std::env::var_os("MWWR_STORE_CREATE_DIR") else {
+                return;
+            };
+            let mut input = std::io::stdin();
+            let mut go = [0];
+            input.read_exact(&mut go).unwrap();
+            let owned = Store::open(Path::new(&dir), "server:creation-race");
+            match &owned {
+                Ok(_) => println!("MWWR_CREATE_OWNED"),
+                Err(LeaseError::Busy) => println!("MWWR_CREATE_BUSY"),
+                Err(e) => panic!("{e:?}"),
+            }
+            std::io::stdout().flush().unwrap();
+            input.read_exact(&mut go).unwrap(); // Hold ownership until the parent finishes observing both.
+            drop(owned);
+        }
+        #[test]
+        fn simultaneous_process_creation_initializes_only_one_file() {
+            let dir = TestDir::new("create-race");
+            let cache = dir.0.join("cache");
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let mut children = Vec::new();
+            let mut readers = Vec::new();
+            for _ in 0..2 {
+                let name = format!(
+                    "{}::store_creation_child",
+                    module_path!().split_once("::").unwrap().1
+                );
+                let mut child = ChildGuard(
+                    Command::new(std::env::current_exe().unwrap())
+                        .args(["--exact", &name, "--nocapture"])
+                        .env("MWWR_STORE_CREATE_DIR", &cache)
+                        .stdin(Stdio::piped())
+                        .stdout(Stdio::piped())
+                        .spawn()
+                        .unwrap(),
+                );
+                let stdout = child.0.stdout.take().unwrap();
+                let sender = sender.clone();
+                readers.push(std::thread::spawn(move || {
+                    for line in BufReader::new(stdout).lines() {
+                        let line = line.unwrap();
+                        if line.contains("MWWR_CREATE_") {
+                            sender.send(line).unwrap();
+                        }
+                    }
+                }));
+                children.push(child);
+            }
+            for child in &mut children {
+                child.0.stdin.as_mut().unwrap().write_all(b"1").unwrap();
+            }
+            let lines: Vec<_> = (0..2)
+                .map(|_| {
+                    receiver
+                        .recv_timeout(std::time::Duration::from_secs(10))
+                        .unwrap()
+                })
+                .collect();
+            assert_eq!(lines.iter().filter(|s| s.contains("OWNED")).count(), 1);
+            assert_eq!(lines.iter().filter(|s| s.contains("BUSY")).count(), 1);
+            for child in &mut children {
+                child.0.stdin.as_mut().unwrap().write_all(b"2").unwrap();
+                assert!(child.0.wait().unwrap().success());
+            }
+            for reader in readers {
+                reader.join().unwrap();
+            }
+            let store = Store::open(&cache, "server:creation-race").unwrap();
+            assert_eq!(store.keys().count(), 0);
+            assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 1);
+        }
+        struct TestDir(std::path::PathBuf);
+        impl TestDir {
+            fn new(label: &str) -> Self {
+                static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let dir = std::env::temp_dir().join(format!(
+                    "mwwr-{label}-{}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                ));
+                std::fs::create_dir(&dir).unwrap();
+                Self(dir)
+            }
+        }
+        impl Drop for TestDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        #[test]
+        fn records_reopen_across_pages_and_worlds_and_reuse_space() {
+            let dir = TestDir::new("index");
+            let key = [1, 0, 0, -1, 2, 0];
+            let mut store = Store::open(&dir.0, "server:example:25565").unwrap();
+            for x in 0..205 {
+                store.put([1, 0, 0, x, 0, 0], vec![x as u8; 100]).unwrap();
+            }
+            store.put(key, b"first".to_vec()).unwrap();
+            store.commit().unwrap();
+            drop(store);
+            let mut store = Store::open(&dir.0, "server:example:25565").unwrap();
+            assert_eq!(store.keys().count(), 206);
+            assert_eq!(store.read(key).unwrap().unwrap(), b"first");
+            for x in 0..205 {
+                assert_eq!(
+                    store.read([1, 0, 0, x, 0, 0]).unwrap().unwrap(),
+                    vec![x as u8; 100]
+                );
+            }
+            let mut other = Store::open(&dir.0, "save:example:25565").unwrap();
+            assert!(other.read(key).unwrap().is_none());
+            drop(other);
+            for i in 0..15 {
+                store.put(key, vec![i; 1024]).unwrap();
+                store.commit().unwrap();
+            }
+            let size = store.lease.file.metadata().unwrap().len();
+            for i in 0..30 {
+                store.put(key, vec![i; 1024]).unwrap();
+                store.commit().unwrap();
+            }
+            assert!(store.lease.file.metadata().unwrap().len() <= size + 8192);
+            assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 2);
+        }
+        #[test]
+        fn every_short_write_phase_keeps_an_old_root_and_poisoned_writer_stops() {
+            let dir = TestDir::new("fault");
+            let key = [1, 0, 0, 0, 0, 0];
+            let mut base = Store::open(&dir.0, "server:fault").unwrap();
+            base.put(key, b"old".to_vec()).unwrap();
+            base.commit().unwrap();
+            drop(base);
+            let path = world_path(&dir.0, "server:fault");
+            let original = std::fs::read(&path).unwrap();
+            for budget in [
+                0, 1, 63, 64, 65, 100, 4095, 4096, 4159, 4160, 4161, 8191, 8255,
+            ] {
+                std::fs::write(&path, &original).unwrap();
+                let mut store = Store::open(&dir.0, "server:fault").unwrap();
+                store.put(key, vec![7; 64]).unwrap();
+                store.write_budget = Some(budget);
+                assert!(store.commit().is_err(), "budget {budget}");
+                assert!(store.put(key, b"bad".to_vec()).is_err());
+                assert!(store.dirty());
+                drop(store);
+                let mut recovered = Store::open(&dir.0, "server:fault").unwrap();
+                assert_eq!(
+                    recovered.read(key).unwrap().unwrap(),
+                    b"old",
+                    "budget {budget}"
+                );
+                // A failed append can leave an unaligned orphan tail. Recovery
+                // must still allocate full pages without touching the old root.
+                recovered.put(key, b"recovered".to_vec()).unwrap();
+                recovered.commit().unwrap();
+                assert_eq!(recovered.read(key).unwrap().unwrap(), b"recovered");
+                assert!(
+                    recovered
+                        .lease
+                        .file
+                        .metadata()
+                        .unwrap()
+                        .len()
+                        .is_multiple_of(PAGE as u64)
+                );
+            }
+        }
+        #[test]
+        fn bad_new_index_recovers_previous_root_unknown_schema_never_overwrites() {
+            let dir = TestDir::new("recovery");
+            let key = [1, 0, 0, 0, 0, 0];
+            let mut store = Store::open(&dir.0, "server:recovery").unwrap();
+            store.put(key, b"old".to_vec()).unwrap();
+            store.commit().unwrap();
+            store.put(key, b"new".to_vec()).unwrap();
+            store.commit().unwrap();
+            let page = store.roots[store.current].pages[0].start;
+            write_at(&mut store.lease.file, page, b"corrupt!").unwrap();
+            drop(store);
+            let mut recovered = Store::open(&dir.0, "server:recovery").unwrap();
+            assert_eq!(recovered.read(key).unwrap().unwrap(), b"old");
+            let mut header = vec![0; PAGE];
+            header[..8].copy_from_slice(b"MWWRC002");
+            put32(&mut header, 8, 3);
+            seal(&mut header);
+            write_at(&mut recovered.lease.file, 0, &header).unwrap();
+            drop(recovered);
+            let path = world_path(&dir.0, "server:recovery");
+            let before = std::fs::read(&path).unwrap();
+            assert!(matches!(
+                Store::open(&dir.0, "server:recovery"),
+                Err(LeaseError::Io(_))
+            ));
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
+        #[test]
+        fn corrupt_record_is_isolated_and_world_identity_is_checked() {
+            let dir = TestDir::new("checksum");
+            let key = [1, 0, 0, 0, 0, 0];
+            let other = [2, 1, 48, 0, 0, 0];
+            let mut store = Store::open(&dir.0, "server:checksum").unwrap();
+            store.put(key, b"terrain".to_vec()).unwrap();
+            store.put(other, b"nether".to_vec()).unwrap();
+            store.commit().unwrap();
+            let offset = store.roots[store.current].entries[&key].offset;
+            write_at(&mut store.lease.file, offset, b"!").unwrap();
+            assert!(store.read(key).is_err());
+            assert_eq!(store.read(other).unwrap().unwrap(), b"nether");
+            drop(store);
+            let wrong = world_path(&dir.0, "server:other");
+            std::fs::copy(world_path(&dir.0, "server:checksum"), &wrong).unwrap();
+            let before = std::fs::read(&wrong).unwrap();
+            assert!(Store::open(&dir.0, "server:other").is_err());
+            assert_eq!(std::fs::read(&wrong).unwrap(), before);
+        }
+
+        use super::*;
+        use std::{
+            io::{BufRead, BufReader, Write},
+            process::{Child, Command, Stdio},
+        };
+
+        fn extent(start: u64, len: u64) -> Extent {
+            Extent::new(start, len).unwrap()
+        }
+
+        #[test]
+        fn both_roots_readers_and_reservations_protect_space() {
+            let protected = [
+                extent(20, 20),
+                extent(30, 30),
+                extent(80, 10),
+                extent(90, 5),
+            ];
+            let mut free = free_extents(100, 16, protected).unwrap();
+            assert_eq!(free, [extent(16, 4), extent(60, 20), extent(95, 5)]);
+            assert_eq!(reserve(&mut free, 5), Some(extent(95, 5)));
+            assert_eq!(reserve(&mut free, 18), Some(extent(60, 18)));
+            let before = free.clone();
+            assert_eq!(reserve(&mut free, 6), None);
+            assert_eq!(reserve(&mut free, 0), None);
+            assert_eq!(free, before);
+            // Retire the old root, but its overlapping reader pin still wins.
+            assert_eq!(
+                free_extents(100, 16, [extent(30, 30)]).unwrap(),
+                [extent(16, 14), extent(60, 40)]
+            );
+        }
+
+        #[test]
+        fn invalid_ranges_fail_closed() {
+            assert_eq!(Extent::new(u64::MAX, 1), None);
+            assert_eq!(Extent::new(0, 0), None);
+            assert_eq!(free_extents(10, 11, []), None);
+            assert_eq!(free_extents(10, 0, [extent(9, 2)]), None);
+            assert_eq!(free_extents(10, 10, []), Some(vec![]));
+            assert_eq!(free_extents(10, 5, [extent(0, 10)]), Some(vec![]));
+        }
+
+        // The child is the same test executable, so these are real OS processes.
+        #[test]
+        fn lease_child() {
+            let Some(path) = std::env::var_os("MWWR_LEASE_TEST_PATH") else {
+                return;
+            };
+            if std::env::var_os("MWWR_LEASE_TEST_BUSY").is_some() {
+                assert!(matches!(
+                    ContainerLease::open_existing(Path::new(&path)),
+                    Err(LeaseError::Busy)
+                ));
+                return;
+            }
+            let _lease = ContainerLease::open_existing(Path::new(&path)).unwrap();
+            println!("MWWR_LEASE_READY");
+            std::io::stdout().flush().unwrap();
+            loop {
+                std::thread::park();
+            }
+        }
+
+        struct ChildGuard(Child);
+        impl Drop for ChildGuard {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        fn child(path: &Path) -> Command {
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    &format!(
+                        "{}::lease_child",
+                        module_path!().split_once("::").unwrap().1
+                    ),
+                    "--nocapture",
+                ])
+                .env("MWWR_LEASE_TEST_PATH", path);
+            command
+        }
+
+        #[test]
+        fn processes_busy_crash_release_and_independent_worlds() {
+            let dir = std::env::temp_dir().join(format!("mwwr-lease-{}", std::process::id()));
+            std::fs::create_dir(&dir).unwrap();
+            let path = dir.join("world.mwwr");
+            let other = dir.join("other.mwwr");
+            std::fs::write(&path, b"unchanged sentinel").unwrap();
+            std::fs::write(&other, b"other world").unwrap();
+            let lease = ContainerLease::open_existing(&path).unwrap();
+            assert_eq!(lease.file_len().unwrap(), 18);
+            assert!(
+                child(&path)
+                    .env("MWWR_LEASE_TEST_BUSY", "1")
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            assert!(matches!(
+                ContainerLease::open_existing(&path),
+                Err(LeaseError::Busy)
+            ));
+            let other_lease = ContainerLease::open_existing(&other).unwrap();
+            drop(other_lease);
+            drop(lease);
+            let mut owner = ChildGuard(child(&path).stdout(Stdio::piped()).spawn().unwrap());
+            let stdout = owner.0.stdout.take().unwrap();
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let reader = std::thread::spawn(move || {
+                for line in BufReader::new(stdout).lines() {
+                    if line.unwrap().contains("MWWR_LEASE_READY") {
+                        let _ = sender.send(());
+                        break;
+                    }
+                }
+            });
+            receiver
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+            assert!(matches!(
+                ContainerLease::open_existing(&path),
+                Err(LeaseError::Busy)
+            ));
+            drop(owner); // Simulate an abrupt owner death, without unlock/flush.
+            reader.join().unwrap();
+            let recovered = ContainerLease::open_existing(&path).unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), b"unchanged sentinel");
+            drop(recovered);
+            assert!(matches!(
+                ContainerLease::open_existing(&dir.join("missing")),
+                Err(LeaseError::Io(_))
+            ));
+            assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+}
+
 pub mod maps {
     use super::Dimension;
     use std::{
@@ -3370,11 +4353,33 @@ pub mod maps {
         terrain: Arc<TerrainAtlas>,
     }
     pub struct Frame {
+        pub raster_source: Option<Arc<Frame>>,
         pub serial: u64,
         pub view: View,
         pub pixels: Vec<u8>,
         pub known: usize,
         pub atlas: Option<Arc<TerrainAtlas>>,
+    }
+
+    /// Reproject an axis-aligned raster into the current world-map camera.
+    pub fn raster_quad(source: &View, view: &View, rect: [f32; 4]) -> Option<([f32; 4], [f32; 4])> {
+        let mut src = [0.0; 4];
+        let mut dst = [0.0; 4];
+        for axis in 0..2 {
+            let origin = source.center[axis] - source.span[axis] / 2.0;
+            let low = view.center[axis] - view.span[axis] / 2.0;
+            let start = origin.max(low);
+            let end = (origin + source.span[axis]).min(low + view.span[axis]);
+            if end <= start {
+                return None;
+            }
+            let pixels = [source.width, source.height][axis] as f64;
+            src[axis] = ((start - origin) / source.span[axis] * pixels) as f32;
+            src[axis + 2] = ((end - start) / source.span[axis] * pixels) as f32;
+            dst[axis] = rect[axis] + ((start - low) / view.span[axis]) as f32 * rect[axis + 2];
+            dst[axis + 2] = ((end - start) / view.span[axis]) as f32 * rect[axis + 2];
+        }
+        Some((src, dst))
     }
 
     /// Publish geometry only after its exact immutable texture is uploaded.
@@ -3390,13 +4395,19 @@ pub mod maps {
                 .as_ref()
                 .is_some_and(|previous| match (&previous.atlas, &next.atlas) {
                     (Some(a), Some(b)) => Arc::ptr_eq(a, b),
-                    (None, None) => Arc::ptr_eq(previous, &next),
+                    (None, None) => Arc::ptr_eq(
+                        previous.raster_source.as_ref().unwrap_or(previous),
+                        next.raster_source.as_ref().unwrap_or(&next),
+                    ),
                     _ => false,
                 });
         if !same_texture {
             let (width, height, pixels) = match &next.atlas {
                 Some(atlas) => (atlas.width, atlas.height, &atlas.pixels),
-                None => (next.view.width, next.view.height, &next.pixels),
+                None => {
+                    let source = next.raster_source.as_ref().unwrap_or(&next);
+                    (source.view.width, source.view.height, &source.pixels)
+                }
             };
             if !upload(width as u32, height as u32, pixels) {
                 return false;
@@ -3405,14 +4416,478 @@ pub mod maps {
         *displayed = Some(next);
         true
     }
+    use super::container::{self, RecordKey, Store};
+    use std::{
+        cell::RefCell,
+        io,
+        path::Path,
+        time::{Duration, Instant},
+    };
+
+    fn record_key(d: Dimension, layer: Layer, x: i32, z: i32) -> RecordKey {
+        [
+            match d {
+                Dimension::Player => 0,
+                Dimension::Overworld => 1,
+                Dimension::Nether => 2,
+                Dimension::End => 3,
+            },
+            i32::from(matches!(layer, Layer::Below(_))),
+            match layer {
+                Layer::Surface => 0,
+                Layer::Below(y) => y,
+            },
+            x,
+            z,
+            0,
+        ]
+    }
+    fn lod_record(d: Dimension, key: LodKey) -> RecordKey {
+        [
+            match d {
+                Dimension::Player => 0,
+                Dimension::Overworld => 1,
+                Dimension::Nether => 2,
+                Dimension::End => 3,
+            },
+            2,
+            0,
+            key.x,
+            key.z,
+            i32::from(key.level),
+        ]
+    }
+    fn record_dimension(key: RecordKey) -> Option<Dimension> {
+        match key[0] {
+            1 => Some(Dimension::Overworld),
+            2 => Some(Dimension::Nether),
+            3 => Some(Dimension::End),
+            _ => None,
+        }
+    }
+    fn record_layer(key: RecordKey) -> Option<Layer> {
+        match key[1] {
+            0 if key[2] == 0 => Some(Layer::Surface),
+            1 => Some(Layer::Below(key[2])),
+            _ => None,
+        }
+    }
+    const MAX_TILE_PORTALS: usize = 256 * 3;
+    fn tile_bytes(tile: &Tile) -> usize {
+        1024 + 256
+            + std::mem::size_of::<Tile>()
+            + tile.pixels.capacity()
+            + tile.biomes.capacity() * std::mem::size_of::<Option<Arc<str>>>()
+            + tile
+                .biomes
+                .iter()
+                .flatten()
+                .map(|s| s.len() + 32)
+                .sum::<usize>()
+            + tile.portals.capacity() * 32
+    }
+    fn tile_encode(tile: &Tile) -> io::Result<Vec<u8>> {
+        if tile.pixels.len() != 1024
+            || tile.biomes.len() > 256
+            || tile.portals.len() > MAX_TILE_PORTALS
+        {
+            return Err(io::Error::other("invalid terrain tile"));
+        }
+        let mut bytes = Vec::with_capacity(4096);
+        bytes.extend_from_slice(b"TIL1");
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // Per-record codec: 0 = raw.
+        bytes.extend_from_slice(&tile.pixels);
+        for n in tile.heights {
+            bytes.extend_from_slice(&n.to_le_bytes());
+        }
+        bytes.extend(tile.walls.iter().map(|v| u8::from(*v)));
+        let mut palette = BTreeMap::<&str, u16>::new();
+        for name in tile.biomes.iter().flatten() {
+            if name.is_empty() || name.len() > 256 {
+                return Err(io::Error::other("invalid biome name"));
+            }
+            let next = palette.len() as u16 + 1;
+            palette.entry(name.as_ref()).or_insert(next);
+        }
+        bytes.extend_from_slice(&(palette.len() as u16).to_le_bytes());
+        let mut ordered: Vec<_> = palette.iter().collect();
+        ordered.sort_unstable_by_key(|(_, id)| **id);
+        for (name, _) in ordered {
+            bytes.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            bytes.extend_from_slice(name.as_bytes());
+        }
+        for i in 0..256 {
+            let id = tile
+                .biomes
+                .get(i)
+                .and_then(Option::as_ref)
+                .and_then(|name| palette.get(name.as_ref()))
+                .copied()
+                .unwrap_or(0);
+            bytes.extend_from_slice(&id.to_le_bytes());
+        }
+        bytes.extend_from_slice(&(tile.portals.len() as u16).to_le_bytes());
+        for (at, kind) in &tile.portals {
+            for n in at {
+                bytes.extend_from_slice(&n.to_le_bytes());
+            }
+            bytes.push(match kind {
+                Portal::Nether => 0,
+                Portal::End => 1,
+                Portal::Gateway => 2,
+            });
+        }
+        Ok(bytes)
+    }
+    fn tile_decode(bytes: &[u8]) -> io::Result<Tile> {
+        fn bad() -> io::Error {
+            io::Error::new(io::ErrorKind::InvalidData, "invalid terrain record")
+        }
+        fn take<'a>(bytes: &mut &'a [u8], n: usize) -> io::Result<&'a [u8]> {
+            if bytes.len() < n {
+                return Err(bad());
+            }
+            let (a, b) = bytes.split_at(n);
+            *bytes = b;
+            Ok(a)
+        }
+        let mut bytes = bytes;
+        if take(&mut bytes, 4)? != b"TIL1" || take(&mut bytes, 4)? != 0u32.to_le_bytes() {
+            return Err(bad());
+        }
+        let mut tile = Tile {
+            pixels: take(&mut bytes, 1024)?.to_vec(),
+            ..Tile::default()
+        };
+        for n in &mut tile.heights {
+            *n = i32::from_le_bytes(take(&mut bytes, 4)?.try_into().unwrap());
+        }
+        for wall in &mut tile.walls {
+            *wall = match take(&mut bytes, 1)?[0] {
+                0 => false,
+                1 => true,
+                _ => return Err(bad()),
+            };
+        }
+        let count = u16::from_le_bytes(take(&mut bytes, 2)?.try_into().unwrap()) as usize;
+        if count > 256 {
+            return Err(bad());
+        }
+        let mut palette = vec![None];
+        for _ in 0..count {
+            let len = u16::from_le_bytes(take(&mut bytes, 2)?.try_into().unwrap()) as usize;
+            if len == 0 || len > 256 {
+                return Err(bad());
+            }
+            let name = std::str::from_utf8(take(&mut bytes, len)?).map_err(|_| bad())?;
+            palette.push(Some(Arc::from(name)));
+        }
+        for _ in 0..256 {
+            let id = u16::from_le_bytes(take(&mut bytes, 2)?.try_into().unwrap()) as usize;
+            tile.biomes.push(palette.get(id).ok_or_else(bad)?.clone());
+        }
+        let count = u16::from_le_bytes(take(&mut bytes, 2)?.try_into().unwrap()) as usize;
+        if count > MAX_TILE_PORTALS {
+            return Err(bad());
+        }
+        for _ in 0..count {
+            let mut at = [0; 3];
+            for n in &mut at {
+                *n = i32::from_le_bytes(take(&mut bytes, 4)?.try_into().unwrap());
+            }
+            let kind = match take(&mut bytes, 1)?[0] {
+                0 => Portal::Nether,
+                1 => Portal::End,
+                2 => Portal::Gateway,
+                _ => return Err(bad()),
+            };
+            tile.portals.push((at, kind));
+        }
+        if !bytes.is_empty() {
+            return Err(bad());
+        }
+        Ok(tile)
+    }
+    struct Backing {
+        store: Store,
+        reads: BTreeMap<RecordKey, (u64, Arc<Tile>)>,
+        read_bytes: usize,
+        clock: u64,
+        limit: usize,
+        error: Option<String>,
+    }
+    impl Backing {
+        fn get(&mut self, key: RecordKey) -> Option<Arc<Tile>> {
+            self.clock += 1;
+            if let Some((stamp, tile)) = self.reads.get_mut(&key) {
+                *stamp = self.clock;
+                return Some(tile.clone());
+            }
+            let tile = match self
+                .store
+                .read(key)
+                .and_then(|data| data.map(|b| tile_decode(&b)).transpose())
+            {
+                Ok(Some(tile)) => Arc::new(tile),
+                Ok(None) => return None,
+                Err(e) => {
+                    self.error = Some(e.to_string());
+                    return None;
+                }
+            };
+            let bytes = tile_bytes(&tile);
+            while self.read_bytes + bytes > self.limit {
+                let Some(key) = self
+                    .reads
+                    .iter()
+                    .min_by_key(|(_, (stamp, _))| *stamp)
+                    .map(|(key, _)| *key)
+                else {
+                    break;
+                };
+                self.read_bytes -= tile_bytes(&self.reads.remove(&key).unwrap().1);
+            }
+            self.read_bytes += bytes;
+            self.reads.insert(key, (self.clock, tile.clone()));
+            Some(tile)
+        }
+    }
+    type TileCursor = Option<((i32, i32), Option<Arc<Tile>>)>;
     type Key = (Dimension, Layer, i32, i32);
     #[derive(Default)]
     pub struct Cache {
         tiles: BTreeMap<Key, (u64, Arc<Tile>)>,
         lod_tiles: BTreeMap<(Dimension, LodKey), (u64, Arc<Tile>)>,
         clock: u64,
+        backing: Option<RefCell<Backing>>,
+        limit: usize,
+        paged: bool,
     }
     impl Cache {
+        fn open(
+            directory: &Path,
+            world: &str,
+            limit: usize,
+        ) -> Result<Self, container::LeaseError> {
+            Ok(Self {
+                backing: Some(RefCell::new(Backing {
+                    store: Store::open(directory, world)?,
+                    reads: BTreeMap::new(),
+                    read_bytes: 0,
+                    clock: 0,
+                    limit: limit / 4,
+                    error: None,
+                })),
+                limit,
+                ..Self::default()
+            })
+        }
+        fn bytes(&self) -> usize {
+            self.tiles
+                .values()
+                .chain(self.lod_tiles.values())
+                .map(|(_, tile)| tile_bytes(tile))
+                .sum()
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            if let Some(backing) = &self.backing {
+                backing.borrow_mut().store.commit()?;
+            }
+            Ok(())
+        }
+        fn save(&mut self, key: RecordKey, tile: Arc<Tile>) -> io::Result<()> {
+            if let Some(backing) = &self.backing {
+                let mut backing = backing.borrow_mut();
+                if let Some((_, old)) = backing.reads.remove(&key) {
+                    backing.read_bytes -= tile_bytes(&old);
+                }
+                backing.store.put(key, tile_encode(&tile)?)?;
+            }
+            Ok(())
+        }
+        fn trim(&mut self) -> io::Result<()> {
+            if self.limit == 0 {
+                return Ok(());
+            }
+            let pending = self
+                .backing
+                .as_ref()
+                .map_or(0, |b| b.borrow().store.pending_bytes());
+            if pending > self.limit / 4 {
+                self.flush()?;
+            }
+            while self.bytes() > self.limit / 2 {
+                let fine = self
+                    .tiles
+                    .iter()
+                    .min_by_key(|(_, (stamp, _))| *stamp)
+                    .map(|(key, (stamp, _))| (*key, *stamp));
+                let coarse = self
+                    .lod_tiles
+                    .iter()
+                    .min_by_key(|(_, (stamp, _))| *stamp)
+                    .map(|(key, (stamp, _))| (*key, *stamp));
+                match (fine, coarse) {
+                    (Some((key, a)), Some((_, b))) if a <= b => {
+                        self.tiles.remove(&key);
+                    }
+                    (_, Some((key, _))) => {
+                        self.lod_tiles.remove(&key);
+                    }
+                    (Some((key, _)), _) => {
+                        self.tiles.remove(&key);
+                    }
+                    _ => break,
+                }
+            }
+            Ok(())
+        }
+        fn clear_payloads(&mut self) {
+            self.tiles.clear();
+            self.lod_tiles.clear();
+            if let Some(b) = &self.backing {
+                let mut b = b.borrow_mut();
+                b.reads.clear();
+                b.read_bytes = 0;
+            }
+            self.clock += 1;
+        }
+        fn tile_at(&self, key: Key) -> Option<Arc<Tile>> {
+            self.tiles.get(&key).map(|(_, t)| t.clone()).or_else(|| {
+                self.backing
+                    .as_ref()?
+                    .borrow_mut()
+                    .get(record_key(key.0, key.1, key.2, key.3))
+            })
+        }
+        fn coarse_at(&self, d: Dimension, key: LodKey) -> Option<Arc<Tile>> {
+            self.lod_tiles
+                .get(&(d, key))
+                .map(|(_, t)| t.clone())
+                .or_else(|| self.backing.as_ref()?.borrow_mut().get(lod_record(d, key)))
+        }
+        fn prepare(&mut self, view: &View) -> io::Result<()> {
+            let Some(backing) = &self.backing else {
+                return Ok(());
+            };
+            let region = view.atlas_region();
+            // Bound even the temporary list when a zoomed-out view covers an
+            // enormous history; raster reads query the remaining keys on demand.
+            let candidates = (self.limit / 4096).max(1);
+            let keys: Vec<_> = backing
+                .borrow()
+                .store
+                .keys()
+                .filter(|key| {
+                    record_dimension(*key) == Some(view.dimension)
+                        && (record_layer(*key) == Some(view.layer)
+                            && intersects(
+                                region,
+                                [i64::from(key[3]) * 16, i64::from(key[4]) * 16, 16, 16],
+                            )
+                            || key[1] == 2
+                                && view.layer == Layer::Surface
+                                && intersects(
+                                    region,
+                                    LodKey {
+                                        x: key[3],
+                                        z: key[4],
+                                        level: key[5].clamp(0, 22) as u8,
+                                    }
+                                    .bounds(),
+                                ))
+                })
+                .take(candidates + 1)
+                .collect();
+            self.paged = keys.len() > candidates;
+            {
+                let mut b = backing.borrow_mut();
+                let border = [
+                    region[0] - 16,
+                    region[1] - 16,
+                    region[2] + 32,
+                    region[3] + 32,
+                ];
+                b.reads.retain(|key, _| {
+                    record_dimension(*key) == Some(view.dimension)
+                        && (record_layer(*key) == Some(view.layer)
+                            && intersects(
+                                border,
+                                [i64::from(key[3]) * 16, i64::from(key[4]) * 16, 16, 16],
+                            )
+                            || key[1] == 2
+                                && view.layer == Layer::Surface
+                                && intersects(
+                                    border,
+                                    LodKey {
+                                        x: key[3],
+                                        z: key[4],
+                                        level: key[5] as u8,
+                                    }
+                                    .bounds(),
+                                ))
+                });
+                b.read_bytes = b.reads.values().map(|(_, tile)| tile_bytes(tile)).sum();
+            }
+            // Keep only the requested layer and its padded display region.
+            self.tiles.retain(|(d, l, x, z), _| {
+                *d == view.dimension
+                    && *l == view.layer
+                    && intersects(region, [i64::from(*x) * 16, i64::from(*z) * 16, 16, 16])
+            });
+            self.lod_tiles.retain(|(d, k), _| {
+                *d == view.dimension
+                    && view.layer == Layer::Surface
+                    && intersects(region, k.bounds())
+            });
+            let mut used = self.bytes();
+            for key in keys.into_iter().take(candidates) {
+                let fine = record_layer(key).is_some_and(|l| l == view.layer)
+                    && intersects(
+                        region,
+                        [i64::from(key[3]) * 16, i64::from(key[4]) * 16, 16, 16],
+                    );
+                let lod = LodKey {
+                    x: key[3],
+                    z: key[4],
+                    level: key[5].clamp(0, 22) as u8,
+                };
+                let coarse =
+                    key[1] == 2 && view.layer == Layer::Surface && intersects(region, lod.bounds());
+                if !fine && !coarse {
+                    continue;
+                }
+                if fine
+                    && self
+                        .tiles
+                        .contains_key(&(view.dimension, view.layer, key[3], key[4]))
+                    || coarse && self.lod_tiles.contains_key(&(view.dimension, lod))
+                {
+                    continue;
+                }
+                let Some(tile) = self.backing.as_ref().unwrap().borrow_mut().get(key) else {
+                    continue;
+                };
+                let size = tile_bytes(&tile);
+                if used.saturating_add(size) > self.limit / 2 {
+                    self.paged = true;
+                    continue;
+                }
+                used += size;
+                self.clock += 1;
+                if fine {
+                    self.tiles.insert(
+                        (view.dimension, view.layer, key[3], key[4]),
+                        (self.clock, tile),
+                    );
+                } else {
+                    self.lod_tiles
+                        .insert((view.dimension, lod), (self.clock, tile));
+                }
+            }
+            Ok(())
+        }
+
         pub fn insert(
             &mut self,
             dimension: Dimension,
@@ -3421,7 +4896,7 @@ pub mod maps {
             mut tile: Tile,
         ) {
             let key = (dimension, layer, chunk[0], chunk[1]);
-            if let Some((_, previous)) = self.tiles.get(&key)
+            if let Some(previous) = self.tile_at(key)
                 && !previous.biomes.is_empty()
             {
                 tile.biomes.resize(256, None);
@@ -3440,6 +4915,11 @@ pub mod maps {
                 || !tile.pixels.chunks_exact(4).any(|p| p[3] != 0)
             {
                 return false;
+            }
+            if !self.lod_tiles.contains_key(&(dimension, key))
+                && let Some(old) = self.coarse_at(dimension, key)
+            {
+                self.lod_tiles.insert((dimension, key), (self.clock, old));
             }
             if let Some((stamp, old)) = self.lod_tiles.get_mut(&(dimension, key)) {
                 let old = Arc::make_mut(old);
@@ -3483,23 +4963,45 @@ pub mod maps {
             true
         }
         pub fn coverage(&self) -> Coverage {
+            let mut fine: BTreeMap<Key, Arc<Tile>> = self
+                .tiles
+                .iter()
+                .map(|(key, (_, tile))| (*key, tile.clone()))
+                .collect();
+            let mut coarse: BTreeMap<(Dimension, LodKey), Arc<Tile>> = self
+                .lod_tiles
+                .iter()
+                .map(|(key, (_, tile))| (*key, tile.clone()))
+                .collect();
+            if let Some(backing) = &self.backing {
+                for (key, (_, tile)) in &backing.borrow().reads {
+                    let Some(d) = record_dimension(*key) else {
+                        continue;
+                    };
+                    if let Some(layer) = record_layer(*key) {
+                        fine.entry((d, layer, key[3], key[4]))
+                            .or_insert_with(|| tile.clone());
+                    } else if key[1] == 2 {
+                        coarse
+                            .entry((
+                                d,
+                                LodKey {
+                                    x: key[3],
+                                    z: key[4],
+                                    level: key[5] as u8,
+                                },
+                            ))
+                            .or_insert_with(|| tile.clone());
+                    }
+                }
+            }
             Coverage {
                 session: 0,
-                detailed: self.tiles.keys().copied().collect(),
-                detailed_data: self
-                    .tiles
+                detailed: fine.keys().copied().collect(),
+                detailed_data: fine,
+                lod: coarse
                     .iter()
-                    .map(|(key, (_, tile))| (*key, Arc::clone(tile)))
-                    .collect(),
-                lod_data: self
-                    .lod_tiles
-                    .iter()
-                    .map(|(key, (_, tile))| (*key, tile.clone()))
-                    .collect(),
-                lod: self
-                    .lod_tiles
-                    .iter()
-                    .map(|((d, key), (_, tile))| {
+                    .map(|((d, key), tile)| {
                         let mut mask = [0; 4];
                         for (i, pixel) in tile.pixels.chunks_exact(4).enumerate() {
                             if pixel[3] != 0 {
@@ -3509,10 +5011,16 @@ pub mod maps {
                         (*d, *key, mask)
                     })
                     .collect(),
+                lod_data: coarse,
             }
         }
-        fn lod_pixel(&self, dimension: Dimension, layer: Layer, block: [i32; 2]) -> Option<&[u8]> {
-            if layer != Layer::Surface || self.lod_tiles.is_empty() {
+        fn lod_pixel(
+            &self,
+            dimension: Dimension,
+            layer: Layer,
+            block: [i32; 2],
+        ) -> Option<[u8; 4]> {
+            if layer != Layer::Surface {
                 return None;
             }
             for level in 0..=22 {
@@ -3522,17 +5030,20 @@ pub mod maps {
                     z: (i64::from(block[1]).div_euclid(size)) as i32,
                     level,
                 };
-                if let Some((_, tile)) = self.lod_tiles.get(&(dimension, key)) {
+                if let Some(tile) = self.coarse_at(dimension, key) {
                     let cell = key.cell(block)?;
                     let pixel = tile.pixels.get(cell * 4..cell * 4 + 4)?;
                     if pixel[3] != 0 {
-                        return Some(pixel);
+                        return Some(pixel.try_into().unwrap());
                     }
                 }
             }
             None
         }
         fn gpu_atlas_fits(&self, view: &View) -> bool {
+            if self.paged {
+                return false;
+            }
             let region = view.atlas_region();
             let fine = self
                 .tiles
@@ -3649,9 +5160,9 @@ pub mod maps {
             // The tile a pixel reads changes once per 16-block cell, not per
             // pixel: look it up again only when the chunk changes. The north
             // and west neighbours are separate chunks only at a chunk's edge.
-            let mut tile: Option<((i32, i32), Option<&Tile>)> = None;
-            let mut north: Option<((i32, i32), Option<&Tile>)> = None;
-            let mut west: Option<((i32, i32), Option<&Tile>)> = None;
+            let mut tile: TileCursor = None;
+            let mut north: TileCursor = None;
+            let mut west: TileCursor = None;
             for y in 0..height {
                 let dz = (y as f64 + 0.5 - half_z) * step_z;
                 let (tilt_x, tilt_z) = (dz * sin, dz * cos);
@@ -3667,20 +5178,18 @@ pub mod maps {
                     let bx = (view.center[0] + dx * cos - tilt_x).floor() as i32;
                     let bz = (view.center[1] + dx * sin + tilt_z).floor() as i32;
                     let chunk = (bx.div_euclid(16), bz.div_euclid(16));
-                    if tile.is_none_or(|(key, _)| key != chunk) {
+                    if tile.as_ref().is_none_or(|(key, _)| *key != chunk) {
                         tile = Some((
                             chunk,
-                            self.tiles
-                                .get(&(view.dimension, view.layer, chunk.0, chunk.1))
-                                .map(|(_, tile)| tile.as_ref()),
+                            self.tile_at((view.dimension, view.layer, chunk.0, chunk.1)),
                         ));
                     }
-                    let current = tile.and_then(|(_, tile)| tile);
+                    let current = tile.as_ref().and_then(|(_, tile)| tile.as_ref());
                     let i = (y * width + x) * 4;
                     let local = (bz.rem_euclid(16) * 16 + bx.rem_euclid(16)) as usize;
                     let Some(current) = current else {
                         if let Some(color) = self.lod_pixel(view.dimension, view.layer, [bx, bz]) {
-                            pixels[i..i + 4].copy_from_slice(color);
+                            pixels[i..i + 4].copy_from_slice(&color);
                             known += 1;
                         }
                         continue;
@@ -3694,37 +5203,38 @@ pub mod maps {
                     let north_z = bz - 1;
                     let north_chunk = (bx.div_euclid(16), north_z.div_euclid(16));
                     let neighbour = if north_chunk == chunk {
-                        Some(current)
+                        Some(current.clone())
                     } else {
-                        if north.is_none_or(|(key, _)| key != north_chunk) {
+                        if north.as_ref().is_none_or(|(key, _)| *key != north_chunk) {
                             north = Some((
                                 north_chunk,
-                                self.tiles
-                                    .get(&(
-                                        view.dimension,
-                                        view.layer,
-                                        north_chunk.0,
-                                        north_chunk.1,
-                                    ))
-                                    .map(|(_, tile)| tile.as_ref()),
+                                self.tile_at((
+                                    view.dimension,
+                                    view.layer,
+                                    north_chunk.0,
+                                    north_chunk.1,
+                                )),
                             ));
                         }
-                        north.and_then(|(_, tile)| tile)
+                        north.as_ref().and_then(|(_, tile)| tile.clone())
                     };
                     let west_x = bx - 1;
                     let west_chunk = (west_x.div_euclid(16), bz.div_euclid(16));
                     let west_tile = if west_chunk == chunk {
-                        Some(current)
+                        Some(current.clone())
                     } else {
-                        if west.is_none_or(|(key, _)| key != west_chunk) {
+                        if west.as_ref().is_none_or(|(key, _)| *key != west_chunk) {
                             west = Some((
                                 west_chunk,
-                                self.tiles
-                                    .get(&(view.dimension, view.layer, west_chunk.0, west_chunk.1))
-                                    .map(|(_, tile)| tile.as_ref()),
+                                self.tile_at((
+                                    view.dimension,
+                                    view.layer,
+                                    west_chunk.0,
+                                    west_chunk.1,
+                                )),
                             ));
                         }
-                        west.and_then(|(_, tile)| tile)
+                        west.as_ref().and_then(|(_, tile)| tile.clone())
                     };
                     let height = current.heights[local];
                     let north_height = neighbour.map_or(height, |tile| {
@@ -3738,8 +5248,10 @@ pub mod maps {
                     // Light from the north-west: a rise towards it is darker,
                     // a slope away from it is brighter. The base keeps the map
                     // readable instead of the old flat 0.8 step.
-                    let relief = f32::from((north_height - height).clamp(-64, 64) as i8) * -0.085
-                        + f32::from((west_height - height).clamp(-64, 64) as i8) * -0.05;
+                    let relief = f32::from(north_height.saturating_sub(height).clamp(-64, 64) as i8)
+                        * -0.085
+                        + f32::from(west_height.saturating_sub(height).clamp(-64, 64) as i8)
+                            * -0.05;
                     let shade = if current.walls[local] {
                         0.55
                     } else {
@@ -3753,6 +5265,7 @@ pub mod maps {
                 }
             }
             Frame {
+                raster_source: None,
                 serial,
                 view,
                 pixels,
@@ -3780,7 +5293,17 @@ pub mod maps {
     type PortalKey = (Dimension, i32, i32, Portal);
     type PortalMap = BTreeMap<PortalKey, [i32; 3]>;
 
+    #[derive(Clone, PartialEq, Eq)]
+    struct Binding {
+        session: u64,
+        world: String,
+        dimension: Dimension,
+        limit: usize,
+    }
     pub struct Service {
+        binding: Arc<Mutex<Option<Binding>>>,
+        status: Arc<Mutex<Option<String>>>,
+        paused: Arc<std::sync::atomic::AtomicBool>,
         tx: Mutex<Option<mpsc::SyncSender<Job>>>,
         worker: Mutex<Option<JoinHandle<()>>>,
         latest: Arc<Mutex<Option<View>>>,
@@ -3797,6 +5320,9 @@ pub mod maps {
     }
     impl Service {
         pub fn new() -> Self {
+            Self::with_directory(None)
+        }
+        pub fn with_directory(directory: Option<std::path::PathBuf>) -> Self {
             let (tx, rx) = mpsc::sync_channel(8);
             let latest = Arc::new(Mutex::new(None::<View>));
             let output = Arc::new(Mutex::new(None));
@@ -3804,95 +5330,185 @@ pub mod maps {
             let resident = Arc::new(Mutex::new(BTreeSet::new()));
             let portals = Arc::new(Mutex::new(BTreeMap::new()));
             let coverage = Arc::new(Mutex::new(Arc::new(Coverage::default())));
-            let coverage_state = coverage.clone();
-            let residency = resident.clone();
-            let portal_points = portals.clone();
+            let binding = Arc::new(Mutex::new(None::<Binding>));
+            let status = Arc::new(Mutex::new(None::<String>));
             let (input, result, active) = (latest.clone(), output.clone(), session.clone());
-            let worker = thread::Builder::new()
-                .name("map-terrain".into())
-                .spawn(move || {
+            let (residency, coverage_state, portal_points) =
+                (resident.clone(), coverage.clone(), portals.clone());
+            let (desired, errors) = (binding.clone(), status.clone());
+            let paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let paused_state = paused.clone();
+            let worker = thread::Builder::new().name("map-terrain".into()).spawn(move || {
                     let mut cache = Cache::default();
                     let mut current = 0;
+                    let mut configured = None::<Binding>;
                     let mut serial = 0;
-                    let mut atlas: Option<AtlasCache> = None;
-                    while let Ok(first) = rx.recv() {
-                        let mut jobs = vec![first];
-                        jobs.extend(rx.try_iter().take(7));
+                    let mut atlas = None::<AtlasCache>;
+                    let mut last_commit = Instant::now();
+                    let mut paused = false;
+                    loop {
+                        let first = match rx.recv_timeout(Duration::from_millis(100)) {
+                            Ok(job) => Some(job),
+                            Err(mpsc::RecvTimeoutError::Timeout) => None,
+                            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                                if let Err(e) = cache.flush() {
+                                    eprintln!("Map cache flush on exit failed: {e}");
+                                    *errors.lock().unwrap_or_else(|e| e.into_inner()) = Some(e.to_string());
+                                }
+                                break;
+                            }
+                        };
+                        let wanted = desired.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                        let next = active.load(Ordering::Acquire);
                         let mut changed = false;
-                        if current != active.load(Ordering::Acquire) {
-                            cache = Cache::default();
-                            current = active.load(Ordering::Acquire);
+                        if current != next
+                            || configured.as_ref().map(|b| (&b.world, b.session))
+                                != wanted.as_ref().map(|b| (&b.world, b.session))
+                        {
+                            if let Err(e) = cache.flush() {
+                                paused = true;
+                                *errors.lock().unwrap_or_else(|e| e.into_inner()) =
+                                    Some(format!("Cache write failed; sampling paused: {e}"));
+                            }
+                            if !paused {
+                                cache = Cache::default();
+                                *errors.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                                if let (Some(directory), Some(b)) = (&directory, &wanted) {
+                                    if b.world.is_empty() {
+                                        cache.limit=b.limit;
+                                        *errors.lock().unwrap_or_else(|e|e.into_inner())=Some("Unknown world identity; temporary RAM map only".into());
+                                    } else {match Cache::open(directory, &b.world, b.limit) {
+                                        Ok(opened) => cache = opened,
+                                        Err(container::LeaseError::Busy) => {
+                                            cache.limit = b.limit;
+                                            *errors.lock().unwrap_or_else(|e| e.into_inner()) = Some(
+                                                "Cache is used by another client; temporary RAM map only".into(),
+                                            );
+                                        }
+                                        Err(container::LeaseError::Io(e)) => {
+                                            paused = true;
+                                            *errors.lock().unwrap_or_else(|e| e.into_inner()) =
+                                                Some(format!("Cannot open cache; sampling paused: {e}"));
+                                        }
+                                    }
+                                    }
+                                }
+                                current = next;
+                                configured = wanted.clone();
+                                atlas = None;
+                                changed = true;
+                                last_commit = Instant::now();
+                            }
                         }
+                        if let (Some(old), Some(new)) = (&configured.clone(), &wanted) {
+                            if old.dimension != new.dimension && !paused {
+                                if let Err(e) = cache.flush() {
+                                    paused = true;
+                                    *errors.lock().unwrap_or_else(|e| e.into_inner()) =
+                                        Some(format!("Cache write failed; sampling paused: {e}"));
+                                } else {
+                                    cache.clear_payloads();
+                                    atlas = None;
+                                    changed = true;
+                                    *coverage_state.lock().unwrap_or_else(|e| e.into_inner()) =
+                                        Arc::new(Coverage::default());
+                                    residency.lock().unwrap_or_else(|e| e.into_inner()).clear();
+                                    portal_points
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner())
+                                        .clear();
+                                    *result.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                                    configured = wanted.clone();
+                                    last_commit = Instant::now();
+                                }
+                            }
+                            if old.limit != new.limit {
+                                cache.limit = new.limit;
+                                if let Some(backing) = &cache.backing {
+                                    let mut b = backing.borrow_mut();
+                                    b.limit = new.limit / 4;
+                                    b.reads.clear();
+                                    b.read_bytes = 0;
+                                }
+                                if let Err(e) = cache.trim() {
+                                    paused = true;
+                                    *errors.lock().unwrap_or_else(|e| e.into_inner()) = Some(e.to_string());
+                                }
+                                configured = wanted.clone();
+                                changed = true;
+                            }
+                        }
+                        let mut jobs: Vec<_> = first.into_iter().collect();
+                        jobs.extend(rx.try_iter().take(7));
                         for job in jobs {
-                            let job = match job {
+                            if paused {
+                                continue;
+                            }
+                            let saved = match job {
+                                Job::Chunk {
+                                    session,
+                                    dimension,
+                                    layer,
+                                    chunk,
+                                    sample,
+                                } if session == current
+                                    && session == active.load(Ordering::Acquire)
+                                    && configured.as_ref().is_none_or(|b| b.dimension == dimension) =>
+                                {
+                                    let tile = sample();
+                                    if session != active.load(Ordering::Acquire) {
+                                        continue;
+                                    }
+                                    cache.insert(dimension, layer, chunk, tile);
+                                    changed = true;
+                                    let tile = cache.tiles[&(dimension, layer, chunk[0], chunk[1])]
+                                        .1
+                                        .clone();
+                                    cache.save(record_key(dimension, layer, chunk[0], chunk[1]), tile)
+                                }
                                 Job::Lod {
                                     session,
                                     dimension,
                                     key,
                                     sample,
-                                } => {
-                                    if session == active.load(Ordering::Acquire) {
-                                        let tile = sample();
-                                        if session == active.load(Ordering::Acquire) {
-                                            changed |= cache.insert_lod(dimension, key, tile);
-                                        }
+                                } if session == current
+                                    && session == active.load(Ordering::Acquire)
+                                    && configured.as_ref().is_none_or(|b| b.dimension == dimension) =>
+                                {
+                                    let tile = sample();
+                                    if session != active.load(Ordering::Acquire) {
+                                        continue;
                                     }
-                                    continue;
+                                    if cache.insert_lod(dimension, key, tile) {
+                                        changed = true;
+                                        let tile = cache.lod_tiles[&(dimension, key)].1.clone();
+                                        cache.save(lod_record(dimension, key), tile)
+                                    } else {
+                                        Ok(())
+                                    }
                                 }
-                                other => other,
+                                _ => Ok(()),
                             };
-                            if let Job::Chunk {
-                                session,
-                                dimension,
-                                layer,
-                                chunk,
-                                sample,
-                            } = job
-                            {
-                                if session != active.load(Ordering::Acquire) {
-                                    continue;
-                                }
-                                if current != session {
-                                    cache = Cache::default();
-                                    current = session;
-                                }
-                                let tile = sample();
-                                if session == active.load(Ordering::Acquire) {
-                                    let points = tile.portals.clone();
-                                    cache.insert(dimension, layer, chunk, tile);
-                                    if !points.is_empty() {
-                                        let mut portals =
-                                            portal_points.lock().unwrap_or_else(|e| e.into_inner());
-                                        for (at, kind) in points {
-                                            portals.insert((dimension, at[0], at[2], kind), at);
-                                        }
-                                    }
-                                    changed = true;
-                                }
+                            if let Err(e) = saved.and_then(|_| cache.trim()) {
+                                paused = true;
+                                *errors.lock().unwrap_or_else(|e| e.into_inner()) =
+                                    Some(format!("Cache write failed; sampling paused: {e}"));
                             }
                         }
-                        if changed {
-                            let mut entries = residency.lock().unwrap_or_else(|e| e.into_inner());
-                            if current == active.load(Ordering::Acquire) {
-                                *entries = cache.tiles.keys().copied().collect();
-                                *coverage_state.lock().unwrap_or_else(|e| e.into_inner()) = {
-                                    let mut summary = cache.coverage();
-                                    summary.session = current;
-                                    Arc::new(summary)
-                                };
+                        if !paused && last_commit.elapsed() >= Duration::from_secs(5) {
+                            if let Err(e) = cache.flush() {
+                                paused = true;
+                                *errors.lock().unwrap_or_else(|e| e.into_inner()) =
+                                    Some(format!("Cache write failed; sampling paused: {e}"));
                             }
+                            last_commit = Instant::now();
                         }
-                        let Some(view) = input.lock().unwrap_or_else(|e| e.into_inner()).clone()
-                        else {
+                        paused_state.store(paused, Ordering::Release);
+                        let Some(view) = input.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
                             continue;
                         };
-                        if view.session != active.load(Ordering::Acquire) {
+                        if view.session != current || view.session != active.load(Ordering::Acquire) {
                             continue;
-                        }
-                        if current != view.session {
-                            cache = Cache::default();
-                            current = view.session;
-                            changed = true;
                         }
                         let same = result
                             .lock()
@@ -3901,6 +5517,9 @@ pub mod maps {
                             .is_some_and(|f: &Arc<Frame>| f.view == view);
                         if same && !changed {
                             continue;
+                        }
+                        if !paused && let Err(e) = cache.prepare(&view) {
+                            *errors.lock().unwrap_or_else(|e| e.into_inner()) = Some(e.to_string());
                         }
                         serial += 1;
                         let frame = if view.large && cache.gpu_atlas_fits(&view) {
@@ -3916,6 +5535,7 @@ pub mod maps {
                             }
                             let terrain = atlas.as_ref().unwrap().terrain.clone();
                             Arc::new(Frame {
+                                raster_source: None,
                                 serial,
                                 view,
                                 pixels: Vec::new(),
@@ -3923,15 +5543,36 @@ pub mod maps {
                                 atlas: Some(terrain),
                             })
                         } else {
+                            atlas = None;
                             Arc::new(cache.render(view, serial))
                         };
-                        if frame.view.session == active.load(Ordering::Acquire) {
+                        if let Some(backing) = &cache.backing
+                            && let Some(error) = backing.borrow_mut().error.take()
+                        {
+                            *errors.lock().unwrap_or_else(|e| e.into_inner()) =
+                                Some(format!("Damaged cache record skipped: {error}"));
+                        }
+                        if current == active.load(Ordering::Acquire) {
+                            let mut summary = cache.coverage();
+                            summary.session = current;
+                            let mut points = BTreeMap::new();
+                            for ((d, _, _, _), tile) in &summary.detailed_data {
+                                for (at, kind) in &tile.portals {
+                                    points.insert((*d, at[0], at[2], *kind), *at);
+                                }
+                            }
+                            *portal_points.lock().unwrap_or_else(|e| e.into_inner()) = points;
+                            *residency.lock().unwrap_or_else(|e| e.into_inner()) = summary.detailed.clone();
+                            *coverage_state.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(summary);
                             *result.lock().unwrap_or_else(|e| e.into_inner()) = Some(frame);
                         }
                     }
-                })
-                .map_err(|error| eprintln!("Map worker failed: {error}"))
-                .ok();
+            }).map_err(|e| eprintln!("Map worker failed: {e}")).ok();
+            if worker.is_none() {
+                paused.store(true, Ordering::Release);
+                *status.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some("Map worker unavailable; sampling paused".into());
+            }
             Self {
                 tx: Mutex::new(Some(tx)),
                 worker: Mutex::new(worker),
@@ -3941,9 +5582,40 @@ pub mod maps {
                 resident,
                 coverage,
                 portals,
+                binding,
+                status,
+                paused,
             }
         }
+        pub fn configure(&self, session: u64, world: &str, dimension: Dimension, limit_mib: u16) {
+            let value = Binding {
+                session,
+                world: world.into(),
+                dimension,
+                limit: usize::from(limit_mib.clamp(16, 512)) * 1024 * 1024,
+            };
+            let mut binding = self.binding.lock().unwrap_or_else(|e| e.into_inner());
+            if binding.as_ref() == Some(&value) {
+                return;
+            }
+            *binding = Some(value);
+            drop(binding);
+            if let Some(tx) = self.tx.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+                let _ = tx.try_send(Job::Wake);
+            }
+        }
+        pub fn status(&self) -> Option<String> {
+            self.status
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        }
         pub fn reset(&self, session: u64) {
+            *self.binding.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            *self.latest.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            if let Some(tx) = self.tx.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+                let _ = tx.try_send(Job::Wake);
+            }
             self.session.store(session, Ordering::Release);
             *self.coverage.lock().unwrap_or_else(|e| e.into_inner()) =
                 Arc::new(Coverage::default());
@@ -3972,6 +5644,9 @@ pub mod maps {
             key: LodKey,
             sample: impl FnOnce() -> Tile + Send + 'static,
         ) -> bool {
+            if self.paused.load(Ordering::Acquire) {
+                return false;
+            }
             self.tx
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -4014,6 +5689,9 @@ pub mod maps {
             chunk: [i32; 2],
             sample: impl FnOnce() -> Tile + Send + 'static,
         ) -> bool {
+            if self.paused.load(Ordering::Acquire) {
+                return false;
+            }
             self.tx
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -4060,6 +5738,402 @@ pub mod maps {
     }
     #[cfg(test)]
     mod tests {
+        struct CacheDir(std::path::PathBuf);
+        impl CacheDir {
+            fn new(label: &str) -> Self {
+                static NEXT: AtomicU64 = AtomicU64::new(0);
+                let dir = std::env::temp_dir().join(format!(
+                    "mwwr-cache-{label}-{}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, Ordering::Relaxed)
+                ));
+                std::fs::create_dir(&dir).unwrap();
+                Self(dir)
+            }
+        }
+        impl Drop for CacheDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        fn saved_tile() -> Tile {
+            Tile {
+                pixels: [80, 120, 40, 255].repeat(256),
+                heights: [42; 256],
+                biomes: vec![Some(Arc::from("minecraft:forest")); 256],
+                portals: vec![([-16, 42, 0], Portal::Nether)],
+                ..Tile::default()
+            }
+        }
+        fn save_chunk(cache: &mut Cache, d: Dimension, l: Layer, at: [i32; 2], tile: Tile) {
+            cache.insert(d, l, at, tile);
+            let tile = cache.tiles[&(d, l, at[0], at[1])].1.clone();
+            cache.save(record_key(d, l, at[0], at[1]), tile).unwrap();
+            cache.trim().unwrap();
+        }
+        #[test]
+        fn persisted_layers_biomes_portals_and_lod_reload_after_eviction() {
+            let dir = CacheDir::new("reopen");
+            let world = "server:reopen:25565";
+            let limit = 1024 * 1024;
+            let mut cache = Cache::open(&dir.0, world, limit).unwrap();
+            save_chunk(
+                &mut cache,
+                Dimension::Overworld,
+                Layer::Surface,
+                [-1, 0],
+                saved_tile(),
+            );
+            let mut underground = saved_tile();
+            underground.heights = [12; 256];
+            save_chunk(
+                &mut cache,
+                Dimension::Overworld,
+                Layer::Below(16),
+                [-1, 0],
+                underground,
+            );
+            let lod = LodKey {
+                x: 0,
+                z: 0,
+                level: 3,
+            };
+            let tile = saved_tile();
+            cache.insert_lod(Dimension::Nether, lod, tile);
+            cache
+                .save(
+                    lod_record(Dimension::Nether, lod),
+                    cache.lod_tiles[&(Dimension::Nether, lod)].1.clone(),
+                )
+                .unwrap();
+            cache.flush().unwrap();
+            cache.clear_payloads();
+            assert_eq!(cache.bytes(), 0);
+            drop(cache);
+            let mut cache = Cache::open(&dir.0, world, limit).unwrap();
+            let mut v = view(Dimension::Overworld);
+            cache.prepare(&v).unwrap();
+            assert_eq!(cache.render(v.clone(), 1).known, 256);
+            let coverage = cache.coverage();
+            assert_eq!(
+                coverage
+                    .detailed_biome(Dimension::Overworld, Layer::Surface, [-16, 0])
+                    .as_deref(),
+                Some("minecraft:forest")
+            );
+            assert_eq!(
+                cache
+                    .tile_at((Dimension::Overworld, Layer::Surface, -1, 0))
+                    .unwrap()
+                    .portals
+                    .len(),
+                1
+            );
+            v.layer = Layer::Below(16);
+            cache.prepare(&v).unwrap();
+            assert_eq!(
+                cache
+                    .tile_at((Dimension::Overworld, v.layer, -1, 0))
+                    .unwrap()
+                    .heights,
+                [12; 256]
+            );
+            cache.clear_payloads();
+            let tile = cache.coarse_at(Dimension::Nether, lod).unwrap();
+            assert_eq!(tile.heights, [42; 256]);
+            // Refresh with unavailable biome information retains persisted names.
+            let mut fresh = saved_tile();
+            fresh.biomes.clear();
+            save_chunk(
+                &mut cache,
+                Dimension::Overworld,
+                Layer::Surface,
+                [-1, 0],
+                fresh,
+            );
+            assert_eq!(
+                cache.tiles[&(Dimension::Overworld, Layer::Surface, -1, 0)]
+                    .1
+                    .biomes[0]
+                    .as_deref(),
+                Some("minecraft:forest")
+            );
+        }
+        #[test]
+        fn ordinary_disk_tiles_use_the_gpu_atlas_within_the_ram_budget() {
+            let dir = CacheDir::new("atlas-budget");
+            let mut cache = Cache::open(&dir.0, "save:atlas-budget", 16 * 1024 * 1024).unwrap();
+            for x in 0..300 {
+                save_chunk(
+                    &mut cache,
+                    Dimension::Overworld,
+                    Layer::Surface,
+                    [x, 0],
+                    saved_tile(),
+                );
+            }
+            cache.flush().unwrap();
+            cache.clear_payloads();
+            let mut v = view(Dimension::Overworld);
+            v.center = [2400.0, 8.0];
+            v.span = [4800.0, 16.0];
+            cache.prepare(&v).unwrap();
+            assert_eq!(cache.tiles.len(), 300);
+            assert!(!cache.paged);
+            assert!(cache.gpu_atlas_fits(&v));
+        }
+        #[test]
+        fn raster_camera_moves_without_reuploading_the_worker_image() {
+            let source = Arc::new(Cache::default().render(view(Dimension::Overworld), 1));
+            let mut shown = None;
+            assert!(present_frame(&mut shown, source.clone(), |_, _, _| true));
+            let mut moved = source.view.clone();
+            moved.center[0] += 8.0;
+            let (src, dst) = raster_quad(&source.view, &moved, [0.0, 0.0, 160.0, 160.0]).unwrap();
+            assert_eq!(src, [8.0, 0.0, 8.0, 16.0]);
+            assert_eq!(dst, [0.0, 0.0, 80.0, 160.0]);
+            let next = Arc::new(Frame {
+                raster_source: Some(source.clone()),
+                serial: source.serial,
+                view: moved,
+                pixels: Vec::new(),
+                known: source.known,
+                atlas: None,
+            });
+            assert!(present_frame(&mut shown, next, |_, _, _| panic!(
+                "camera-only upload"
+            )));
+            let mut wide = source.view.clone();
+            wide.span = [32.0; 2];
+            assert_eq!(
+                raster_quad(&source.view, &wide, [0.0, 0.0, 160.0, 160.0])
+                    .unwrap()
+                    .1,
+                [40.0, 40.0, 80.0, 80.0]
+            );
+            wide.center = [1000.0; 2];
+            assert!(raster_quad(&source.view, &wide, [0.0, 0.0, 160.0, 160.0]).is_none());
+        }
+        #[test]
+        fn huge_view_pages_tiles_under_budget_and_detailed_void_still_masks_lod() {
+            let dir = CacheDir::new("budget");
+            let limit = 1024 * 1024;
+            let mut cache = Cache::open(&dir.0, "save:budget", limit).unwrap();
+            for x in 0..128 {
+                save_chunk(
+                    &mut cache,
+                    Dimension::Overworld,
+                    Layer::Surface,
+                    [x, 0],
+                    saved_tile(),
+                );
+            }
+            let mut empty = saved_tile();
+            empty.pixels.fill(0);
+            save_chunk(
+                &mut cache,
+                Dimension::Overworld,
+                Layer::Surface,
+                [0, 0],
+                empty,
+            );
+            let key = LodKey {
+                x: 0,
+                z: 0,
+                level: 7,
+            };
+            cache.insert_lod(Dimension::Overworld, key, saved_tile());
+            cache
+                .save(
+                    lod_record(Dimension::Overworld, key),
+                    cache.lod_tiles[&(Dimension::Overworld, key)].1.clone(),
+                )
+                .unwrap();
+            cache.flush().unwrap();
+            cache.clear_payloads();
+            let mut v = view(Dimension::Overworld);
+            v.center = [1024.0, 8.0];
+            v.span = [2048.0, 16.0];
+            v.width = 1024;
+            cache.prepare(&v).unwrap();
+            assert!(cache.paged);
+            assert!(!cache.gpu_atlas_fits(&v));
+            let frame = cache.render(v, 1);
+            assert_eq!(frame.known, 1024 * 16);
+            assert!(frame.pixels[..8 * 4].iter().all(|b| *b == 0));
+            let backing = cache.backing.as_ref().unwrap().borrow();
+            let reads = backing
+                .reads
+                .values()
+                .map(|(_, t)| tile_bytes(t))
+                .sum::<usize>();
+            assert!(cache.bytes() + reads + backing.store.pending_bytes() <= limit);
+        }
+        fn wait_frame(service: &Service, predicate: impl Fn(&Frame) -> bool) -> Arc<Frame> {
+            let start = Instant::now();
+            loop {
+                if let Some(frame) = service.frame()
+                    && predicate(&frame)
+                {
+                    return frame;
+                }
+                assert!(
+                    start.elapsed() < Duration::from_secs(5),
+                    "map worker timeout: {:?}",
+                    service.status()
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        #[test]
+        fn service_dimension_switch_flushes_and_releases_old_payload_then_restart_loads_disk() {
+            let dir = CacheDir::new("service");
+            let service = Service::with_directory(Some(dir.0.clone()));
+            service.reset(1);
+            service.configure(1, "server:restart", Dimension::Overworld, 64);
+            let mut v = view(Dimension::Overworld);
+            v.large = false;
+            service.request(v.clone());
+            assert!(service.submit(1, Dimension::Overworld, Layer::Surface, [-1, 0], saved_tile));
+            let old = wait_frame(&service, |f| f.known == 256);
+            drop(old);
+            let old_coverage = service.coverage();
+            let weak = Arc::downgrade(old_coverage.detailed_data.values().next().unwrap());
+            drop(old_coverage);
+            service.configure(1, "server:restart", Dimension::Nether, 64);
+            v.dimension = Dimension::Nether;
+            service.request(v.clone());
+            drop(wait_frame(&service, |f| {
+                f.view.dimension == Dimension::Nether
+            }));
+            assert!(weak.upgrade().is_none(), "old dimension tiles retained");
+            assert!(service.coverage().detailed_data.is_empty());
+            service.shutdown();
+            drop(service);
+            let reopened = Service::with_directory(Some(dir.0.clone()));
+            reopened.reset(2);
+            reopened.configure(2, "server:restart", Dimension::Overworld, 64);
+            v.session = 2;
+            v.dimension = Dimension::Overworld;
+            reopened.request(v);
+            assert_eq!(wait_frame(&reopened, |f| f.known == 256).known, 256);
+            reopened.shutdown();
+            assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 1);
+        }
+        #[test]
+        fn failed_writer_keeps_pending_data_and_service_stops_accepting_samples() {
+            let dir = CacheDir::new("write-error");
+            let anonymous_dir = dir.0.join("anonymous");
+            let anonymous = Service::with_directory(Some(anonymous_dir.clone()));
+            anonymous.reset(1);
+            anonymous.configure(1, "", Dimension::Overworld, 16);
+            let mut anonymous_view = view(Dimension::Overworld);
+            anonymous_view.large = false;
+            anonymous.request(anonymous_view);
+            assert!(anonymous.submit(1, Dimension::Overworld, Layer::Surface, [-1, 0], saved_tile));
+            drop(wait_frame(&anonymous, |f| f.known == 256));
+            assert!(anonymous.status().is_some());
+            anonymous.shutdown();
+            assert!(
+                !anonymous_dir.exists(),
+                "unknown identity must not create an unscoped cache"
+            );
+
+            let mut cache = Cache::open(&dir.0, "server:write-error", 1024 * 1024).unwrap();
+            save_chunk(
+                &mut cache,
+                Dimension::Overworld,
+                Layer::Surface,
+                [0, 0],
+                saved_tile(),
+            );
+            let bytes = cache.bytes();
+            let pending = cache
+                .backing
+                .as_ref()
+                .unwrap()
+                .borrow()
+                .store
+                .pending_bytes();
+            cache
+                .backing
+                .as_ref()
+                .unwrap()
+                .borrow_mut()
+                .store
+                .write_budget = Some(0);
+            assert!(cache.flush().is_err());
+            assert_eq!(cache.bytes(), bytes);
+            assert_eq!(
+                cache
+                    .backing
+                    .as_ref()
+                    .unwrap()
+                    .borrow()
+                    .store
+                    .pending_bytes(),
+                pending
+            );
+            drop(cache);
+            let service = Service::with_directory(Some(dir.0.clone()));
+            service.reset(1);
+            service.configure(1, "server:encode-error", Dimension::Overworld, 64);
+            assert!(service.submit(
+                1,
+                Dimension::Overworld,
+                Layer::Surface,
+                [0, 0],
+                Tile::default
+            ));
+            let start = Instant::now();
+            while !service.paused.load(Ordering::Acquire) {
+                assert!(start.elapsed() < Duration::from_secs(5));
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(service.status().is_some());
+            assert!(!service.submit(1, Dimension::Overworld, Layer::Surface, [1, 0], saved_tile));
+            assert!(!service.submit_lod(
+                1,
+                Dimension::Overworld,
+                LodKey {
+                    x: 0,
+                    z: 0,
+                    level: 1
+                },
+                saved_tile
+            ));
+            service.shutdown();
+        }
+        #[test]
+        fn tile_decoder_rejects_truncation_and_bounded_strings() {
+            let bytes = tile_encode(&saved_tile()).unwrap();
+            for len in [0, 4, 100, 1028, 2050, bytes.len() - 1] {
+                assert!(tile_decode(&bytes[..len]).is_err());
+            }
+            let mut bad = saved_tile();
+            bad.biomes[0] = Some(Arc::from("a".repeat(257)));
+            assert!(tile_encode(&bad).is_err());
+            assert_eq!(tile_decode(&bytes).unwrap().heights, [42; 256]);
+            // The sampler can retain each of three portal kinds per column.
+            let mut mixed = saved_tile();
+            mixed.portals.clear();
+            for x in 0..16 {
+                for z in 0..16 {
+                    for kind in [Portal::Nether, Portal::End, Portal::Gateway] {
+                        mixed.portals.push(([x, 42, z], kind));
+                    }
+                }
+            }
+            assert_eq!(
+                tile_decode(&tile_encode(&mixed).unwrap())
+                    .unwrap()
+                    .portals
+                    .len(),
+                MAX_TILE_PORTALS
+            );
+            assert!(tile_bytes(&mixed) <= 128 * 1024);
+        }
+
         use super::*;
         fn view(d: Dimension) -> View {
             View {
@@ -4157,6 +6231,7 @@ pub mod maps {
             v.span = [512.0; 2];
             let make_frame = |atlas: Arc<TerrainAtlas>, view: View| {
                 Arc::new(Frame {
+                    raster_source: None,
                     serial: 7,
                     view,
                     pixels: Vec::new(),
@@ -4585,7 +6660,7 @@ pub mod maps {
             );
             assert_eq!(
                 cache.lod_pixel(Dimension::Overworld, Layer::Surface, [5, 5]),
-                Some([20, 20, 20, 255].as_slice())
+                Some([20, 20, 20, 255])
             );
             let detailed = BTreeSet::from([[0, 0]]);
             let fragments = lod_fragments(coarse, &detailed);
@@ -4658,11 +6733,11 @@ pub mod maps {
             assert!(cache.insert_lod(Dimension::Overworld, key, coarse_tile([40, 50, 60])));
             assert_eq!(
                 cache.lod_pixel(Dimension::Overworld, Layer::Surface, [0, 0]),
-                Some([10, 20, 30, 255].as_slice())
+                Some([10, 20, 30, 255])
             );
             assert_eq!(
                 cache.lod_pixel(Dimension::Overworld, Layer::Surface, [4, 0]),
-                Some([40, 50, 60, 255].as_slice())
+                Some([40, 50, 60, 255])
             );
             assert!(!cache.insert_lod(Dimension::Overworld, key, coarse_tile([99, 99, 99])));
         }

@@ -24,12 +24,13 @@
 
 // Inject as options_ui::minimap_binding_ui in horizon-client-render. This module
 // deliberately depends only on that crate, not on the gameplay runtime.
-use super::{Act, OptionsUi, Row, WKind, Widget, button, inactive};
+use super::{Act, Event, OptionsUi, Page, Row, WKind, Widget, button, inactive};
 use crate::{
     keybinds::{self, all_mappings},
     lang,
     settings::Settings,
     text::{self, Text},
+    ui,
 };
 
 fn bound(key: &str) -> bool {
@@ -127,7 +128,11 @@ pub(super) fn native_rows(ui: &OptionsUi, s: &Settings, i: usize) -> Vec<Row> {
             0.0,
             0.0,
             310.0,
-            Text::literal(label.clone()),
+            Text::literal(if m.id == CACHE_MOD && b == CACHE_BUTTON {
+                format!("\u{2063}\u{2063}{label}")
+            } else {
+                label.clone()
+            }),
             Act::NativeButton(i, b),
         );
         rows.push(Row::Buttons(widget, None));
@@ -186,6 +191,51 @@ mod tests {
             }),
         });
         i
+    }
+
+    #[test]
+    fn cache_slider_drag_uses_native_setting_events_and_release_stops_dragging() {
+        let mut s = Settings::default();
+        let index = install(&mut s, CACHE_MOD, "Map", &[]);
+        s.mods.installed[index].native.as_mut().unwrap().buttons = vec!["Other".into(); 14];
+        s.mods.installed[index].native.as_mut().unwrap().buttons[13] = "Map RAM: 64 MiB".into();
+        let mut ui = OptionsUi::default();
+        ui.open_at(true, Page::NativeMod(index));
+        // Scroll this lower row into view, just as the options list does.
+        ui.scroll = 10000.0;
+        let (_, wd) = cache_widget(&mut ui, &s, (800.0, 600.0)).unwrap();
+        assert!(
+            matches!(&wd.kind,WKind::Button {label,..} if label.plain().starts_with("\u{2063}\u{2063}"))
+        );
+        assert_eq!(
+            cache_click(
+                &mut ui,
+                &s,
+                wd.x + 4.0,
+                wd.y + 5.0,
+                (800.0, 600.0),
+                false,
+                false
+            ),
+            Some(vec![Event::NativeButton(index, 0x10000 | 16)])
+        );
+        assert_eq!(
+            cache_click(
+                &mut ui,
+                &s,
+                wd.x + wd.w + 100.0,
+                wd.y - 100.0,
+                (800.0, 600.0),
+                true,
+                false
+            ),
+            Some(vec![Event::NativeButton(index, 0x10000 | 512)])
+        );
+        cache_release();
+        assert_eq!(
+            cache_click(&mut ui, &s, wd.x + wd.w, wd.y, (800.0, 600.0), true, false),
+            None
+        );
     }
 
     fn choose(s: &mut Settings, id: &str, name: &str, key: &str) {
@@ -425,4 +475,113 @@ mod tests {
             assert!(tooltip(&s, &settings).is_none());
         });
     }
+}
+
+// Native mod buttons have no built-in slider ABI. Keep their existing action
+// for keyboard activation and draw/handle the RAM control on that same row.
+const CACHE_MOD: &str = "minimap_worldmap_waypoints_reworked";
+const CACHE_BUTTON: usize = 13;
+static CACHE_DRAGS: std::sync::Mutex<std::collections::BTreeMap<usize, usize>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+fn cache_widget(ui: &mut OptionsUi, s: &Settings, size: (f32, f32)) -> Option<(usize, Widget)> {
+    if ui.resource_error.is_some() || ui.selected_key.is_some() || ui.selected_native_key.is_some()
+    {
+        return None;
+    }
+    let Page::NativeMod(index) = ui.page() else {
+        return None;
+    };
+    if s.mods.installed.get(index)?.id != CACHE_MOD {
+        return None;
+    }
+    let (widgets, top, bottom, _) = ui.layout(s, size.0, size.1);
+    let widget = widgets.into_iter().find(|w| {
+        matches!(&w.kind,
+        WKind::Button {act: Act::NativeButton(i, CACHE_BUTTON), ..} if *i == index)
+    })?;
+    if widget.y < top || widget.y + widget.h > bottom {
+        return None;
+    }
+    Some((index, widget))
+}
+pub(crate) fn cache_draw(
+    batch: &mut crate::hud::HudBatch,
+    atlas: &crate::hud::HudAtlas,
+    rect: [f32; 4],
+    label: &Text,
+    active: bool,
+    hover: bool,
+) -> bool {
+    let plain = label.plain();
+    let Some(caption) = plain.strip_prefix("\u{2063}\u{2063}") else {
+        return false;
+    };
+    let Some(value) = caption
+        .split_whitespace()
+        .find_map(|w| w.parse::<u16>().ok())
+        .filter(|v| (16..=512).contains(v))
+    else {
+        return false;
+    };
+    let value = (f32::from(value) - 16.0) / 496.0;
+    let dragging = !CACHE_DRAGS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_empty();
+    ui::slider_ext(
+        batch,
+        atlas,
+        rect[0],
+        rect[1],
+        rect[2],
+        &Text::literal(caption),
+        value,
+        hover || dragging,
+        false,
+        false,
+        active,
+        dragging,
+    );
+    true
+}
+pub(super) fn cache_click(
+    ui: &mut OptionsUi,
+    s: &Settings,
+    x: f32,
+    y: f32,
+    size: (f32, f32),
+    drag: bool,
+    right: bool,
+) -> Option<Vec<Event>> {
+    let owner = s as *const Settings as usize;
+    let mut drags = CACHE_DRAGS.lock().unwrap_or_else(|e| e.into_inner());
+    if !drag {
+        drags.remove(&owner);
+    }
+    if right {
+        return None;
+    }
+    let Some((index, wd)) = cache_widget(ui, s, size) else {
+        drags.remove(&owner);
+        return None;
+    };
+    if drag {
+        if drags.get(&owner) != Some(&index) {
+            return None;
+        }
+    } else {
+        if !ui::hovered((x, y), wd.x, wd.y, wd.w, wd.h) {
+            return None;
+        }
+        drags.insert(owner, index);
+    }
+    let value = 16 + (ui::slider_value(wd.x, wd.w, x).clamp(0.0, 1.0) * 31.0).round() as usize * 16;
+    Some(vec![Event::NativeButton(index, 0x10000 | value)])
+}
+pub(super) fn cache_release() {
+    CACHE_DRAGS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
 }
