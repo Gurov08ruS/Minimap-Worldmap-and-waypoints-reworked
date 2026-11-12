@@ -99,14 +99,14 @@ language in its language settings. Saved waypoint names are preserved as entered
   and End. Each of the 67 vanilla
   biomes has its own original 16×16 pixel icon, including sulfur caves and the void;
   hover over a waypoint's biome icon for its localized name.
-  Waypoint biome samples are kept for the current connection when their chunks
-  are loaded. Unavailable or unrecognized biome data uses a question mark;
-  no terrain is requested from the server to fill it in.
+  Each waypoint's biome sample is saved with it in `settings.ini`, so it
+  survives chunk unloads, dimension changes and reconnecting. Unavailable or
+  unrecognized biome data uses a question mark; no terrain is requested from
+  the server to fill it in.
   Detailed terrain retains the sampled biome of each column, independently of
-  the game's loaded chunks. Names and icons stay available after chunk unload
-  and dimension changes, for that connection and sampled height layer. The
-  biome is sampled at the visible surface (including the top of water), while
-  relief continues to follow the seabed. Disconnect clears this RAM cache.
+  the game's loaded chunks. The biome is sampled at the visible surface
+  (including the top of water), while relief continues to follow the seabed.
+  The terrain's own per-column biome cache still lives in RAM until disconnect.
 - The waypoint manager has a translucent background with menu blur disabled.
 - **Overworld coordinates** and **Nether coordinates** independently toggle the
   coordinate lines below the minimap (both default on). X/Z convert by ×8/÷8
@@ -147,13 +147,21 @@ language in its language settings. Saved waypoint names are preserved as entered
   waypoint manager (**N**) lists, edits and deletes waypoints; creation from
   there uses the player's position. **Edit** changes both the name and marker
   colour. Each row shows the first letter in the waypoint's colour, the biome
-  beside the name, and the dimension icon beside the dimension text. Select a
-  waypoint and choose **Show on map** to open its dimension and center the map
-  on it without teleporting.
+  beside the name, and the dimension icon beside the dimension text. Death
+  waypoints show a skull instead of the letter. Select a waypoint and choose
+  **Show on map** to open its dimension and center the map on it without
+  teleporting.
 - Waypoints are saved with the preferences (newest 64 per world/server). In the
   3D world they appear above the HUD as coloured first-letter markers with their
   name and distance, through walls and only in their own dimension. On both maps
   their full name appears when hovering over the marker.
+- **Death waypoints** are placed automatically where the player dies: a black
+  marker with a skull, named `Death`, `Death 2`, `Death 3` and so on. Two
+  settings control them: **Death waypoints** (create on death, default on) and
+  **Remove death waypoints when reached** (default on). Approaching a death
+  waypoint within four blocks removes it; the proximity check uses all three
+  coordinates and only the player's current dimension. Both options can be
+  switched off independently in the mod's settings.
 - Nether portals, End portals and End gateways are marked on the map; clicking
   one opens its destination. Nether destinations prefer the nearest known portal
   within the vanilla search radius, otherwise the ×8/÷8 conversion; End portals
@@ -265,8 +273,10 @@ have Horizon's public invite identity, which can change between sharings.
 Migration deliberately deletes old `waypoint=` records without a world identity,
 as requested by the author; it never guesses a destination world. Valid scoped
 `waypoint_v2=` records survive with the default marker colour and are rewritten
-as `waypoint_v3=` with their colour; preferences also survive. The migration is
-persisted even without joining a world or editing settings. Each world keeps its newest 64
+as `waypoint_v4=` with their colour, a letter icon and an empty biome;
+`waypoint_v3=` records upgrade the same way on the next save. Preferences also
+survive. The migration is persisted even without joining a world or editing
+settings. Each world keeps its newest 64
 points; at 4,096 total points new worlds/points are refused rather than evicting
 another world's records. Portal
 destinations are computed on the client: a Nether portal prefers the nearest

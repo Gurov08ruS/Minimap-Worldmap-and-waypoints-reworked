@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Place a black skull waypoint automatically where the player dies. Repeated
+  deaths add `Death 2`, `Death 3` and so on. Creation and proximity removal can
+  be switched off independently in the mod settings; reaching a death waypoint
+  within four blocks removes it.
+- Save each waypoint's sampled biome in `settings.ini` (`waypoint_v4=`), so
+  biome names and icons survive chunk unloads, dimension changes and reconnects
+  instead of living only in the current connection's memory. Older `v2`/`v3`
+  records load unchanged with a letter icon and an empty biome.
+
 ## 0.5.1 — 2026-11-11
 
 - Publish from the Gurov08ruS repository while preserving the original signed

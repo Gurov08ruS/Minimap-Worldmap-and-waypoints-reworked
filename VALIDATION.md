@@ -1,5 +1,25 @@
 # Validation
 
+## Unreleased — death waypoints and persistent biome samples, 2026-11-12
+
+Validated on Linux with Rust 1.95.0 and the unchanged compatibility pins.
+
+- Formatting and clippy with warnings denied: pass.
+- Locked offline workspace tests: 59 runtime tests and one source-audit test
+  passed; one manual benchmark ignored.
+- New regressions cover death-waypoint settings and reset, numbered black skull
+  points, rejection of duplicates, three-dimensional reach, and biome samples
+  surviving a controller reopen. Older `v2`/`v3` records load as letter points
+  without a biome.
+- Template integration, full source audit and deterministic AST staging: pass;
+  the original Horizon checkout and its existing changes are preserved.
+- Actual pinned Horizon client check: pass.
+- Runtime tests inside the pinned client: 59 passed, one benchmark ignored;
+  injected client adapter tests: 10 passed.
+- Live death, respawn and proximity pickup were not exercised in-game. Visual
+  review of the skull marker, FPS profiling and macOS/Windows runs were not
+  performed.
+
 ## 0.5.1 — signed release validation, 2026-11-11
 
 Validated on Linux with Rust 1.95.0 and the unchanged compatibility pins.

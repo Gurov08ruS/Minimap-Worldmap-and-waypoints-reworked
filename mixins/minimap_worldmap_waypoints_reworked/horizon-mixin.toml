@@ -54,6 +54,13 @@ helper = "key.rs"
 bindings = [{ name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" }, { name = "key", ty = "&str", value = "key" }, { name = "pressed", ty = "bool", value = "pressed" }]
 
 [[injection]]
+id = "map-packet"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_client_packet"
+helper = "packet.rs"
+bindings = [{ name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" }, { name = "packet", ty = "&horizon_client::mod_api::ClientboundPlayPacket", value = "packet" }]
+
+[[injection]]
 id = "map-frame"
 kind = "HEAD"
 target = "horizon_client::game::native_hooks::Game<'_>::native_frame"

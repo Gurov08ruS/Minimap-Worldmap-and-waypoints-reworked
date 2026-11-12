@@ -325,7 +325,6 @@ struct State {
     pending_copy: Option<String>,
     pending_command: Option<String>,
     map_focus: Option<Spot>,
-    waypoint_biomes: BTreeMap<Spot, String>,
     leaves: Option<(u64, Arc<LeafPalette>)>,
     lod_elapsed: f64,
     lod_sources:
@@ -360,7 +359,6 @@ impl Default for State {
             pending_copy: None,
             pending_command: None,
             map_focus: None,
-            waypoint_biomes: BTreeMap::new(),
             leaves: None,
             lod_elapsed: 1.0,
             lod_sources: BTreeMap::new(),
@@ -675,6 +673,43 @@ fn biome_icon(game: &Game<'_>, batch: &mut HudBatch, biome: Option<&str>, at: [f
     }
 }
 
+// A small skull for automatic death waypoints, drawn from relative blocks so
+// it stays legible on the map, in the world and in the waypoint list.
+fn draw_skull(game: &Game<'_>, batch: &mut HudBatch, at: [f32; 2], size: f32) {
+    let u = size / 8.0;
+    let bone = 0xffe9e6dc;
+    let socket = 0xff14171c;
+    game.native_fill(
+        batch,
+        [at[0] - 3.0 * u, at[1] - 3.0 * u, 6.0 * u, 5.0 * u],
+        bone,
+    );
+    game.native_fill(
+        batch,
+        [at[0] - 2.0 * u, at[1] + 2.0 * u, 4.0 * u, 1.5 * u],
+        bone,
+    );
+    for x in [-2.0, 0.75] {
+        game.native_fill(
+            batch,
+            [at[0] + x * u, at[1] - 1.5 * u, 1.25 * u, 1.75 * u],
+            socket,
+        );
+    }
+    game.native_fill(
+        batch,
+        [at[0] - 0.5 * u, at[1] + 0.5 * u, 1.0 * u, 1.25 * u],
+        socket,
+    );
+    for x in [-1.0, 0.5] {
+        game.native_fill(
+            batch,
+            [at[0] + x * u, at[1] + 2.0 * u, 0.5 * u, 1.5 * u],
+            socket,
+        );
+    }
+}
+
 fn portal_label(kind: Portal) -> &'static str {
     match kind {
         Portal::Nether => tr(
@@ -843,6 +878,10 @@ fn draw_waypoint(
         [x - half, y - half, size, size],
         waypoint_argb(waypoint.color),
     );
+    if waypoint.icon == runtime::WaypointIcon::Skull {
+        draw_skull(game, batch, [x, y], size * 0.95);
+        return;
+    }
     let letter = first_letter(&waypoint.name).to_string();
     game.native_text(
         batch,
@@ -1616,15 +1655,20 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         } else if inside(mouse, row) {
             game.native_fill(batch, row, 0xff222b35);
         }
-        let letter = first_letter(&waypoint.name).to_string();
         let letter_x = row[0] + 6.0;
-        game.native_text(
-            batch,
-            &letter,
-            [letter_x, row[1] + 3.0],
-            waypoint_argb(waypoint.color),
-            false,
-        );
+        if waypoint.icon == runtime::WaypointIcon::Skull {
+            draw_skull(game, batch, [letter_x + 4.0, row[1] + 8.0], 10.0);
+        }
+        let letter = first_letter(&waypoint.name).to_string();
+        if waypoint.icon == runtime::WaypointIcon::Letter {
+            game.native_text(
+                batch,
+                &letter,
+                [letter_x, row[1] + 3.0],
+                waypoint_argb(waypoint.color),
+                false,
+            );
+        }
         let name_x = letter_x + game.native_text_width(&letter).max(6.0) + 6.0;
         game.native_text(
             batch,
@@ -1633,12 +1677,7 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             0xffffff,
             false,
         );
-        let spot = Spot {
-            dimension: waypoint.dimension,
-            x: waypoint.x,
-            z: waypoint.z,
-        };
-        let biome = state.waypoint_biomes.get(&spot).map(String::as_str);
+        let biome = waypoint.biome.as_deref();
         let biome_x = name_x + game.native_text_width(&waypoint.name) + 7.0;
         let right = row[0] + row[2] - 4.0;
         if biome_x + runtime::BIOME_ICON_SIZE as f32 <= right {
@@ -2338,14 +2377,18 @@ fn draw_world_waypoints(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             [x - 5.0, y - 5.0, 10.0, 10.0],
             waypoint_argb(waypoint.color),
         );
-        let letter = first_letter(&waypoint.name).to_string();
-        game.native_text(
-            batch,
-            &letter,
-            [x - game.native_text_width(&letter) / 2.0, y - 4.0],
-            0xff201800,
-            false,
-        );
+        if waypoint.icon == runtime::WaypointIcon::Skull {
+            draw_skull(game, batch, [x, y], 9.5);
+        } else {
+            let letter = first_letter(&waypoint.name).to_string();
+            game.native_text(
+                batch,
+                &letter,
+                [x - game.native_text_width(&letter) / 2.0, y - 4.0],
+                0xff201800,
+                false,
+            );
+        }
         let dx = f64::from(waypoint.x) + 0.5 - player.x;
         let dy = f64::from(waypoint.y) + 1.5 - player.y;
         let dz = f64::from(waypoint.z) + 0.5 - player.z;
@@ -2366,13 +2409,12 @@ fn draw_world_waypoints(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             [label_x - 3.0, label_y - 2.0, width + 6.0, 11.0],
             0xd010151d,
         );
-        game.native_text(
-            batch,
-            &label,
-            [label_x, label_y],
-            waypoint_argb(waypoint.color),
-            true,
-        );
+        let label_color = if waypoint.icon == runtime::WaypointIcon::Skull {
+            0xffe9e6dc
+        } else {
+            waypoint_argb(waypoint.color)
+        };
+        game.native_text(batch, &label, [label_x, label_y], label_color, true);
     }
 }
 
@@ -2404,6 +2446,55 @@ fn complete_map_view(
         return previous.clone();
     }
     prepared.clone()
+}
+
+fn waypoint_identity(
+    identity: &super::native_client_services::NativeClientState,
+) -> Option<String> {
+    use super::native_client_services::NativeWorldId;
+    match identity.world.as_ref()? {
+        NativeWorldId::Singleplayer(folder) => runtime::waypoint_world(true, folder),
+        NativeWorldId::Server(address) => runtime::waypoint_world(false, address),
+    }
+}
+
+/// Hears the server's death screen packet. The player has not respawned yet,
+/// so their current block position is the place they died.
+pub(super) fn client_packet(
+    game: &mut Game<'_>,
+    packet: &horizon_client::mod_api::ClientboundPlayPacket,
+) {
+    use horizon_client::mod_api::ClientboundPlayPacket;
+    if !matches!(packet, ClientboundPlayPacket::PlayerCombatKill(_))
+        || !game.native_window()
+        || !game.native_on(runtime::MOD_ID)
+    {
+        return;
+    }
+    let controller = runtime::initialize(game.native_data_dir(runtime::MOD_ID));
+    if !controller.settings().death_waypoints {
+        return;
+    }
+    let Some(player) = game.native_player() else {
+        return;
+    };
+    let Some(identity) = game.native_client_state() else {
+        return;
+    };
+    let Some(world) = waypoint_identity(&identity) else {
+        return;
+    };
+    let dimension = Dimension::from_id(player.dimension);
+    if dimension == Dimension::Player {
+        return;
+    }
+    let at = [
+        player.x.floor() as i32,
+        player.y.floor() as i32,
+        player.z.floor() as i32,
+    ];
+    let biome = known_biome(game, dimension, at);
+    controller.add_death_waypoint(&world, dimension, at[0], at[1], at[2], biome.as_deref());
 }
 
 pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
@@ -2467,13 +2558,7 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
         }
     }
     state.portals = controller.maps.portals();
-    use super::native_client_services::NativeWorldId;
-    let world = match identity.world.as_ref() {
-        Some(NativeWorldId::Singleplayer(folder)) => runtime::waypoint_world(true, folder),
-        Some(NativeWorldId::Server(address)) => runtime::waypoint_world(false, address),
-        _ => None,
-    }
-    .unwrap_or_default();
+    let world = waypoint_identity(&identity).unwrap_or_default();
     if state.world != world {
         let next = state.session + 1;
         *state = State {
@@ -2501,6 +2586,23 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
     };
     state.layers.insert(dimension, layer);
     let settings = controller.settings();
+    if settings.death_waypoint_auto_remove && dimension != Dimension::Player {
+        let reached: Vec<_> = state
+            .waypoints
+            .iter()
+            .filter(|waypoint| {
+                waypoint.dimension == dimension
+                    && runtime::death_waypoint_reached([player.x, player.y, player.z], waypoint)
+            })
+            .map(|waypoint| (waypoint.x, waypoint.z))
+            .collect();
+        if !reached.is_empty() {
+            for (x, z) in reached {
+                controller.remove_waypoint(&state.world, dimension, x, z);
+            }
+            state.waypoints = controller.waypoints(&state.world);
+        }
+    }
     let screen_open = game.native_mod_screen() == Some(runtime::MOD_ID);
     let large = screen_open && state.mode == Mode::Map;
     let selected = if large {
@@ -2690,38 +2792,29 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
     state.elapsed += dt;
     if state.elapsed >= 0.05 {
         state.elapsed = 0.0;
-        let known: Vec<_> = state
-            .waypoints
-            .iter()
-            .filter_map(|waypoint| {
-                known_biome(
-                    game,
+        // Persist each newly sampled biome with its waypoint. Only a change
+        // reaches the settings worker, so an unchanged sample writes nothing.
+        for index in 0..state.waypoints.len() {
+            let (world, dimension, x, y, z, current) = {
+                let waypoint = &state.waypoints[index];
+                (
+                    waypoint.world.clone(),
                     waypoint.dimension,
-                    [waypoint.x, waypoint.y, waypoint.z],
+                    waypoint.x,
+                    waypoint.y,
+                    waypoint.z,
+                    waypoint.biome.clone(),
                 )
-                .map(|biome| {
-                    (
-                        Spot {
-                            dimension: waypoint.dimension,
-                            x: waypoint.x,
-                            z: waypoint.z,
-                        },
-                        biome,
-                    )
-                })
-            })
-            .collect();
-        let spots: Vec<_> = state
-            .waypoints
-            .iter()
-            .map(|w| Spot {
-                dimension: w.dimension,
-                x: w.x,
-                z: w.z,
-            })
-            .collect();
-        state.waypoint_biomes.retain(|spot, _| spots.contains(spot));
-        state.waypoint_biomes.extend(known);
+            };
+            let Some(biome) = known_biome(game, dimension, [x, y, z]) else {
+                continue;
+            };
+            if current.as_deref() == Some(biome.as_str()) {
+                continue;
+            }
+            state.waypoints[index].biome = Some(biome.clone());
+            controller.update_waypoint_biome(&world, dimension, x, z, &biome);
+        }
         let cx = (player.x.floor() as i32).div_euclid(16);
         let cz = (player.z.floor() as i32).div_euclid(16);
         let mut chunks: Vec<_> = game
@@ -4207,6 +4300,7 @@ fn save_name(game: &Game<'_>, state: &mut State) {
             Instant::now(),
         ));
     } else if let Some(target) = form.target {
+        let biome = known_biome(game, target.dimension, [target.x, target.y, target.z]);
         let saved = controller.add_waypoint(Waypoint {
             world: state.world.clone(),
             dimension: target.dimension,
@@ -4215,6 +4309,8 @@ fn save_name(game: &Game<'_>, state: &mut State) {
             z: target.z,
             name: Waypoint::clean_name(&form.text),
             color: form.color,
+            icon: runtime::WaypointIcon::Letter,
+            biome,
         });
         state.notice = Some((
             if saved {
@@ -4419,6 +4515,8 @@ mod render_tests {
             z: 230,
             name: "Base".into(),
             color: 0xff6b6b,
+            icon: runtime::WaypointIcon::Letter,
+            biome: None,
         });
         state.waypoint_selected = Some(0);
         let zoom = state.camera.zoom;

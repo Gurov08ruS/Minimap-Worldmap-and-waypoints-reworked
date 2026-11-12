@@ -235,6 +235,8 @@ pub mod minimap {
         pub world_dimension: super::Dimension,
         pub overworld_coordinates: bool,
         pub nether_coordinates: bool,
+        pub death_waypoints: bool,
+        pub death_waypoint_auto_remove: bool,
     }
 
     impl Default for Settings {
@@ -250,6 +252,8 @@ pub mod minimap {
                 world_dimension: super::Dimension::Player,
                 overworld_coordinates: true,
                 nether_coordinates: true,
+                death_waypoints: true,
+                death_waypoint_auto_remove: true,
             }
         }
     }
@@ -280,6 +284,13 @@ pub mod minimap {
                     }
                     "nether_coordinates" => {
                         value.nether_coordinates = raw.parse().unwrap_or(value.nether_coordinates)
+                    }
+                    "death_waypoints" => {
+                        value.death_waypoints = raw.parse().unwrap_or(value.death_waypoints)
+                    }
+                    "death_waypoint_auto_remove" => {
+                        value.death_waypoint_auto_remove =
+                            raw.parse().unwrap_or(value.death_waypoint_auto_remove)
                     }
                     "enabled" => value.enabled = raw.parse().unwrap_or(value.enabled),
                     "corner" => {
@@ -317,7 +328,7 @@ pub mod minimap {
 
         pub fn encode(self) -> String {
             format!(
-                "# Minimap Reworked settings\nenabled={}\ncorner={}\nsize={}\nshape={}\nzoom={}\nrotate={}\nmini_dimension={}\nworld_dimension={}\noverworld_coordinates={}\nnether_coordinates={}\n",
+                "# Minimap Reworked settings\nenabled={}\ncorner={}\nsize={}\nshape={}\nzoom={}\nrotate={}\nmini_dimension={}\nworld_dimension={}\noverworld_coordinates={}\nnether_coordinates={}\ndeath_waypoints={}\ndeath_waypoint_auto_remove={}\n",
                 self.enabled,
                 self.corner.name(),
                 self.size_px,
@@ -328,6 +339,8 @@ pub mod minimap {
                 self.world_dimension.name(),
                 self.overworld_coordinates,
                 self.nether_coordinates,
+                self.death_waypoints,
+                self.death_waypoint_auto_remove,
             )
         }
 
@@ -348,7 +361,7 @@ pub mod minimap {
                 5 => self.rotate_with_player = !self.rotate_with_player,
                 6 => {
                     *self = Self::default();
-                    return 0x7bf;
+                    return 0x1fbf;
                 }
                 7 => {
                     self.mini_dimension = super::cycle(self.mini_dimension, &super::Dimension::ALL)
@@ -359,6 +372,8 @@ pub mod minimap {
                 }
                 9 => self.overworld_coordinates = !self.overworld_coordinates,
                 10 => self.nether_coordinates = !self.nether_coordinates,
+                11 => self.death_waypoints = !self.death_waypoints,
+                12 => self.death_waypoint_auto_remove = !self.death_waypoint_auto_remove,
                 _ => return 0,
             }
             1 << button
@@ -392,6 +407,12 @@ pub mod minimap {
             }
             if mask & 1024 != 0 {
                 self.nether_coordinates = edited.nether_coordinates;
+            }
+            if mask & 2048 != 0 {
+                self.death_waypoints = edited.death_waypoints;
+            }
+            if mask & 4096 != 0 {
+                self.death_waypoint_auto_remove = edited.death_waypoint_auto_remove;
             }
             if mask & 32 != 0 {
                 self.rotate_with_player = edited.rotate_with_player;
@@ -498,6 +519,22 @@ pub mod minimap {
                     "Coordenadas del Nether: {}",
                     "Nether-Koordinaten: {}",
                     on(self.nether_coordinates)
+                ),
+                localized_format!(
+                    "Death waypoints: {}",
+                    "Вейпоинты смерти: {}",
+                    "Repères de mort : {}",
+                    "Marcadores de muerte: {}",
+                    "Todes-Wegpunkte: {}",
+                    on(self.death_waypoints)
+                ),
+                localized_format!(
+                    "Remove death waypoints when reached: {}",
+                    "Удалять вейпоинты смерти при приближении: {}",
+                    "Supprimer les repères de mort à l’approche : {}",
+                    "Eliminar marcadores de muerte al acercarse: {}",
+                    "Todes-Wegpunkte bei Annäherung entfernen: {}",
+                    on(self.death_waypoint_auto_remove)
                 ),
             ]
         }
@@ -1384,8 +1421,35 @@ pub const WAYPOINT_COLORS: [u32; 8] = [
 ];
 pub const DEFAULT_WAYPOINT_COLOR: u32 = WAYPOINT_COLORS[0];
 
+/// The pictogram a waypoint's marker shows. Automatic death waypoints use a
+/// skull; every other point, including older records, shows its first letter.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum WaypointIcon {
+    #[default]
+    Letter,
+    Skull,
+}
+
+impl WaypointIcon {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Letter => "letter",
+            Self::Skull => "skull",
+        }
+    }
+
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "letter" => Some(Self::Letter),
+            "skull" => Some(Self::Skull),
+            _ => None,
+        }
+    }
+}
+
 /// A point on a map: the dimension it belongs to, its block coordinates, the
-/// name and marker colour the player gave it.
+/// name, marker colour and icon the player gave it, and the biome sampled
+/// there, kept with the point so it survives chunk unloads and reconnects.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Waypoint {
     pub world: String,
@@ -1396,7 +1460,16 @@ pub struct Waypoint {
     pub name: String,
     /// 0xRRGGBB, never carrying alpha.
     pub color: u32,
+    pub icon: WaypointIcon,
+    /// Namespaced biome id (for example `minecraft:dappled_forest`), once known.
+    pub biome: Option<String>,
 }
+
+/// Automatic death waypoints start black so their skull stands out.
+pub const DEATH_WAYPOINT_COLOR: u32 = 0x000000;
+/// A death waypoint is removed once the player gets this close, in blocks.
+pub const DEATH_WAYPOINT_REACH: f64 = 4.0;
+const MAX_BIOME_NAME: usize = 128;
 
 impl Waypoint {
     /// Trims and shortens a name for the settings file and the markers.
@@ -1423,11 +1496,31 @@ impl Waypoint {
         }
     }
 
+    /// Keeps a namespaced biome id printable and bounded. An empty or damaged
+    /// value means the biome is still unknown.
+    pub fn clean_biome(biome: &str) -> Option<String> {
+        let biome: String = biome
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(MAX_BIOME_NAME)
+            .collect();
+        let biome = biome.trim();
+        (!biome.is_empty()).then(|| biome.to_owned())
+    }
+
+    fn stored_color(&self) -> u32 {
+        match self.icon {
+            WaypointIcon::Skull => self.color & 0x00ff_ffff,
+            WaypointIcon::Letter => Self::clean_color(self.color),
+        }
+    }
+
     fn decode(text: &str) -> Option<Self> {
         let (version, rest) = text.split_once('=')?;
-        let (fields, has_color) = match version {
-            "waypoint_v3" => (7, true),
-            "waypoint_v2" => (6, false),
+        let (fields, version) = match version {
+            "waypoint_v4" => (9, 4),
+            "waypoint_v3" => (7, 3),
+            "waypoint_v2" => (6, 2),
             _ => return None,
         };
         let mut parts = rest.splitn(fields, ':');
@@ -1445,14 +1538,28 @@ impl Waypoint {
         let x = parts.next()?.parse().ok()?;
         let y = parts.next()?.parse().ok()?;
         let z = parts.next()?.parse().ok()?;
-        let color = if has_color {
+        let raw_color = if version >= 3 {
             parts
                 .next()
                 .and_then(|color| u32::from_str_radix(color, 16).ok())
-                .map(Self::clean_color)
-                .unwrap_or(DEFAULT_WAYPOINT_COLOR)
         } else {
-            DEFAULT_WAYPOINT_COLOR
+            None
+        };
+        let (icon, biome) = if version >= 4 {
+            (
+                parts
+                    .next()
+                    .and_then(WaypointIcon::from_name)
+                    .unwrap_or_default(),
+                Self::clean_biome(&unescape_name(parts.next().unwrap_or(""))),
+            )
+        } else {
+            (WaypointIcon::Letter, None)
+        };
+        let color = match (icon, raw_color) {
+            (WaypointIcon::Skull, Some(color)) => color & 0x00ff_ffff,
+            (_, Some(color)) => Self::clean_color(color),
+            (_, None) => DEFAULT_WAYPOINT_COLOR,
         };
         Some(Self {
             world,
@@ -1461,19 +1568,23 @@ impl Waypoint {
             y,
             z,
             color,
+            icon,
+            biome,
             name: Self::clean_name(&unescape_name(parts.next().unwrap_or(""))),
         })
     }
 
     fn encode(&self) -> String {
         format!(
-            "waypoint_v3={}:{}:{}:{}:{}:{:06x}:{}\n",
+            "waypoint_v4={}:{}:{}:{}:{}:{:06x}:{}:{}:{}\n",
             escape_name(&self.world),
             self.dimension.name(),
             self.x,
             self.y,
             self.z,
-            Self::clean_color(self.color),
+            self.stored_color(),
+            self.icon.name(),
+            escape_name(self.biome.as_deref().unwrap_or("")),
             escape_name(&self.name)
         )
     }
@@ -1537,12 +1648,18 @@ fn push_waypoint(waypoints: &mut Vec<Waypoint>, waypoint: Waypoint) -> bool {
             && existing.x == waypoint.x
             && existing.z == waypoint.z
     }) {
-        if existing.name == waypoint.name && existing.color == waypoint.color {
-            return false;
-        }
+        // A newly sampled or stored biome wins over the older one, and a point
+        // added before the settings file loaded keeps its sample when merging.
+        let biome = waypoint.biome.clone().or_else(|| existing.biome.clone());
+        let unchanged = existing.name == waypoint.name
+            && existing.color == waypoint.color
+            && existing.icon == waypoint.icon
+            && existing.biome == biome;
         existing.name = waypoint.name;
         existing.color = waypoint.color;
-        return true;
+        existing.icon = waypoint.icon;
+        existing.biome = biome;
+        return !unchanged;
     }
     if waypoints
         .iter()
@@ -1561,6 +1678,38 @@ fn push_waypoint(waypoints: &mut Vec<Waypoint>, waypoint: Waypoint) -> bool {
     }
     waypoints.push(waypoint);
     true
+}
+
+/// Numbers automatic death points: `Death`, `Death 2`, `Death 3`, reusing a
+/// freed number after an earlier point was reached and removed.
+fn death_waypoint_name(waypoints: &[Waypoint], base: &str) -> String {
+    let used = |name: &str| {
+        waypoints
+            .iter()
+            .any(|waypoint| waypoint.icon == WaypointIcon::Skull && waypoint.name == name)
+    };
+    if !used(base) {
+        return base.to_owned();
+    }
+    let mut number = 2;
+    loop {
+        let name = format!("{base} {number}");
+        if !used(&name) {
+            return name;
+        }
+        number += 1;
+    }
+}
+
+/// Whether a death waypoint is close enough to pick up after respawning.
+pub fn death_waypoint_reached(player: [f64; 3], waypoint: &Waypoint) -> bool {
+    if waypoint.icon != WaypointIcon::Skull {
+        return false;
+    }
+    let dx = player[0] - (f64::from(waypoint.x) + 0.5);
+    let dy = player[1] - f64::from(waypoint.y);
+    let dz = player[2] - (f64::from(waypoint.z) + 0.5);
+    dx * dx + dy * dy + dz * dz <= DEATH_WAYPOINT_REACH * DEATH_WAYPOINT_REACH
 }
 
 #[derive(Default)]
@@ -1685,7 +1834,8 @@ impl Controller {
             return false;
         }
         waypoint.name = Waypoint::clean_name(&waypoint.name);
-        waypoint.color = Waypoint::clean_color(waypoint.color);
+        waypoint.color = waypoint.stored_color();
+        waypoint.biome = waypoint.biome.as_deref().and_then(Waypoint::clean_biome);
         let notify = self.notify.lock().unwrap_or_else(|e| e.into_inner());
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if !push_waypoint(&mut state.waypoints, waypoint) {
@@ -1698,6 +1848,99 @@ impl Controller {
         {
             self.state.lock().unwrap_or_else(|e| e.into_inner()).error =
                 Some("Settings worker stopped".into());
+        }
+        true
+    }
+
+    /// Adds the automatic skull waypoint for a death, numbered after the
+    /// existing death points of the same world. `biome` is the sample at the
+    /// death block when its chunk is loaded.
+    pub fn add_death_waypoint(
+        &self,
+        world: &str,
+        dimension: Dimension,
+        x: i32,
+        y: i32,
+        z: i32,
+        biome: Option<&str>,
+    ) -> bool {
+        if !valid_waypoint_world(world) || dimension == Dimension::Player {
+            return false;
+        }
+        let notify = self.notify.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.waypoints.iter().any(|waypoint| {
+            waypoint.world == world
+                && waypoint.dimension == dimension
+                && waypoint.x == x
+                && waypoint.z == z
+        }) {
+            return false;
+        }
+        let name = death_waypoint_name(
+            &state.waypoints,
+            tr("Death", "Смерть", "Mort", "Muerte", "Tod"),
+        );
+        let added = push_waypoint(
+            &mut state.waypoints,
+            Waypoint {
+                world: world.to_owned(),
+                dimension,
+                x,
+                y,
+                z,
+                name,
+                color: DEATH_WAYPOINT_COLOR,
+                icon: WaypointIcon::Skull,
+                biome: biome.and_then(Waypoint::clean_biome),
+            },
+        );
+        if !added {
+            return false;
+        }
+        state.revision += 1;
+        drop(state);
+        if let Some(notify) = notify.as_ref()
+            && let Err(mpsc::TrySendError::Disconnected(_)) = notify.try_send(())
+        {
+            self.state.lock().unwrap_or_else(|e| e.into_inner()).error =
+                Some("Settings worker stopped".into());
+        }
+        true
+    }
+
+    /// Stores a freshly sampled biome on an existing point. Only a change
+    /// marks the settings dirty, so the file is not rewritten while the player
+    /// stays in the same biome.
+    pub fn update_waypoint_biome(
+        &self,
+        world: &str,
+        dimension: Dimension,
+        x: i32,
+        z: i32,
+        biome: &str,
+    ) -> bool {
+        let Some(biome) = Waypoint::clean_biome(biome) else {
+            return false;
+        };
+        let notify = self.notify.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(waypoint) = state.waypoints.iter_mut().find(|waypoint| {
+            waypoint.world == world
+                && waypoint.dimension == dimension
+                && waypoint.x == x
+                && waypoint.z == z
+        }) else {
+            return false;
+        };
+        if waypoint.biome.as_deref() == Some(biome.as_str()) {
+            return false;
+        }
+        waypoint.biome = Some(biome);
+        state.revision += 1;
+        drop(state);
+        if let Some(notify) = notify.as_ref() {
+            let _ = notify.try_send(());
         }
         true
     }
@@ -1733,7 +1976,6 @@ impl Controller {
         color: u32,
     ) -> bool {
         let name = Waypoint::clean_name(name);
-        let color = Waypoint::clean_color(color);
         let notify = self.notify.lock().unwrap_or_else(|e| e.into_inner());
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let Some(waypoint) = state.waypoints.iter_mut().find(|waypoint| {
@@ -1743,6 +1985,10 @@ impl Controller {
                 && waypoint.z == z
         }) else {
             return false;
+        };
+        let color = match waypoint.icon {
+            WaypointIcon::Skull => color & 0x00ff_ffff,
+            WaypointIcon::Letter => Waypoint::clean_color(color),
         };
         if waypoint.name == name && waypoint.color == color {
             return false;
@@ -1977,6 +2223,8 @@ mod tests {
             z: -5,
             name: name.into(),
             color: DEFAULT_WAYPOINT_COLOR,
+            icon: WaypointIcon::Letter,
+            biome: None,
         }
     }
 
@@ -2068,7 +2316,7 @@ mod tests {
         assert!(controller.waypoints("save:A").is_empty());
         let file = fs::read_to_string(directory.join(SETTINGS_FILE)).unwrap();
         assert!(!file.lines().any(|l| l.starts_with("waypoint=")));
-        assert!(file.contains("waypoint_v3="));
+        assert!(file.contains("waypoint_v4="));
         let reopened = Controller::open(directory.clone());
         reopened.shutdown();
         assert_eq!(reopened.waypoints(&scoped.world), vec![scoped]);
@@ -2080,7 +2328,7 @@ mod tests {
     }
 
     #[test]
-    fn scoped_v2_records_gain_the_default_colour_and_migrate_to_v3() {
+    fn scoped_v2_records_gain_the_default_colour_and_migrate_to_v4() {
         let directory = scratch();
         fs::create_dir_all(&directory).unwrap();
         fs::write(
@@ -2091,13 +2339,15 @@ mod tests {
         let controller = Controller::open(directory.clone());
         controller.shutdown();
         let file = fs::read_to_string(directory.join(SETTINGS_FILE)).unwrap();
-        assert!(file.contains("waypoint_v3="));
+        assert!(file.contains("waypoint_v4="));
         assert!(!file.contains("waypoint_v2="));
         let reopened = Controller::open(directory.clone());
         reopened.shutdown();
         let waypoint = reopened.waypoints("save:test")[0].clone();
         assert_eq!(waypoint.name, "Старый");
         assert_eq!(waypoint.color, DEFAULT_WAYPOINT_COLOR);
+        assert_eq!(waypoint.icon, WaypointIcon::Letter);
+        assert_eq!(waypoint.biome, None);
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2113,6 +2363,8 @@ mod tests {
             z: -5,
             name: "База".into(),
             color: DEFAULT_WAYPOINT_COLOR,
+            icon: WaypointIcon::Letter,
+            biome: None,
         };
         assert!(controller.add_waypoint(point.clone()));
         assert!(!controller.add_waypoint(point.clone()));
@@ -2125,6 +2377,8 @@ mod tests {
                 z: 0,
                 name: format!("Точка {x}"),
                 color: WAYPOINT_COLORS[(x as usize) % WAYPOINT_COLORS.len()],
+                icon: WaypointIcon::Letter,
+                biome: None,
             }));
         }
         controller.shutdown();
@@ -2139,6 +2393,105 @@ mod tests {
     }
 
     #[test]
+    fn death_waypoint_settings_roundtrip_toggle_and_reset() {
+        let mut settings = Settings::default();
+        assert_eq!(minimap::apply(&mut settings, 11), 1 << 11);
+        assert!(!settings.death_waypoints);
+        assert_eq!(minimap::apply(&mut settings, 12), 1 << 12);
+        assert!(!settings.death_waypoint_auto_remove);
+        assert_eq!(Settings::decode(&settings.encode()), settings);
+        let mask = minimap::apply(&mut settings, 6);
+        assert_eq!(mask & (1 << 11), 1 << 11);
+        assert_eq!(mask & (1 << 12), 1 << 12);
+        assert!(settings.death_waypoints && settings.death_waypoint_auto_remove);
+        assert!(
+            Settings::decode("death_waypoints=false\ndeath_waypoint_auto_remove=false")
+                .encode()
+                .contains("death_waypoints=false")
+        );
+    }
+
+    #[test]
+    fn death_waypoints_are_numbered_black_skulls_that_persist_their_biome() {
+        let directory = scratch();
+        let world = "save:death";
+        let controller = Controller::open(directory.clone());
+        assert!(controller.add_death_waypoint(
+            world,
+            Dimension::Overworld,
+            4,
+            64,
+            8,
+            Some("minecraft:dappled_forest")
+        ));
+        assert!(controller.add_death_waypoint(world, Dimension::Overworld, 12, 70, 16, None));
+        assert!(!controller.add_death_waypoint(world, Dimension::Overworld, 4, 64, 8, None));
+        let points = controller.waypoints(world);
+        assert_eq!(points.len(), 2);
+        assert_eq!(points[0].name, "Death");
+        assert_eq!(points[1].name, "Death 2");
+        assert!(points.iter().all(|point| {
+            point.icon == WaypointIcon::Skull && point.color == DEATH_WAYPOINT_COLOR
+        }));
+        assert_eq!(points[0].biome.as_deref(), Some("minecraft:dappled_forest"));
+        assert!(controller.update_waypoint_biome(
+            world,
+            Dimension::Overworld,
+            12,
+            16,
+            "minecraft:plains"
+        ));
+        assert!(!controller.update_waypoint_biome(
+            world,
+            Dimension::Overworld,
+            12,
+            16,
+            "minecraft:plains"
+        ));
+        controller.shutdown();
+        let reopened = Controller::open(directory.clone());
+        reopened.shutdown();
+        let saved = reopened.waypoints(world);
+        assert_eq!(saved[0].biome.as_deref(), Some("minecraft:dappled_forest"));
+        assert_eq!(saved[1].biome.as_deref(), Some("minecraft:plains"));
+        assert_eq!(saved[0].icon, WaypointIcon::Skull);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn reaching_death_waypoints_uses_three_dimensional_distance_and_skips_letters() {
+        let mut death = point("save:death", "Death");
+        death.icon = WaypointIcon::Skull;
+        assert!(death_waypoint_reached([10.5, 64.0, -4.5], &death));
+        assert!(!death_waypoint_reached([10.5, 64.0, 0.0], &death));
+        assert!(!death_waypoint_reached([10.5, 72.0, -4.5], &death));
+        assert!(!death_waypoint_reached(
+            [10.5, 64.0, -4.5],
+            &point("save:home", "Home")
+        ));
+    }
+
+    #[test]
+    fn v3_records_default_to_letters_without_a_biome() {
+        let legacy =
+            Waypoint::decode("waypoint_v3=save%3Atest:overworld:1:2:3:ff6b6b:Old").unwrap();
+        assert_eq!(legacy.icon, WaypointIcon::Letter);
+        assert_eq!(legacy.biome, None);
+        assert_eq!(legacy.color, 0xff6b6b);
+        let v4 = Waypoint::decode(
+            "waypoint_v4=save%3Atest:overworld:1:64:2:000000:skull:minecraft%3Adappled_forest:Death",
+        )
+        .unwrap();
+        assert_eq!(v4.icon, WaypointIcon::Skull);
+        assert_eq!(v4.color, DEATH_WAYPOINT_COLOR);
+        assert_eq!(v4.biome.as_deref(), Some("minecraft:dappled_forest"));
+        assert_eq!(
+            Waypoint::decode(v4.encode().trim()).unwrap().biome,
+            v4.biome
+        );
+    }
+
+    #[test]
     fn waypoint_names_roundtrip_and_waypoints_can_be_removed() {
         let directory = scratch();
         let waypoint = Waypoint {
@@ -2149,6 +2502,8 @@ mod tests {
             z: 3,
             name: "Дом: у % реки".into(),
             color: 0x5aa9ff,
+            icon: WaypointIcon::Letter,
+            biome: Some("minecraft:plains".into()),
         };
         assert_eq!(
             Waypoint::decode(waypoint.encode().trim()).unwrap(),
@@ -4953,7 +5308,7 @@ mod map_regressions {
             assert!(!settings.nether_coordinates);
             assert!(!settings.encode().contains("smooth_worldmap"));
             assert_eq!(Settings::decode(&settings.encode()), settings);
-            assert_eq!(settings.labels().len(), 11);
+            assert_eq!(settings.labels().len(), 13);
         }
     }
     #[test]
