@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Fix 3D-world waypoint markers never appearing: `native_camera` only returns a
+  frame when a trait mod (`[api]`) is registered, and this injection-based mod
+  has none. The marker now builds the same camera from the player's position,
+  yaw and pitch, so it renders through walls without a trait mod.
 - Draw the eight compass directions (N/NE/E/SE/S/SW/W/NW, localized per
   language) at the inner edge of the minimap and world map, rotating with the
   minimap. A **Direction letters** setting turns them on, and **Direction

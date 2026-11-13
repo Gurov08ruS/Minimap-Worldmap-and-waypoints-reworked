@@ -1479,7 +1479,9 @@ fn draw_menu(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     let subtitle = menu_subtitle(state, menu, &player);
     let has_subtitle = subtitle.is_some();
     let target = portal_target(state, menu, player.y.floor() as i32);
-    let show_3d = menu.waypoint.map_or(true, |spot| waypoint_show_3d(state, spot));
+    let show_3d = menu
+        .waypoint
+        .map_or(true, |spot| waypoint_show_3d(state, spot));
     let items = menu_items(game, menu, target, show_3d);
     let (rect, rows) = menu_layout(
         game,
@@ -1793,11 +1795,7 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         );
         let toggle = waypoint_3d_rect(row);
         let on = waypoint.show_3d;
-        game.native_fill(
-            batch,
-            toggle,
-            if on { 0xff2e7d52 } else { 0xff2a3542 },
-        );
+        game.native_fill(batch, toggle, if on { 0xff2e7d52 } else { 0xff2a3542 });
         if inside(mouse, toggle) {
             game.native_fill(batch, toggle, 0xff3a4a5c);
         }
@@ -2444,6 +2442,28 @@ fn project(
     Some([(x * 0.5 + 0.5) * size[0], (1.0 - (y * 0.5 + 0.5)) * size[1]])
 }
 
+/// A camera built from the player's own position, yaw and pitch. `native_camera`
+/// only returns a frame when a trait mod (`mod_api::mods`) is registered; this
+/// injection-based mod has none, so it reconstructs the same matrices here.
+fn world_camera(
+    player: &crate::game::native_hooks::NativePlayer,
+    size: [f32; 2],
+) -> horizon_client::mod_api::NativeCamera {
+    horizon_client::mod_api::NativeCamera {
+        position: [player.x, player.y + 1.62, player.z],
+        eye_height: 1.62,
+        partial_tick: 1.0,
+        yaw: player.yaw,
+        pitch: player.pitch,
+        fov_degrees: 70.0,
+        near: 0.05,
+        far: 2048.0,
+        view: horizon_client::camera::view_matrix(player.yaw, player.pitch).to_cols_array(),
+        projection: horizon_client::camera::perspective(70.0, size[0], size[1], 2048.0, 0.05, true),
+        dimension: player.dimension.to_owned(),
+    }
+}
+
 fn draw_world_waypoints(
     game: &Game<'_>,
     batch: &mut HudBatch,
@@ -2456,9 +2476,7 @@ fn draw_world_waypoints(
     let Some(player) = game.native_player() else {
         return;
     };
-    let Some(camera) = game.native_camera() else {
-        return;
-    };
+    let camera = world_camera(&player, [batch.width, batch.height]);
     let dimension = Dimension::from_id(player.dimension);
     let style = settings.world_waypoint_style;
     for waypoint in &state.waypoints {
@@ -4250,7 +4268,9 @@ fn map_press(
         };
         let subtitle = menu_subtitle(state, menu, &player);
         let target = portal_target(state, menu, player.y.floor() as i32);
-        let show_3d = menu.waypoint.map_or(true, |spot| waypoint_show_3d(state, spot));
+        let show_3d = menu
+            .waypoint
+            .map_or(true, |spot| waypoint_show_3d(state, spot));
         let items = menu_items(game, menu, target, show_3d);
         let (rect, rows) = menu_layout(
             game,
@@ -4842,6 +4862,24 @@ mod render_tests {
         let at = project(&camera, [0.0, 1.5, 10.0], [1920.0, 1080.0]).unwrap();
         assert!((at[0] - 960.0).abs() < 1.0, "{at:?}");
         assert!(at[1] < 540.0, "{at:?}");
+    }
+
+    #[test]
+    fn a_waypoint_projects_from_the_player_built_camera() {
+        let player = crate::game::native_hooks::NativePlayer {
+            x: 0.0,
+            y: 64.0,
+            z: 0.0,
+            yaw: 0.0,
+            pitch: 0.0,
+            dimension: "minecraft:overworld",
+        };
+        let camera = world_camera(&player, [1920.0, 1080.0]);
+        // Facing south (yaw 0), a waypoint ten blocks south at eye height sits
+        // on the screen centre.
+        let at = project(&camera, [0.0, 65.62, 10.0], [1920.0, 1080.0]).unwrap();
+        assert!((at[0] - 960.0).abs() < 1.0, "{at:?}");
+        assert!((at[1] - 540.0).abs() < 1.0, "{at:?}");
     }
 
     #[test]

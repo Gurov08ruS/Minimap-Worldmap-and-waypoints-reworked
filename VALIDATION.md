@@ -1,5 +1,26 @@
 # Validation
 
+## Unreleased — 3D-waypoint camera fix, 2026-11-13
+
+Validated on Linux with Rust 1.95.0 against the unchanged Horizon Nightly
+2026-11-13 (`9f42064`) and Horizon Mixins `d9c83d7` pins.
+
+- The 3D markers were never drawn because `native_camera` returns `None` for an
+  injection-only mod (it is computed only when a trait mod is registered in
+  `mod_api::mods`). `world_camera` now reconstructs the same view/projection
+  from the player's position, yaw and pitch, so markers render through walls.
+- `cargo fmt --all --check` and clippy with warnings denied: pass; the injected
+  adapter/helper files are also rustfmt-clean.
+- Locked offline workspace tests: 81 runtime tests and one source-audit test
+  passed; one manual benchmark ignored. A new client-side regression projects a
+  waypoint from the player-built camera to the screen centre.
+- `python3 tools/test_template.py` and `python3 tools/test_stage.py`: pass.
+- Actual pinned Horizon client check: pass; runtime tests inside the pinned
+  client: 81 passed, one benchmark ignored.
+
+No live-game launch was performed; the projection is verified by unit tests, not
+an interactive session.
+
 ## Unreleased — map direction letters, 2026-11-13
 
 Validated on Linux with Rust 1.95.0 against the unchanged Horizon Nightly
