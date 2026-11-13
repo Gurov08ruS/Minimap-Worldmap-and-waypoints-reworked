@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // See LICENSE and NOTICE for this project's terms.
 // Native row rendering is adapted from Horizon (MIT), revision
-// 2ebf00a0281c592f79191e76fce0e7d522c6f425, options_ui.rs::native_rows.
+// 9f42064c11efe7ef3e5ed2baad7ddc2a3b36eea0, options_ui_pages.rs::native_rows.
 // Copyright (c) 2026 Ludovic Marie and the Horizon contributors
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy

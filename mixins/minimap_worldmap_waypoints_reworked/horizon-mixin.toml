@@ -4,7 +4,7 @@ version = "0.5.1"
 priority = 100
 
 [compatibility]
-horizon_revision = "2ebf00a0281c592f79191e76fce0e7d522c6f425"
+horizon_revision = "9f42064c11efe7ef3e5ed2baad7ddc2a3b36eea0"
 
 [[module]]
 id = "runtime"
@@ -36,7 +36,7 @@ bindings = [{ name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *s
 [[injection]]
 id = "settings-flush"
 kind = "HEAD"
-target = "horizon_client::game::<Game<'_> as ApplicationHandler>::exiting"
+target = "horizon_client::game::window_handler::<Game<'_> as ApplicationHandler>::exiting"
 helper = "exit.rs"
 bindings = [{ name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" }]
 
@@ -133,7 +133,7 @@ source = "binding_ui.rs"
 id = "binding-rows"
 kind = "HEAD"
 cancellable = true
-target = "horizon_client_render::options_ui::OptionsUi::native_rows"
+target = "horizon_client_render::options_ui::pages::OptionsUi::native_rows"
 helper = "binding_rows.rs"
 bindings = [
   { name = "ui", ty = "&crate::options_ui::OptionsUi", value = "self" },
@@ -176,7 +176,7 @@ bindings=[]
 [[injection]]
 id="map-atlas"
 kind="HEAD"
-target="horizon_client::game::Game<'_>::forget_atlas_slots"
+target="horizon_client::game::render_settings::Game<'_>::forget_atlas_slots"
 helper="atlas.rs"
 bindings=[]
 

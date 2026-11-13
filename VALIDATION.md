@@ -1,5 +1,37 @@
 # Validation
 
+## Unreleased — Horizon Nightly 2026-11-13 compatibility, 2026-11-13
+
+Validated on Linux with Rust 1.95.0 against Horizon Nightly 2026-11-13
+(`9f42064c11efe7ef3e5ed2baad7ddc2a3b36eea0`) and the unchanged Horizon Mixins
+`d9c83d7096b7ea5b83678da2efdfd6161f74997e` (schema 6).
+
+- `compatibility.json` and the bundle manifest now pin `9f42064`; the
+  `source_sha256` entries were regenerated for `game.rs`, `native_hooks.rs`,
+  `options_ui.rs`, `lod.rs` and `ui.rs`.
+- Injection targets follow Horizon's module split: the application `exiting`
+  hook is in `game::window_handler`, `forget_atlas_slots` is in
+  `game::render_settings`, and `native_rows` is in `options_ui_pages`. The
+  focused fixture in `tools/test_template.py` mirrors that layout.
+- `cargo fmt --all --check` and clippy with warnings denied: pass.
+- Locked offline workspace tests: 77 runtime tests and one source-audit test
+  passed; one manual benchmark ignored.
+- `python3 tools/test_template.py`: pass, including actual hooks and runtime on
+  the client fixture, deterministic staging and missing-target rejection.
+- `python3 tools/test_stage.py --horizon ../horizon`: pass; the original
+  checkout is unchanged and only planned ASTs differ.
+- Actual pinned Horizon client check: pass.
+- Runtime tests inside the pinned client: 77 passed, one benchmark ignored.
+- `python3 tools/package.py` twice: byte-identical, 130,510 bytes, SHA-256
+  `15b866a8925aabf41bbcdfafb3e7809d36318486030b12ac2c881aa41f259565`.
+- Official `cargo horizon-mod check`: accepted, reporting
+  `native-1/9f42064c11efe7ef3e5ed2baad7ddc2a3b36eea0/d9c83d7...` for 26.3.
+  The package is unsigned and is a local development artifact.
+
+No live-game launch, FPS profiling, macOS/Windows run or new gameplay check was
+performed for this compatibility update. The launcher was not driven here; the
+supported claim is the pinned-source build and the checks above.
+
 ## Unreleased — persistent map container, 2026-11-12
 
 Validated on Linux with Rust 1.95.0. Horizon and Mixins revisions are unchanged;

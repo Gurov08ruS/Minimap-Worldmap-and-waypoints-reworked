@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Pin the bundle to Horizon Nightly 2026-11-13 (`9f42064`) instead of the
+  retired 2026-11-07 build. Follow the moved injection targets:
+  `game::window_handler::<Game<'_> as ApplicationHandler>::exiting`,
+  `game::render_settings::Game::forget_atlas_slots` and
+  `options_ui::pages::OptionsUi::native_rows`. The launcher no longer skips the
+  build because the installed Horizon revision differs from the manifest pin.
 - Persist detailed terrain, sampled height layers, LOD, biome names and portal
   samples across reconnects and game restarts in one `.mwwr` container per
   single-player save/server address. Use checked dual roots, a paged index and

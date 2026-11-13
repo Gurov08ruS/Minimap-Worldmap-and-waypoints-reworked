@@ -38,6 +38,7 @@ FIXTURE_LIB = 'extern crate self as horizon_client;\npub mod lang { pub fn code(
 FIXTURE_GAME = """
 use std::{cell::Cell, marker::PhantomData, path::PathBuf};
 pub(crate) mod native_hooks;
+pub(crate) mod window_handler;
 pub struct Game<'a> {
     pub original: [Cell<usize>;5], pub enabled:bool, pub window:bool,
     pub directory:PathBuf, pub open:bool, pub playing:bool, pub binding:String,
@@ -45,9 +46,6 @@ pub struct Game<'a> {
 }
 pub struct ActiveEventLoop;
 pub trait ApplicationHandler { fn exiting(&mut self,event_loop:&ActiveEventLoop); }
-impl ApplicationHandler for Game<'_> {
-    fn exiting(&mut self,_event_loop:&ActiveEventLoop) {self.original[4].set(self.original[4].get()+1);}
-}
 impl Game<'_> {
     pub(super) fn native_window(&self)->bool {self.window}
     pub(super) fn native_on(&self,_:&str)->bool {self.enabled}
@@ -114,6 +112,12 @@ impl Game<'_> {
     }
 }
 """
+FIXTURE_WINDOW_HANDLER = """
+use super::*;
+impl ApplicationHandler for Game<'_> {
+    fn exiting(&mut self,_event_loop:&ActiveEventLoop) {self.original[4].set(self.original[4].get()+1);}
+}
+"""
 FIXTURE_HOOKS = """
 use super::Game;
 #[derive(Clone,Debug,Default)] pub(crate) struct NativeMod {pub id:String,pub title:String,pub description:String,pub keys:Vec<[String;3]>}
@@ -156,7 +160,7 @@ def main():
         (src/'game').mkdir(parents=True)
         (original/'Cargo.toml').write_text('[workspace]\nmembers=["crates/horizon-client"]\nresolver="2"\n')
         (src.parent/'Cargo.toml').write_text('[package]\nname="horizon-client"\nversion="0.1.0"\nedition="2024"\n')
-        (src/'lib.rs').write_text(FIXTURE_LIB);(src/'game.rs').write_text(FIXTURE_GAME);(src/'game/native_hooks.rs').write_text(FIXTURE_HOOKS)
+        (src/'lib.rs').write_text(FIXTURE_LIB);(src/'game.rs').write_text(FIXTURE_GAME);(src/'game/native_hooks.rs').write_text(FIXTURE_HOOKS);(src/'game/window_handler.rs').write_text(FIXTURE_WINDOW_HANDLER)
         (original/'rust-toolchain.toml').write_bytes((root/'rust-toolchain.toml').read_bytes());(original/'.horizon-revision').write_text(horizon.PIN+'\n')
         run(['cargo','generate-lockfile','--offline'],cwd=original)
         focused_bundle(scratch/'mods');base=['--workspace',str(original),'--mods',str(scratch/'mods')]
@@ -173,7 +177,7 @@ def main():
         assert bad.returncode and json.loads(bad.stderr)['code']=='E_REVISION';assert snapshot(stage)==first
         (original/'.horizon-revision').write_text(horizon.PIN+'\n')
         for method in ['native_mods','native_settings','native_settings_click','native_key','exiting']:
-            source=src/('game.rs' if method=='exiting' else 'game/native_hooks.rs');saved=source.read_text()
+            source=src/('game/window_handler.rs' if method=='exiting' else 'game/native_hooks.rs');saved=source.read_text()
             source.write_text(saved.replace('    fn exiting(', '    fn missing_exiting(',1) if method=='exiting' else saved.replace(f'fn {method}(',f'fn missing_{method}(',1))
             bad=subprocess.run([str(cli),'apply',*base,'--out',str(stage)],capture_output=True,text=True)
             assert bad.returncode and json.loads(bad.stderr)['code']=='E_TARGET_NOT_FOUND',method

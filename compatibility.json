@@ -1,11 +1,11 @@
 {
-  "horizon_revision": "2ebf00a0281c592f79191e76fce0e7d522c6f425",
+  "horizon_revision": "9f42064c11efe7ef3e5ed2baad7ddc2a3b36eea0",
   "source_sha256": {
-    "crates/horizon-client/src/game.rs": "b12f409bf298f8d7f40f2e79e7e39d5fe7ebe464ecbbeac6914d7814d114de23",
-    "crates/horizon-client/src/game/native_hooks.rs": "2cb9c8f04dd92484ae22788c61d658a76b34ab74bf9deab06b0e44958eecd5bd",
-    "crates/horizon-client-render/src/options_ui.rs": "686458a8989efb4e6e7de3dc6df95c840b23f3bdd9b397e36611462e9d570fca",
-    "crates/horizon-client-render/src/lod.rs": "6dd0571cdeaa6408e085dd17c08f1a8c0cc082b8a96a4367966144fbc4654590",
-    "crates/horizon-client-render/src/ui.rs": "9f893df681a67237586fd67ed2b14d956147438f898ca8bdd32915f0adbaf3d5"
+    "crates/horizon-client/src/game.rs": "ad235ca7b9fb4170d246b9f1f5dc5ed8608168b64d57ff0040d0111a686ce81d",
+    "crates/horizon-client/src/game/native_hooks.rs": "1edb8ccc33f7b046428176755c3ffa59ad6184a1d044b45dabf9d865e5fb7012",
+    "crates/horizon-client-render/src/options_ui.rs": "358d7c7cad086bee3b42132fbf2e01deb60222702d126533d904c641a9af7dc5",
+    "crates/horizon-client-render/src/lod.rs": "d0c5a9537edac23374c16f6d9d3a90c1e66aa4ec58b33f03df6e15a4c95a5061",
+    "crates/horizon-client-render/src/ui.rs": "a7546e7ec604b5e984aa83d8818d8236841b22fdf78103ea10dd3e716343c5d9"
   },
   "horizon_repository": "https://github.com/horizon-rust/horizon",
   "horizon_mixins_repository": "https://github.com/horizon-rust/horizon-mixins",

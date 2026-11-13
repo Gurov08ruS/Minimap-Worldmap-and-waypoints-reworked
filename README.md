@@ -329,8 +329,8 @@ not add a new engine texture allocator.
 ## Compatibility
 
 - Minecraft Java Edition **26.3**, through Horizon.
-- Horizon Nightly **2026-11-07**, commit
-  `2ebf00a0281c592f79191e76fce0e7d522c6f425`.
+- Horizon Nightly **2026-11-13**, commit
+  `9f42064c11efe7ef3e5ed2baad7ddc2a3b36eea0`.
 - Horizon Mixins `d9c83d7096b7ea5b83678da2efdfd6161f74997e` (schema 6).
 
 These revisions are pinned in [compatibility.json](compatibility.json) and the

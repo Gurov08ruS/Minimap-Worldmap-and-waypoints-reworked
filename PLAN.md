@@ -101,7 +101,7 @@ Horizon; нативная сборка игры включается тольк�
 
 ## 2. Проверка интеграции с Horizon
 
-Текущий мод закреплён на Horizon `2ebf00a0281c592f79191e76fce0e7d522c6f425` и horizon-mixins `d9c83d7096b7ea5b83678da2efdfd6161f74997e` в `compatibility.json`.
+Текущий мод закреплён на Horizon `9f42064c11efe7ef3e5ed2baad7ddc2a3b36eea0` и horizon-mixins `d9c83d7096b7ea5b83678da2efdfd6161f74997e` в `compatibility.json`.
 
 Исходники для предварительного анализа: `/home/danil/horizon`, HEAD на момент анализа — `989397cfb87d068ada4034c53da08712e50ef0b2`. Это другой commit; наличие функции в нём не подтверждает наличие в закреплённой версии шаблона.
 
