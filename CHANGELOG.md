@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Draw the eight compass directions (N/NE/E/SE/S/SW/W/NW, localized per
+  language) at the inner edge of the minimap and world map, rotating with the
+  minimap. A **Direction letters** setting turns them on, and **Direction
+  style** switches them to the game's axis names (`X+`, `X-`, `Z+`, `Z-` with
+  diagonal combinations). Off/compass by default.
 - Draw waypoint markers in the 3D world, through walls, as the waypoint's
   first letter (or a skull) in its colour, on top of the normal HUD. A new
   **Show waypoints in the 3D world** setting turns the whole overlay off, and a

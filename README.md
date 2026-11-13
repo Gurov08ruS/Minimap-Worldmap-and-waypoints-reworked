@@ -323,6 +323,12 @@ per map pixel, and player rotation. Size follows the client's GUI scale and is
 limited to the available viewport. Another provider's active native minimap slot
 is respected. The world map and minimap are not drawn simultaneously.
 
+**Direction letters** draw the eight compass points (N, NE, E, SE, S, SW, W, NW,
+localized per language) at the inner edge of both maps, rotating with the
+minimap so the north marker always points at true north. **Direction style**
+switches them to the game's axis names (`Z-`, `X+Z-`, `X+`, `X+Z+`, `Z+`,
+`X-Z+`, `X-`, `X-Z-`). Both settings are off/compass by default.
+
 Preferences and waypoints load/save asynchronously in `settings.ini` under the
 mod data folder provided by Horizon. Normal exit flushes accepted changes. The running mod writes its settings file, its short-lived settings replacement
 file, and one persistent map container per world/server. Containers never use

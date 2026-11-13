@@ -3331,6 +3331,108 @@ pub(super) fn gui_render_post(
     draw_world_waypoints(game, batch, &state, &settings);
 }
 
+/// The eight compass points as world-space unit steps (`dx`, `dz`): north is
+/// `-Z`, east is `+X`. `draw_directions` rotates them by the map's angle.
+const DIRECTION_STEPS: [(f64, f64); 8] = [
+    (0.0, -1.0),  // N
+    (1.0, -1.0),  // NE
+    (1.0, 0.0),   // E
+    (1.0, 1.0),   // SE
+    (0.0, 1.0),   // S
+    (-1.0, 1.0),  // SW
+    (-1.0, 0.0),  // W
+    (-1.0, -1.0), // NW
+];
+
+fn direction_label(style: runtime::minimap::DirectionStyle, index: usize) -> &'static str {
+    match style {
+        runtime::minimap::DirectionStyle::Compass => match index {
+            0 => tr("N", "С", "N", "N", "N"),
+            1 => tr("NE", "СВ", "NE", "NE", "NO"),
+            2 => tr("E", "В", "E", "E", "O"),
+            3 => tr("SE", "ЮВ", "SE", "SE", "SO"),
+            4 => tr("S", "Ю", "S", "S", "S"),
+            5 => tr("SW", "ЮЗ", "SO", "SO", "SW"),
+            6 => tr("W", "З", "O", "O", "W"),
+            7 => tr("NW", "СЗ", "NO", "NO", "NW"),
+            _ => "",
+        },
+        runtime::minimap::DirectionStyle::Axes => match index {
+            0 => "Z-",
+            1 => "X+Z-",
+            2 => "X+",
+            3 => "X+Z+",
+            4 => "Z+",
+            5 => "X-Z+",
+            6 => "X-",
+            7 => "X-Z-",
+            _ => "",
+        },
+    }
+}
+
+/// Cardinal letters at the inner edge of the map. They rotate with the map so
+/// the north marker always points at real north.
+fn draw_directions(
+    game: &Game<'_>,
+    batch: &mut HudBatch,
+    view: &View,
+    rect: [f32; 4],
+    round: bool,
+    large: bool,
+    settings: &runtime::minimap::Settings,
+) {
+    if !settings.directions {
+        return;
+    }
+    let (s, c) = view.angle.sin_cos();
+    let cx = f64::from(rect[0]) + f64::from(rect[2]) / 2.0;
+    let cy = f64::from(rect[1]) + f64::from(rect[3]) / 2.0;
+    // The large map's dimension tabs and coordinate footer float at the top and
+    // bottom; keep the letters clear of them there.
+    let (inset, top, bottom) = if large {
+        (12.0, 36.0, 52.0)
+    } else {
+        (8.0, 8.0, 8.0)
+    };
+    let radius = f64::from(rect[2].min(rect[3])) / 2.0 - f64::from(inset);
+    let half_width = f64::from(rect[2]) / 2.0 - f64::from(inset);
+    let half_top = f64::from(rect[3]) / 2.0 - f64::from(top);
+    let half_bottom = f64::from(rect[3]) / 2.0 - f64::from(bottom);
+    for (index, (dx, dz)) in DIRECTION_STEPS.iter().copied().enumerate() {
+        // Screen direction of a world step, rotating with the map's angle.
+        let sx = dx * c + dz * s;
+        let sy = -dx * s + dz * c;
+        let (x, y) = if round {
+            let length = sx.hypot(sy);
+            if length <= f64::EPSILON {
+                continue;
+            }
+            (cx + sx / length * radius, cy + sy / length * radius)
+        } else {
+            let mut t = f64::INFINITY;
+            if sx.abs() > 1e-6 {
+                t = t.min(half_width / sx.abs());
+            }
+            if sy < 0.0 {
+                t = t.min(half_top / sy.abs());
+            } else if sy > 0.0 {
+                t = t.min(half_bottom / sy.abs());
+            }
+            if !t.is_finite() {
+                continue;
+            }
+            (cx + sx * t, cy + sy * t)
+        };
+        let label = direction_label(settings.direction_style, index);
+        let width = game.native_text_width(label);
+        let lx = x as f32 - width / 2.0;
+        let ly = y as f32 - 4.0;
+        game.native_fill(batch, [lx - 2.0, ly - 2.0, width + 4.0, 12.0], 0x90000000);
+        game.native_text(batch, label, [lx, ly], 0xffffffff, true);
+    }
+}
+
 fn draw(
     game: &Game<'_>,
     batch: &mut HudBatch,
@@ -3339,10 +3441,8 @@ fn draw(
     large: bool,
     mouse: Option<[f32; 2]>,
 ) {
-    let round = !large
-        && runtime::initialize(game.native_data_dir(runtime::MOD_ID))
-            .settings()
-            .round;
+    let settings = runtime::initialize(game.native_data_dir(runtime::MOD_ID)).settings();
+    let round = !large && settings.round;
     if !round {
         game.native_fill(batch, rect, 0xef181b20);
     }
@@ -3453,6 +3553,7 @@ fn draw(
         if let Some(player) = game.native_player() {
             draw_marker(game, batch, &frame.view, rect, state.marker, &player);
         }
+        draw_directions(game, batch, &frame.view, rect, round, large, &settings);
         if terrain_visible {
             return;
         }

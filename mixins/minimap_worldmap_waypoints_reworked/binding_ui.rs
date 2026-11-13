@@ -197,8 +197,8 @@ mod tests {
     fn cache_slider_drag_uses_native_setting_events_and_release_stops_dragging() {
         let mut s = Settings::default();
         let index = install(&mut s, CACHE_MOD, "Map", &[]);
-        s.mods.installed[index].native.as_mut().unwrap().buttons = vec!["Other".into(); 16];
-        s.mods.installed[index].native.as_mut().unwrap().buttons[15] = "Map RAM: 64 MiB".into();
+        s.mods.installed[index].native.as_mut().unwrap().buttons = vec!["Other".into(); 18];
+        s.mods.installed[index].native.as_mut().unwrap().buttons[17] = "Map RAM: 64 MiB".into();
         let mut ui = OptionsUi::default();
         ui.open_at(true, Page::NativeMod(index));
         // Scroll this lower row into view, just as the options list does.
@@ -480,7 +480,7 @@ mod tests {
 // Native mod buttons have no built-in slider ABI. Keep their existing action
 // for keyboard activation and draw/handle the RAM control on that same row.
 const CACHE_MOD: &str = "minimap_worldmap_waypoints_reworked";
-const CACHE_BUTTON: usize = 15;
+const CACHE_BUTTON: usize = 17;
 static CACHE_DRAGS: std::sync::Mutex<std::collections::BTreeMap<usize, usize>> =
     std::sync::Mutex::new(std::collections::BTreeMap::new());
 

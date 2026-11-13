@@ -1,5 +1,29 @@
 # Validation
 
+## Unreleased — map direction letters, 2026-11-13
+
+Validated on Linux with Rust 1.95.0 against the unchanged Horizon Nightly
+2026-11-13 (`9f42064`) and Horizon Mixins `d9c83d7` pins.
+
+- The eight direction labels are drawn at the inner edge of both maps as opaque
+  HUD text over a dark backing, rotated by the map's angle so the north marker
+  tracks true north. The large map keeps them clear of the dimension tabs and
+  the coordinate footer.
+- `cargo fmt --all --check` and clippy with warnings denied: pass.
+- Locked offline workspace tests: 81 runtime tests and one source-audit test
+  passed; one manual benchmark ignored.
+- New regressions cover the `directions`/`direction_style` settings round-trip,
+  toggle and reset, and the widened edit mask (`touched` is now `u32`).
+- `python3 tools/test_template.py`: pass, with the settings list now 18 rows.
+- `python3 tools/test_stage.py --horizon ../horizon`: pass; original checkout
+  unchanged, only planned ASTs differ.
+- Actual pinned Horizon client check: pass.
+- Runtime tests inside the pinned client: 81 passed, one benchmark ignored.
+
+No live-game launch or visual review of the compass letters (including their
+rotation on a rotating minimap) was performed; placement is exercised by the
+type-checked renderer, not an interactive session.
+
 ## Unreleased — 3D-world waypoint markers and per-point visibility, 2026-11-13
 
 Validated on Linux with Rust 1.95.0 against the unchanged Horizon Nightly

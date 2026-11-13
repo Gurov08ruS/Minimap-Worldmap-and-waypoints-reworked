@@ -281,6 +281,40 @@ pub mod minimap {
         }
     }
 
+    /// How the map's direction labels are written.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub enum DirectionStyle {
+        #[default]
+        Compass,
+        Axes,
+    }
+
+    impl DirectionStyle {
+        pub const ALL: [Self; 2] = [Self::Compass, Self::Axes];
+
+        pub fn name(self) -> &'static str {
+            match self {
+                Self::Compass => "compass",
+                Self::Axes => "axes",
+            }
+        }
+
+        fn from_name(name: &str) -> Option<Self> {
+            match name {
+                "compass" => Some(Self::Compass),
+                "axes" => Some(Self::Axes),
+                _ => None,
+            }
+        }
+
+        pub fn label(self) -> &'static str {
+            match self {
+                Self::Compass => tr("Compass", "Компас", "Boussole", "Brújula", "Kompass"),
+                Self::Axes => tr("Axes", "Оси", "Axes", "Ejes", "Achsen"),
+            }
+        }
+    }
+
     #[derive(Debug, Clone, Copy, PartialEq)]
     pub struct Settings {
         pub cache_ram_mib: u16,
@@ -298,6 +332,8 @@ pub mod minimap {
         pub death_waypoint_auto_remove: bool,
         pub world_waypoints: bool,
         pub world_waypoint_style: WorldMarkerStyle,
+        pub directions: bool,
+        pub direction_style: DirectionStyle,
     }
 
     impl Default for Settings {
@@ -318,6 +354,8 @@ pub mod minimap {
                 death_waypoint_auto_remove: true,
                 world_waypoints: true,
                 world_waypoint_style: WorldMarkerStyle::default(),
+                directions: false,
+                direction_style: DirectionStyle::default(),
             }
         }
     }
@@ -364,6 +402,12 @@ pub mod minimap {
                             value.world_waypoint_style = style;
                         }
                     }
+                    "directions" => value.directions = raw.parse().unwrap_or(value.directions),
+                    "direction_style" => {
+                        if let Some(style) = DirectionStyle::from_name(raw) {
+                            value.direction_style = style;
+                        }
+                    }
                     "cache_ram_mib" => {
                         if let Ok(n) = raw.parse::<u16>()
                             && (16..=512).contains(&n)
@@ -407,7 +451,7 @@ pub mod minimap {
 
         pub fn encode(self) -> String {
             format!(
-                "# Minimap Reworked settings\nenabled={}\ncorner={}\nsize={}\nshape={}\nzoom={}\nrotate={}\nmini_dimension={}\nworld_dimension={}\noverworld_coordinates={}\nnether_coordinates={}\ndeath_waypoints={}\ndeath_waypoint_auto_remove={}\nworld_waypoints={}\nworld_waypoint_style={}\ncache_ram_mib={}\n",
+                "# Minimap Reworked settings\nenabled={}\ncorner={}\nsize={}\nshape={}\nzoom={}\nrotate={}\nmini_dimension={}\nworld_dimension={}\noverworld_coordinates={}\nnether_coordinates={}\ndeath_waypoints={}\ndeath_waypoint_auto_remove={}\nworld_waypoints={}\nworld_waypoint_style={}\ndirections={}\ndirection_style={}\ncache_ram_mib={}\n",
                 self.enabled,
                 self.corner.name(),
                 self.size_px,
@@ -422,12 +466,14 @@ pub mod minimap {
                 self.death_waypoint_auto_remove,
                 self.world_waypoints,
                 self.world_waypoint_style.name(),
+                self.directions,
+                self.direction_style.name(),
                 self.cache_ram_mib,
             )
         }
 
         // Returns the changed field mask. Unknown buttons are harmless.
-        fn click(&mut self, button: usize) -> u16 {
+        fn click(&mut self, button: usize) -> u32 {
             match button {
                 0 => self.enabled = !self.enabled,
                 1 => {
@@ -443,7 +489,7 @@ pub mod minimap {
                 5 => self.rotate_with_player = !self.rotate_with_player,
                 6 => {
                     *self = Self::default();
-                    return 0xffbf;
+                    return 0x3ffbf;
                 }
                 7 => {
                     self.mini_dimension = super::cycle(self.mini_dimension, &super::Dimension::ALL)
@@ -461,14 +507,18 @@ pub mod minimap {
                     self.world_waypoint_style =
                         super::cycle(self.world_waypoint_style, &WorldMarkerStyle::ALL)
                 }
+                15 => self.directions = !self.directions,
+                16 => {
+                    self.direction_style = super::cycle(self.direction_style, &DirectionStyle::ALL)
+                }
                 _ => return 0,
             }
             1 << button
         }
 
         // Only locally edited fields override settings loaded asynchronously.
-        fn overlay(&mut self, edited: Self, mask: u16) {
-            if mask & 32768 != 0 {
+        fn overlay(&mut self, edited: Self, mask: u32) {
+            if mask & (1 << 17) != 0 {
                 self.cache_ram_mib = edited.cache_ram_mib;
             }
             if mask & 1 != 0 {
@@ -509,6 +559,12 @@ pub mod minimap {
             }
             if mask & 16384 != 0 {
                 self.world_waypoint_style = edited.world_waypoint_style;
+            }
+            if mask & 32768 != 0 {
+                self.directions = edited.directions;
+            }
+            if mask & 65536 != 0 {
+                self.direction_style = edited.direction_style;
             }
             if mask & 32 != 0 {
                 self.rotate_with_player = edited.rotate_with_player;
@@ -648,6 +704,22 @@ pub mod minimap {
                     "3D-Markierung: {}",
                     self.world_waypoint_style.label()
                 ),
+                localized_format!(
+                    "Direction letters: {}",
+                    "Буквы направлений: {}",
+                    "Lettres de direction : {}",
+                    "Letras de dirección: {}",
+                    "Richtungsbuchstaben: {}",
+                    on(self.directions)
+                ),
+                localized_format!(
+                    "Direction style: {}",
+                    "Стиль направлений: {}",
+                    "Style de direction : {}",
+                    "Estilo de dirección: {}",
+                    "Richtungsstil: {}",
+                    self.direction_style.label()
+                ),
             ]
         }
 
@@ -658,10 +730,10 @@ pub mod minimap {
         }
     }
 
-    pub(super) fn apply(settings: &mut Settings, button: usize) -> u16 {
+    pub(super) fn apply(settings: &mut Settings, button: usize) -> u32 {
         settings.click(button)
     }
-    pub(super) fn merge(settings: &mut Settings, edited: Settings, mask: u16) {
+    pub(super) fn merge(settings: &mut Settings, edited: Settings, mask: u32) {
         settings.overlay(edited, mask);
     }
 }
@@ -1841,7 +1913,7 @@ pub fn death_waypoint_reached(player: [f64; 3], waypoint: &Waypoint) -> bool {
 struct State {
     settings: Settings,
     waypoints: Vec<Waypoint>,
-    touched: u16,
+    touched: u32,
     revision: u64,
     error: Option<String>,
 }
@@ -1953,7 +2025,7 @@ impl Controller {
             return;
         }
         state.settings.cache_ram_mib = value;
-        state.touched |= 32768;
+        state.touched |= 1 << 17;
         state.revision += 1;
         drop(state);
         if let Some(tx) = self
@@ -2423,7 +2495,7 @@ mod tests {
             cache_ram_mib: 32,
             ..Settings::default()
         };
-        minimap::merge(&mut loaded, edited, 32768);
+        minimap::merge(&mut loaded, edited, 1 << 17);
         assert_eq!(loaded.cache_ram_mib, 32);
     }
 
@@ -2656,6 +2728,28 @@ mod tests {
             Settings::decode("world_waypoints=false\nworld_waypoint_style=name_distance")
                 .encode()
                 .contains("world_waypoints=false")
+        );
+    }
+
+    #[test]
+    fn direction_settings_roundtrip_toggle_and_reset() {
+        let mut settings = Settings::default();
+        assert!(!settings.directions);
+        assert_eq!(settings.direction_style, minimap::DirectionStyle::Compass);
+        assert_eq!(minimap::apply(&mut settings, 15), 1 << 15);
+        assert!(settings.directions);
+        assert_eq!(minimap::apply(&mut settings, 16), 1 << 16);
+        assert_eq!(settings.direction_style, minimap::DirectionStyle::Axes);
+        assert_eq!(Settings::decode(&settings.encode()), settings);
+        let mask = minimap::apply(&mut settings, 6);
+        assert_eq!(mask & (1 << 15), 1 << 15);
+        assert_eq!(mask & (1 << 16), 1 << 16);
+        assert!(!settings.directions);
+        assert_eq!(settings.direction_style, minimap::DirectionStyle::Compass);
+        assert!(
+            Settings::decode("directions=true\ndirection_style=axes")
+                .encode()
+                .contains("directions=true")
         );
     }
 
@@ -7591,7 +7685,7 @@ mod map_regressions {
             assert!(!settings.nether_coordinates);
             assert!(!settings.encode().contains("smooth_worldmap"));
             assert_eq!(Settings::decode(&settings.encode()), settings);
-            assert_eq!(settings.labels().len(), 15);
+            assert_eq!(settings.labels().len(), 17);
         }
     }
     #[test]
