@@ -65,7 +65,7 @@ impl Game<'_> {
         let mut mods=Vec::new();game.native_mods(&mut mods);game.native_mods(&mut mods);
         assert_eq!(mods.len(),1);assert_eq!(mods[0].keys[0],[runtime::WORLD_MAP_KEY,runtime::tr("Open world map", "Открыть большую карту", "Ouvrir la carte du monde", "Abrir mapa del mundo", "Weltkarte öffnen"),runtime::WORLD_MAP_DEFAULT].map(str::to_owned));
         let mut buttons=Vec::new();game.native_settings("foreign",&mut buttons);assert!(buttons.is_empty());
-        game.native_settings(runtime::MOD_ID,&mut buttons);assert_eq!(buttons.len(),14);
+        game.native_settings(runtime::MOD_ID,&mut buttons);assert_eq!(buttons.len(),16);
         // The same controller changes labels without altering saved preferences.
         let original=runtime::initialize(directory.clone()).settings();
         runtime::set_language("ru_ru");

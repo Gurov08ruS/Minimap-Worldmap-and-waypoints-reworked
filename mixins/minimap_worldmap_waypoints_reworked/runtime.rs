@@ -224,6 +224,63 @@ pub mod minimap {
         }
     }
 
+    /// What a waypoint's 3D-world marker shows. The coloured marker (its first
+    /// letter or a skull) is always drawn; the label below it is optional.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub enum WorldMarkerStyle {
+        #[default]
+        LetterDistance,
+        Letter,
+        NameDistance,
+    }
+
+    impl WorldMarkerStyle {
+        pub const ALL: [Self; 3] = [Self::LetterDistance, Self::Letter, Self::NameDistance];
+
+        pub fn name(self) -> &'static str {
+            match self {
+                Self::LetterDistance => "letter_distance",
+                Self::Letter => "letter",
+                Self::NameDistance => "name_distance",
+            }
+        }
+
+        fn from_name(name: &str) -> Option<Self> {
+            match name {
+                "letter_distance" => Some(Self::LetterDistance),
+                "letter" => Some(Self::Letter),
+                "name_distance" => Some(Self::NameDistance),
+                _ => None,
+            }
+        }
+
+        pub fn label(self) -> &'static str {
+            match self {
+                Self::LetterDistance => tr(
+                    "Letter + distance",
+                    "Буква + дистанция",
+                    "Lettre + distance",
+                    "Letra + distancia",
+                    "Buchstabe + Entfernung",
+                ),
+                Self::Letter => tr(
+                    "Letter only",
+                    "Только буква",
+                    "Lettre seule",
+                    "Solo letra",
+                    "Nur Buchstabe",
+                ),
+                Self::NameDistance => tr(
+                    "Name + distance",
+                    "Имя + дистанция",
+                    "Nom + distance",
+                    "Nombre + distancia",
+                    "Name + Entfernung",
+                ),
+            }
+        }
+    }
+
     #[derive(Debug, Clone, Copy, PartialEq)]
     pub struct Settings {
         pub cache_ram_mib: u16,
@@ -239,6 +296,8 @@ pub mod minimap {
         pub nether_coordinates: bool,
         pub death_waypoints: bool,
         pub death_waypoint_auto_remove: bool,
+        pub world_waypoints: bool,
+        pub world_waypoint_style: WorldMarkerStyle,
     }
 
     impl Default for Settings {
@@ -257,6 +316,8 @@ pub mod minimap {
                 nether_coordinates: true,
                 death_waypoints: true,
                 death_waypoint_auto_remove: true,
+                world_waypoints: true,
+                world_waypoint_style: WorldMarkerStyle::default(),
             }
         }
     }
@@ -294,6 +355,14 @@ pub mod minimap {
                     "death_waypoint_auto_remove" => {
                         value.death_waypoint_auto_remove =
                             raw.parse().unwrap_or(value.death_waypoint_auto_remove)
+                    }
+                    "world_waypoints" => {
+                        value.world_waypoints = raw.parse().unwrap_or(value.world_waypoints)
+                    }
+                    "world_waypoint_style" => {
+                        if let Some(style) = WorldMarkerStyle::from_name(raw) {
+                            value.world_waypoint_style = style;
+                        }
                     }
                     "cache_ram_mib" => {
                         if let Ok(n) = raw.parse::<u16>()
@@ -338,7 +407,7 @@ pub mod minimap {
 
         pub fn encode(self) -> String {
             format!(
-                "# Minimap Reworked settings\nenabled={}\ncorner={}\nsize={}\nshape={}\nzoom={}\nrotate={}\nmini_dimension={}\nworld_dimension={}\noverworld_coordinates={}\nnether_coordinates={}\ndeath_waypoints={}\ndeath_waypoint_auto_remove={}\ncache_ram_mib={}\n",
+                "# Minimap Reworked settings\nenabled={}\ncorner={}\nsize={}\nshape={}\nzoom={}\nrotate={}\nmini_dimension={}\nworld_dimension={}\noverworld_coordinates={}\nnether_coordinates={}\ndeath_waypoints={}\ndeath_waypoint_auto_remove={}\nworld_waypoints={}\nworld_waypoint_style={}\ncache_ram_mib={}\n",
                 self.enabled,
                 self.corner.name(),
                 self.size_px,
@@ -351,6 +420,8 @@ pub mod minimap {
                 self.nether_coordinates,
                 self.death_waypoints,
                 self.death_waypoint_auto_remove,
+                self.world_waypoints,
+                self.world_waypoint_style.name(),
                 self.cache_ram_mib,
             )
         }
@@ -372,7 +443,7 @@ pub mod minimap {
                 5 => self.rotate_with_player = !self.rotate_with_player,
                 6 => {
                     *self = Self::default();
-                    return 0x3fbf;
+                    return 0xffbf;
                 }
                 7 => {
                     self.mini_dimension = super::cycle(self.mini_dimension, &super::Dimension::ALL)
@@ -385,6 +456,11 @@ pub mod minimap {
                 10 => self.nether_coordinates = !self.nether_coordinates,
                 11 => self.death_waypoints = !self.death_waypoints,
                 12 => self.death_waypoint_auto_remove = !self.death_waypoint_auto_remove,
+                13 => self.world_waypoints = !self.world_waypoints,
+                14 => {
+                    self.world_waypoint_style =
+                        super::cycle(self.world_waypoint_style, &WorldMarkerStyle::ALL)
+                }
                 _ => return 0,
             }
             1 << button
@@ -392,7 +468,7 @@ pub mod minimap {
 
         // Only locally edited fields override settings loaded asynchronously.
         fn overlay(&mut self, edited: Self, mask: u16) {
-            if mask & 8192 != 0 {
+            if mask & 32768 != 0 {
                 self.cache_ram_mib = edited.cache_ram_mib;
             }
             if mask & 1 != 0 {
@@ -427,6 +503,12 @@ pub mod minimap {
             }
             if mask & 4096 != 0 {
                 self.death_waypoint_auto_remove = edited.death_waypoint_auto_remove;
+            }
+            if mask & 8192 != 0 {
+                self.world_waypoints = edited.world_waypoints;
+            }
+            if mask & 16384 != 0 {
+                self.world_waypoint_style = edited.world_waypoint_style;
             }
             if mask & 32 != 0 {
                 self.rotate_with_player = edited.rotate_with_player;
@@ -549,6 +631,22 @@ pub mod minimap {
                     "Eliminar marcadores de muerte al acercarse: {}",
                     "Todes-Wegpunkte bei Annäherung entfernen: {}",
                     on(self.death_waypoint_auto_remove)
+                ),
+                localized_format!(
+                    "Show waypoints in the 3D world: {}",
+                    "Показывать вейпоинты в 3D-мире: {}",
+                    "Afficher les repères dans le monde 3D : {}",
+                    "Mostrar marcadores en el mundo 3D: {}",
+                    "Wegpunkte in der 3D-Welt zeigen: {}",
+                    on(self.world_waypoints)
+                ),
+                localized_format!(
+                    "3D marker: {}",
+                    "3D-маркер: {}",
+                    "Marqueur 3D : {}",
+                    "Marcador 3D: {}",
+                    "3D-Markierung: {}",
+                    self.world_waypoint_style.label()
                 ),
             ]
         }
@@ -1477,6 +1575,8 @@ pub struct Waypoint {
     pub icon: WaypointIcon,
     /// Namespaced biome id (for example `minecraft:dappled_forest`), once known.
     pub biome: Option<String>,
+    /// Whether this point's marker is drawn in the 3D world (through walls).
+    pub show_3d: bool,
 }
 
 /// Automatic death waypoints start black so their skull stands out.
@@ -1532,6 +1632,7 @@ impl Waypoint {
     fn decode(text: &str) -> Option<Self> {
         let (version, rest) = text.split_once('=')?;
         let (fields, version) = match version {
+            "waypoint_v5" => (10, 5),
             "waypoint_v4" => (9, 4),
             "waypoint_v3" => (7, 3),
             "waypoint_v2" => (6, 2),
@@ -1575,6 +1676,12 @@ impl Waypoint {
             (_, Some(color)) => Self::clean_color(color),
             (_, None) => DEFAULT_WAYPOINT_COLOR,
         };
+        let name = Self::clean_name(&unescape_name(parts.next().unwrap_or("")));
+        let show_3d = if version >= 5 {
+            parts.next() != Some("0")
+        } else {
+            true
+        };
         Some(Self {
             world,
             dimension,
@@ -1584,13 +1691,14 @@ impl Waypoint {
             color,
             icon,
             biome,
-            name: Self::clean_name(&unescape_name(parts.next().unwrap_or(""))),
+            name,
+            show_3d,
         })
     }
 
     fn encode(&self) -> String {
         format!(
-            "waypoint_v4={}:{}:{}:{}:{}:{:06x}:{}:{}:{}\n",
+            "waypoint_v5={}:{}:{}:{}:{}:{:06x}:{}:{}:{}:{}\n",
             escape_name(&self.world),
             self.dimension.name(),
             self.x,
@@ -1599,7 +1707,8 @@ impl Waypoint {
             self.stored_color(),
             self.icon.name(),
             escape_name(self.biome.as_deref().unwrap_or("")),
-            escape_name(&self.name)
+            escape_name(&self.name),
+            if self.show_3d { "1" } else { "0" }
         )
     }
 }
@@ -1668,11 +1777,13 @@ fn push_waypoint(waypoints: &mut Vec<Waypoint>, waypoint: Waypoint) -> bool {
         let unchanged = existing.name == waypoint.name
             && existing.color == waypoint.color
             && existing.icon == waypoint.icon
-            && existing.biome == biome;
+            && existing.biome == biome
+            && existing.show_3d == waypoint.show_3d;
         existing.name = waypoint.name;
         existing.color = waypoint.color;
         existing.icon = waypoint.icon;
         existing.biome = biome;
+        existing.show_3d = waypoint.show_3d;
         return !unchanged;
     }
     if waypoints
@@ -1842,7 +1953,7 @@ impl Controller {
             return;
         }
         state.settings.cache_ram_mib = value;
-        state.touched |= 8192;
+        state.touched |= 32768;
         state.revision += 1;
         drop(state);
         if let Some(tx) = self
@@ -1948,6 +2059,7 @@ impl Controller {
                 color: DEATH_WAYPOINT_COLOR,
                 icon: WaypointIcon::Skull,
                 biome: biome.and_then(Waypoint::clean_biome),
+                show_3d: true,
             },
         );
         if !added {
@@ -2050,6 +2162,38 @@ impl Controller {
         }
         waypoint.name = name;
         waypoint.color = color;
+        state.revision += 1;
+        drop(state);
+        if let Some(notify) = notify.as_ref() {
+            let _ = notify.try_send(());
+        }
+        true
+    }
+
+    /// Toggles whether a waypoint's marker is drawn in the 3D world, and
+    /// persists the change. False for an unknown point or an unchanged state.
+    pub fn set_waypoint_3d(
+        &self,
+        world: &str,
+        dimension: Dimension,
+        x: i32,
+        z: i32,
+        show_3d: bool,
+    ) -> bool {
+        let notify = self.notify.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(waypoint) = state.waypoints.iter_mut().find(|waypoint| {
+            waypoint.world == world
+                && waypoint.dimension == dimension
+                && waypoint.x == x
+                && waypoint.z == z
+        }) else {
+            return false;
+        };
+        if waypoint.show_3d == show_3d {
+            return false;
+        }
+        waypoint.show_3d = show_3d;
         state.revision += 1;
         drop(state);
         if let Some(notify) = notify.as_ref() {
@@ -2279,7 +2423,7 @@ mod tests {
             cache_ram_mib: 32,
             ..Settings::default()
         };
-        minimap::merge(&mut loaded, edited, 8192);
+        minimap::merge(&mut loaded, edited, 32768);
         assert_eq!(loaded.cache_ram_mib, 32);
     }
 
@@ -2294,6 +2438,7 @@ mod tests {
             color: DEFAULT_WAYPOINT_COLOR,
             icon: WaypointIcon::Letter,
             biome: None,
+            show_3d: true,
         }
     }
 
@@ -2385,7 +2530,7 @@ mod tests {
         assert!(controller.waypoints("save:A").is_empty());
         let file = fs::read_to_string(directory.join(SETTINGS_FILE)).unwrap();
         assert!(!file.lines().any(|l| l.starts_with("waypoint=")));
-        assert!(file.contains("waypoint_v4="));
+        assert!(file.contains("waypoint_v5="));
         let reopened = Controller::open(directory.clone());
         reopened.shutdown();
         assert_eq!(reopened.waypoints(&scoped.world), vec![scoped]);
@@ -2397,7 +2542,7 @@ mod tests {
     }
 
     #[test]
-    fn scoped_v2_records_gain_the_default_colour_and_migrate_to_v4() {
+    fn scoped_v2_records_gain_the_default_colour_and_migrate_to_v5() {
         let directory = scratch();
         fs::create_dir_all(&directory).unwrap();
         fs::write(
@@ -2408,7 +2553,7 @@ mod tests {
         let controller = Controller::open(directory.clone());
         controller.shutdown();
         let file = fs::read_to_string(directory.join(SETTINGS_FILE)).unwrap();
-        assert!(file.contains("waypoint_v4="));
+        assert!(file.contains("waypoint_v5="));
         assert!(!file.contains("waypoint_v2="));
         let reopened = Controller::open(directory.clone());
         reopened.shutdown();
@@ -2417,6 +2562,7 @@ mod tests {
         assert_eq!(waypoint.color, DEFAULT_WAYPOINT_COLOR);
         assert_eq!(waypoint.icon, WaypointIcon::Letter);
         assert_eq!(waypoint.biome, None);
+        assert!(waypoint.show_3d);
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2434,6 +2580,7 @@ mod tests {
             color: DEFAULT_WAYPOINT_COLOR,
             icon: WaypointIcon::Letter,
             biome: None,
+            show_3d: true,
         };
         assert!(controller.add_waypoint(point.clone()));
         assert!(!controller.add_waypoint(point.clone()));
@@ -2448,6 +2595,7 @@ mod tests {
                 color: WAYPOINT_COLORS[(x as usize) % WAYPOINT_COLORS.len()],
                 icon: WaypointIcon::Letter,
                 biome: None,
+                show_3d: true,
             }));
         }
         controller.shutdown();
@@ -2478,6 +2626,65 @@ mod tests {
                 .encode()
                 .contains("death_waypoints=false")
         );
+    }
+
+    #[test]
+    fn world_waypoint_settings_roundtrip_toggle_and_reset() {
+        let mut settings = Settings::default();
+        assert!(settings.world_waypoints);
+        assert_eq!(
+            settings.world_waypoint_style,
+            minimap::WorldMarkerStyle::LetterDistance
+        );
+        assert_eq!(minimap::apply(&mut settings, 13), 1 << 13);
+        assert!(!settings.world_waypoints);
+        assert_eq!(minimap::apply(&mut settings, 14), 1 << 14);
+        assert_eq!(
+            settings.world_waypoint_style,
+            minimap::WorldMarkerStyle::Letter
+        );
+        assert_eq!(Settings::decode(&settings.encode()), settings);
+        let mask = minimap::apply(&mut settings, 6);
+        assert_eq!(mask & (1 << 13), 1 << 13);
+        assert_eq!(mask & (1 << 14), 1 << 14);
+        assert!(settings.world_waypoints);
+        assert_eq!(
+            settings.world_waypoint_style,
+            minimap::WorldMarkerStyle::LetterDistance
+        );
+        assert!(
+            Settings::decode("world_waypoints=false\nworld_waypoint_style=name_distance")
+                .encode()
+                .contains("world_waypoints=false")
+        );
+    }
+
+    #[test]
+    fn waypoint_3d_flag_roundtrips_and_legacy_records_default_on() {
+        let mut point = point("save:test", "Home");
+        point.show_3d = false;
+        let decoded = Waypoint::decode(point.encode().trim()).unwrap();
+        assert!(!decoded.show_3d);
+        assert_eq!(decoded, point);
+        let legacy =
+            Waypoint::decode("waypoint_v4=save%3Atest:overworld:1:64:2:ff6b6b:letter::Old")
+                .unwrap();
+        assert!(legacy.show_3d);
+    }
+
+    #[test]
+    fn toggling_3d_visibility_persists() {
+        let directory = scratch();
+        let controller = Controller::open(directory.clone());
+        assert!(controller.add_waypoint(point("save:test", "Home")));
+        assert!(controller.set_waypoint_3d("save:test", Dimension::Overworld, 10, -5, false));
+        assert!(!controller.set_waypoint_3d("save:test", Dimension::Overworld, 10, -5, false));
+        assert!(!controller.waypoints("save:test")[0].show_3d);
+        controller.shutdown();
+        let reopened = Controller::open(directory.clone());
+        reopened.shutdown();
+        assert!(!reopened.waypoints("save:test")[0].show_3d);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -2573,6 +2780,7 @@ mod tests {
             color: 0x5aa9ff,
             icon: WaypointIcon::Letter,
             biome: Some("minecraft:plains".into()),
+            show_3d: true,
         };
         assert_eq!(
             Waypoint::decode(waypoint.encode().trim()).unwrap(),
@@ -7383,7 +7591,7 @@ mod map_regressions {
             assert!(!settings.nether_coordinates);
             assert!(!settings.encode().contains("smooth_worldmap"));
             assert_eq!(Settings::decode(&settings.encode()), settings);
-            assert_eq!(settings.labels().len(), 13);
+            assert_eq!(settings.labels().len(), 15);
         }
     }
     #[test]

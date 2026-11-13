@@ -7,7 +7,7 @@ fn click(game: &mut crate::game::Game<'_>, mod_id: &str, button: usize) {
                 .set_cache_ram_mib((button & 0xffff) as u16);
             return;
         }
-        if button == 13 {
+        if button == 15 {
             let controller = runtime::initialize(game.native_data_dir(runtime::MOD_ID));
             let value = controller.settings().cache_ram_mib;
             controller.set_cache_ram_mib(if value >= 512 { 16 } else { value + 16 });

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Draw waypoint markers in the 3D world, through walls, as the waypoint's
+  first letter (or a skull) in its colour, on top of the normal HUD. A new
+  **Show waypoints in the 3D world** setting turns the whole overlay off, and a
+  **3D marker** setting picks the label: *Letter + distance* (default),
+  *Letter only*, or *Name + distance*. Markers render as cached HUD quads with
+  the GPU font atlas; no image is re-uploaded per frame.
+- Let each waypoint hide its own 3D marker. Toggle it from the waypoint manager
+  (the `3D` button on each row) or from the right-click menu on the world map.
+  The flag is stored per point (`waypoint_v5=`), defaulting on; older `v2`–`v4`
+  records load as visible.
 - Pin the bundle to Horizon Nightly 2026-11-13 (`9f42064`) instead of the
   retired 2026-11-07 build. Follow the moved injection targets:
   `game::window_handler::<Game<'_> as ApplicationHandler>::exiting`,
@@ -20,7 +30,8 @@
   deaths add `Death 2`, `Death 3` and so on. Creation and proximity removal can
   be switched off independently in the mod settings; reaching a death waypoint
   within four blocks removes it.
-- Save each waypoint's sampled biome in `settings.ini` (`waypoint_v4=`), so
+- Save each waypoint's sampled biome in `settings.ini` (`waypoint_v5=`, migrated
+  from `waypoint_v2`–`v4`), so
   biome names and icons survive chunk unloads, dimension changes and reconnects
   instead of living only in the current connection's memory. Older `v2`/`v3`
   records load unchanged with a letter icon and an empty biome.

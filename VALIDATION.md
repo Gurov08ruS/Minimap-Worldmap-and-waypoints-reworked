@@ -1,5 +1,31 @@
 # Validation
 
+## Unreleased — 3D-world waypoint markers and per-point visibility, 2026-11-13
+
+Validated on Linux with Rust 1.95.0 against the unchanged Horizon Nightly
+2026-11-13 (`9f42064`) and Horizon Mixins `d9c83d7` pins.
+
+- 3D-world markers are drawn in the HUD overlay pass, so they render through
+  walls on the GPU (flat-colour quads plus the cached font atlas) without a
+  per-frame image upload. The label is composed only when the selected style
+  asks for it.
+- `cargo fmt --all --check` and clippy with warnings denied: pass.
+- Locked offline workspace tests: 80 runtime tests and one source-audit test
+  passed; one manual benchmark ignored.
+- New regressions cover the `world_waypoints`/`world_waypoint_style` settings
+  round-trip, toggle and reset; the `waypoint_v5` `show_3d` field round-trip;
+  legacy `v2`–`v4` records defaulting to visible; and per-point 3D toggling
+  persisting across a controller reopen.
+- `python3 tools/test_template.py`: pass, with the settings list now 16 rows.
+- `python3 tools/test_stage.py --horizon ../horizon`: pass; original checkout
+  unchanged, only planned ASTs differ.
+- Actual pinned Horizon client check: pass.
+- Runtime tests inside the pinned client: 80 passed, one benchmark ignored.
+
+No live-game launch, visual review of the 3D markers or macOS/Windows run was
+performed. The marker style and per-point toggles are exercised by unit tests
+and the injected-client build, not by an interactive session.
+
 ## Unreleased — Horizon Nightly 2026-11-13 compatibility, 2026-11-13
 
 Validated on Linux with Rust 1.95.0 against Horizon Nightly 2026-11-13

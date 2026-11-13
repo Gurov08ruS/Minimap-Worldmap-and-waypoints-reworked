@@ -152,9 +152,15 @@ language in its language settings. Saved waypoint names are preserved as entered
   **Show on map** to open its dimension and center the map on it without
   teleporting.
 - Waypoints are saved with the preferences (newest 64 per world/server). In the
-  3D world they appear above the HUD as coloured first-letter markers with their
-  name and distance, through walls and only in their own dimension. On both maps
-  their full name appears when hovering over the marker.
+  3D world they appear above the HUD as coloured first-letter markers (or a
+  skull for deaths), through walls and only in their own dimension. The marker
+  label is configurable: **3D marker** chooses *letter + distance* (default),
+  *letter only*, or *name + distance*. **Show waypoints in the 3D world** turns
+  the whole overlay off, leaving markers only on the maps. Each waypoint can
+  also hide its own 3D marker — toggle the `3D` button on its row in the
+  waypoint manager or the *Show/Hide in 3D world* entry in the world map's
+  right-click menu. On both maps a waypoint's full name appears when hovering
+  over its marker.
 - **Death waypoints** are placed automatically where the player dies: a black
   marker with a skull, named `Death`, `Death 2`, `Death 3` and so on. Two
   settings control them: **Death waypoints** (create on death, default on) and
@@ -297,8 +303,10 @@ have Horizon's public invite identity, which can change between sharings.
 Migration deliberately deletes old `waypoint=` records without a world identity,
 as requested by the author; it never guesses a destination world. Valid scoped
 `waypoint_v2=` records survive with the default marker colour and are rewritten
-as `waypoint_v4=` with their colour, a letter icon and an empty biome;
-`waypoint_v3=` records upgrade the same way on the next save. Preferences also
+as `waypoint_v5=` with their colour, a letter icon, an empty biome and 3D
+visibility on;
+`waypoint_v3=` and `waypoint_v4=` records upgrade the same way on the next save.
+Preferences also
 survive. The migration is persisted even without joining a world or editing
 settings. Each world keeps its newest 64
 points; at 4,096 total points new worlds/points are refused rather than evicting

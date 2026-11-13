@@ -98,6 +98,7 @@ enum MenuAction {
     Teleport,
     TeleportDestination,
     DeleteWaypoint,
+    Toggle3D,
     Information,
 }
 
@@ -1154,6 +1155,7 @@ fn menu_items(
     game: &Game<'_>,
     menu: Menu,
     target: Option<PortalTarget>,
+    show_3d: bool,
 ) -> Vec<(&'static str, MenuAction)> {
     let mut items = vec![
         (
@@ -1210,6 +1212,26 @@ fn menu_items(
             ),
             MenuAction::DeleteWaypoint,
         ));
+        items.push((
+            if show_3d {
+                tr(
+                    "Hide in 3D world",
+                    "Скрыть в 3D-мире",
+                    "Masquer dans le monde 3D",
+                    "Ocultar en el mundo 3D",
+                    "In 3D-Welt ausblenden",
+                )
+            } else {
+                tr(
+                    "Show in 3D world",
+                    "Показать в 3D-мире",
+                    "Afficher dans le monde 3D",
+                    "Mostrar en el mundo 3D",
+                    "In 3D-Welt zeigen",
+                )
+            },
+            MenuAction::Toggle3D,
+        ));
     }
     if teleport_allowed(game) {
         if menu.portal.is_some() {
@@ -1239,6 +1261,18 @@ fn menu_items(
         }
     }
     items
+}
+
+/// Whether the waypoint under the pointer is shown in the 3D world; defaults to
+/// true for a point no longer in the current snapshot.
+fn waypoint_show_3d(state: &State, spot: Spot) -> bool {
+    state
+        .waypoints
+        .iter()
+        .find(|waypoint| {
+            waypoint.dimension == spot.dimension && waypoint.x == spot.x && waypoint.z == spot.z
+        })
+        .map_or(true, |waypoint| waypoint.show_3d)
 }
 
 fn menu_layout(
@@ -1420,6 +1454,18 @@ fn perform_menu(game: &Game<'_>, state: &mut State, menu: Menu, action: MenuActi
                 ));
             }
         }
+        MenuAction::Toggle3D => {
+            if let Some(spot) = menu.waypoint {
+                let show_3d = waypoint_show_3d(state, spot);
+                runtime::initialize(game.native_data_dir(runtime::MOD_ID)).set_waypoint_3d(
+                    &state.world,
+                    spot.dimension,
+                    spot.x,
+                    spot.z,
+                    !show_3d,
+                );
+            }
+        }
     }
 }
 
@@ -1433,7 +1479,8 @@ fn draw_menu(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     let subtitle = menu_subtitle(state, menu, &player);
     let has_subtitle = subtitle.is_some();
     let target = portal_target(state, menu, player.y.floor() as i32);
-    let items = menu_items(game, menu, target);
+    let show_3d = menu.waypoint.map_or(true, |spot| waypoint_show_3d(state, spot));
+    let items = menu_items(game, menu, target, show_3d);
     let (rect, rows) = menu_layout(
         game,
         [batch.width, batch.height],
@@ -1564,6 +1611,11 @@ fn waypoint_row_at(state: &State, width: f32, height: f32, index: usize) -> Opti
         (width - 24.0).max(1.0),
         41.0,
     ])
+}
+
+/// The clickable 3D-visibility toggle at the right end of a waypoint row.
+fn waypoint_3d_rect(row: [f32; 4]) -> [f32; 4] {
+    [row[0] + row[2] - 24.0, row[1] + 10.0, 20.0, 18.0]
 }
 
 // Shared by drawing and hit testing, including narrow GUI viewports.
@@ -1702,7 +1754,7 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         );
         let biome = waypoint.biome.as_deref();
         let biome_x = name_x + game.native_text_width(&waypoint.name) + 7.0;
-        let right = row[0] + row[2] - 4.0;
+        let right = row[0] + row[2] - 30.0;
         if biome_x + runtime::BIOME_ICON_SIZE as f32 <= right {
             biome_icon(game, batch, biome, [biome_x, row[1] + 3.0]);
             if let Some(biome) = biome {
@@ -1737,6 +1789,27 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             ),
             [row[0] + 26.0, row[1] + 25.0],
             0xaaaaaa,
+            false,
+        );
+        let toggle = waypoint_3d_rect(row);
+        let on = waypoint.show_3d;
+        game.native_fill(
+            batch,
+            toggle,
+            if on { 0xff2e7d52 } else { 0xff2a3542 },
+        );
+        if inside(mouse, toggle) {
+            game.native_fill(batch, toggle, 0xff3a4a5c);
+        }
+        let label = tr("3D", "3D", "3D", "3D", "3D");
+        game.native_text(
+            batch,
+            label,
+            [
+                toggle[0] + (toggle[2] - game.native_text_width(label)) / 2.0,
+                toggle[1] + 3.0,
+            ],
+            if on { 0xffffff } else { 0x707880 },
             false,
         );
     }
@@ -2371,7 +2444,15 @@ fn project(
     Some([(x * 0.5 + 0.5) * size[0], (1.0 - (y * 0.5 + 0.5)) * size[1]])
 }
 
-fn draw_world_waypoints(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
+fn draw_world_waypoints(
+    game: &Game<'_>,
+    batch: &mut HudBatch,
+    state: &State,
+    settings: &runtime::minimap::Settings,
+) {
+    if !settings.world_waypoints {
+        return;
+    }
     let Some(player) = game.native_player() else {
         return;
     };
@@ -2379,8 +2460,9 @@ fn draw_world_waypoints(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         return;
     };
     let dimension = Dimension::from_id(player.dimension);
+    let style = settings.world_waypoint_style;
     for waypoint in &state.waypoints {
-        if waypoint.dimension != dimension {
+        if !waypoint.show_3d || waypoint.dimension != dimension {
             continue;
         }
         let world = [
@@ -2412,32 +2494,45 @@ fn draw_world_waypoints(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
                 false,
             );
         }
-        let dx = f64::from(waypoint.x) + 0.5 - player.x;
-        let dy = f64::from(waypoint.y) + 1.5 - player.y;
-        let dz = f64::from(waypoint.z) + 0.5 - player.z;
-        let label = format!(
-            "{}  {} m",
-            waypoint.name,
-            (dx * dx + dy * dy + dz * dz).sqrt().round() as i64
-        );
-        let width = game.native_text_width(&label);
-        let label_x = if x + width + 12.0 > batch.width {
-            x - width - 10.0
-        } else {
-            x + 9.0
+        // The coloured marker is always drawn; the label below it depends on the
+        // selected style. Distance changes each frame, so it is only composed
+        // when the style asks for it.
+        let label = match style {
+            runtime::minimap::WorldMarkerStyle::Letter => None,
+            runtime::minimap::WorldMarkerStyle::LetterDistance
+            | runtime::minimap::WorldMarkerStyle::NameDistance => {
+                let dx = f64::from(waypoint.x) + 0.5 - player.x;
+                let dy = f64::from(waypoint.y) + 1.5 - player.y;
+                let dz = f64::from(waypoint.z) + 0.5 - player.z;
+                let distance = (dx * dx + dy * dy + dz * dz).sqrt().round() as i64;
+                match style {
+                    runtime::minimap::WorldMarkerStyle::NameDistance => {
+                        Some(format!("{}  {} m", waypoint.name, distance))
+                    }
+                    _ => Some(format!("{distance} m")),
+                }
+            }
         };
-        let label_y = y - 4.0;
-        game.native_fill(
-            batch,
-            [label_x - 3.0, label_y - 2.0, width + 6.0, 11.0],
-            0xd010151d,
-        );
-        let label_color = if waypoint.icon == runtime::WaypointIcon::Skull {
-            0xffe9e6dc
-        } else {
-            waypoint_argb(waypoint.color)
-        };
-        game.native_text(batch, &label, [label_x, label_y], label_color, true);
+        if let Some(label) = label {
+            let width = game.native_text_width(&label);
+            let label_x = if x + width + 12.0 > batch.width {
+                x - width - 10.0
+            } else {
+                x + 9.0
+            };
+            let label_y = y - 4.0;
+            game.native_fill(
+                batch,
+                [label_x - 3.0, label_y - 2.0, width + 6.0, 11.0],
+                0xd010151d,
+            );
+            let label_color = if waypoint.icon == runtime::WaypointIcon::Skull {
+                0xffe9e6dc
+            } else {
+                waypoint_argb(waypoint.color)
+            };
+            game.native_text(batch, &label, [label_x, label_y], label_color, true);
+        }
     }
 }
 
@@ -3232,7 +3327,8 @@ pub(super) fn gui_render_post(
         return;
     }
     let state = state();
-    draw_world_waypoints(game, batch, &state);
+    let settings = runtime::initialize(game.native_data_dir(runtime::MOD_ID)).settings();
+    draw_world_waypoints(game, batch, &state, &settings);
 }
 
 fn draw(
@@ -4053,7 +4149,8 @@ fn map_press(
         };
         let subtitle = menu_subtitle(state, menu, &player);
         let target = portal_target(state, menu, player.y.floor() as i32);
-        let items = menu_items(game, menu, target);
+        let show_3d = menu.waypoint.map_or(true, |spot| waypoint_show_3d(state, spot));
+        let items = menu_items(game, menu, target, show_3d);
         let (rect, rows) = menu_layout(
             game,
             [screen.rect[2], screen.rect[3]],
@@ -4211,6 +4308,22 @@ fn waypoint_press(
     }
     for index in 0..state.waypoints.len() {
         if let Some(row) = waypoint_row_at(state, screen.rect[2], screen.rect[3], index)
+            && inside(screen.mouse, waypoint_3d_rect(row))
+            && let Some(waypoint) = state.waypoints.get(index)
+        {
+            runtime::initialize(game.native_data_dir(runtime::MOD_ID)).set_waypoint_3d(
+                &state.world,
+                waypoint.dimension,
+                waypoint.x,
+                waypoint.z,
+                !waypoint.show_3d,
+            );
+            *canceled = true;
+            return;
+        }
+    }
+    for index in 0..state.waypoints.len() {
+        if let Some(row) = waypoint_row_at(state, screen.rect[2], screen.rect[3], index)
             && inside(screen.mouse, row)
         {
             state.waypoint_selected = Some(index);
@@ -4351,6 +4464,7 @@ fn save_name(game: &Game<'_>, state: &mut State) {
             color: form.color,
             icon: runtime::WaypointIcon::Letter,
             biome,
+            show_3d: true,
         });
         state.notice = Some((
             if saved {
@@ -4557,6 +4671,7 @@ mod render_tests {
             color: 0xff6b6b,
             icon: runtime::WaypointIcon::Letter,
             biome: None,
+            show_3d: true,
         });
         state.waypoint_selected = Some(0);
         let zoom = state.camera.zoom;
