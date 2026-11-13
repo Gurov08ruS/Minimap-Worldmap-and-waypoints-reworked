@@ -2442,24 +2442,37 @@ fn project(
     Some([(x * 0.5 + 0.5) * size[0], (1.0 - (y * 0.5 + 0.5)) * size[1]])
 }
 
-/// A camera built from the player's own position, yaw and pitch. `native_camera`
-/// only returns a frame when a trait mod (`mod_api::mods`) is registered; this
-/// injection-based mod has none, so it reconstructs the same matrices here.
+/// The exact camera the game uses this frame, rebuilt from its own view state.
+/// `native_camera` only returns a frame when a trait mod (`mod_api::mods`) is
+/// registered; this injection-based mod has none, so it reads the same camera
+/// position, rotation and field of view (including FOV/zoom changes) directly.
 fn world_camera(
+    game: &Game<'_>,
     player: &crate::game::native_hooks::NativePlayer,
     size: [f32; 2],
 ) -> horizon_client::mod_api::NativeCamera {
+    let partial = game.clock.camera_fraction() as f32;
+    let position = game.view.position;
+    let yaw = game.view.y_rot;
+    let pitch = game.view.x_rot;
+    let fov = game.fov_degrees(partial, position);
     horizon_client::mod_api::NativeCamera {
-        position: [player.x, player.y + 1.62, player.z],
-        eye_height: 1.62,
-        partial_tick: 1.0,
-        yaw: player.yaw,
-        pitch: player.pitch,
-        fov_degrees: 70.0,
+        position,
+        eye_height: game.view.eye_height,
+        partial_tick: partial,
+        yaw,
+        pitch,
+        fov_degrees: fov,
         near: 0.05,
         far: 2048.0,
-        view: horizon_client::camera::view_matrix(player.yaw, player.pitch).to_cols_array(),
-        projection: horizon_client::camera::perspective(70.0, size[0], size[1], 2048.0, 0.05, true),
+        // Match `Game::render` exactly: the bob and spin matrices go into the
+        // view, so markers stay glued to the world instead of drifting as the
+        // camera sways.
+        view: (game.bob_matrix(partial)
+            * game.spinning_matrix(partial)
+            * horizon_client::camera::view_matrix(yaw, pitch))
+        .to_cols_array(),
+        projection: horizon_client::camera::perspective(fov, size[0], size[1], 2048.0, 0.05, true),
         dimension: player.dimension.to_owned(),
     }
 }
@@ -2476,7 +2489,7 @@ fn draw_world_waypoints(
     let Some(player) = game.native_player() else {
         return;
     };
-    let camera = world_camera(&player, [batch.width, batch.height]);
+    let camera = world_camera(game, &player, [batch.width, batch.height]);
     let dimension = Dimension::from_id(player.dimension);
     let style = settings.world_waypoint_style;
     for waypoint in &state.waypoints {
@@ -4865,21 +4878,59 @@ mod render_tests {
     }
 
     #[test]
-    fn a_waypoint_projects_from_the_player_built_camera() {
-        let player = crate::game::native_hooks::NativePlayer {
-            x: 0.0,
-            y: 64.0,
-            z: 0.0,
+    fn a_narrower_fov_spreads_waypoints_further_from_the_centre() {
+        let camera = |fov: f32| horizon_client::mod_api::NativeCamera {
+            position: [0.0; 3],
+            eye_height: 1.62,
+            partial_tick: 1.0,
             yaw: 0.0,
             pitch: 0.0,
-            dimension: "minecraft:overworld",
+            fov_degrees: fov,
+            near: 0.05,
+            far: 2048.0,
+            view: horizon_client::camera::view_matrix(0.0, 0.0).to_cols_array(),
+            projection: horizon_client::camera::perspective(
+                fov, 1920.0, 1080.0, 2048.0, 0.05, true,
+            ),
+            dimension: "minecraft:overworld".into(),
         };
-        let camera = world_camera(&player, [1920.0, 1080.0]);
-        // Facing south (yaw 0), a waypoint ten blocks south at eye height sits
-        // on the screen centre.
-        let at = project(&camera, [0.0, 65.62, 10.0], [1920.0, 1080.0]).unwrap();
-        assert!((at[0] - 960.0).abs() < 1.0, "{at:?}");
-        assert!((at[1] - 540.0).abs() < 1.0, "{at:?}");
+        let wide = project(&camera(110.0), [5.0, 0.0, 10.0], [1920.0, 1080.0]).unwrap();
+        let narrow = project(&camera(30.0), [5.0, 0.0, 10.0], [1920.0, 1080.0]).unwrap();
+        // A narrower field of view magnifies: the same point moves away from centre.
+        assert!(
+            (narrow[0] - 960.0).abs() > (wide[0] - 960.0).abs(),
+            "wide {wide:?}, narrow {narrow:?}"
+        );
+    }
+
+    #[test]
+    fn the_projection_is_independent_of_pixel_resolution() {
+        let camera = |width: f32, height: f32| horizon_client::mod_api::NativeCamera {
+            position: [0.0; 3],
+            eye_height: 1.62,
+            partial_tick: 1.0,
+            yaw: 0.0,
+            pitch: 0.0,
+            fov_degrees: 70.0,
+            near: 0.05,
+            far: 2048.0,
+            view: horizon_client::camera::view_matrix(0.0, 0.0).to_cols_array(),
+            projection: horizon_client::camera::perspective(
+                70.0, width, height, 2048.0, 0.05, true,
+            ),
+            dimension: "minecraft:overworld".into(),
+        };
+        let hd = project(&camera(1920.0, 1080.0), [5.0, 0.0, 10.0], [1920.0, 1080.0]).unwrap();
+        let uhd = project(&camera(3840.0, 2160.0), [5.0, 0.0, 10.0], [3840.0, 2160.0]).unwrap();
+        // The same world point lands at the same relative screen position.
+        assert!(
+            (hd[0] / 1920.0 - uhd[0] / 3840.0).abs() < 1e-3,
+            "{hd:?} {uhd:?}"
+        );
+        assert!(
+            (hd[1] / 1080.0 - uhd[1] / 2160.0).abs() < 1e-3,
+            "{hd:?} {uhd:?}"
+        );
     }
 
     #[test]

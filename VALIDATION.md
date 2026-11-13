@@ -7,13 +7,17 @@ Validated on Linux with Rust 1.95.0 against the unchanged Horizon Nightly
 
 - The 3D markers were never drawn because `native_camera` returns `None` for an
   injection-only mod (it is computed only when a trait mod is registered in
-  `mod_api::mods`). `world_camera` now reconstructs the same view/projection
-  from the player's position, yaw and pitch, so markers render through walls.
+  `mod_api::mods`). `world_camera` reads the same camera the renderer uses:
+  `view.position`, `view.y_rot`/`x_rot`, the bob and spin matrices, and
+  `fov_degrees` (so the marker follows the FOV/zoom setting). It is rebuilt from
+  the client's own view state, so it renders through walls without a trait mod.
 - `cargo fmt --all --check` and clippy with warnings denied: pass; the injected
   adapter/helper files are also rustfmt-clean.
 - Locked offline workspace tests: 81 runtime tests and one source-audit test
-  passed; one manual benchmark ignored. A new client-side regression projects a
-  waypoint from the player-built camera to the screen centre.
+  passed; one manual benchmark ignored. New client-side regressions project a
+  waypoint onto the screen, check that a narrower FOV moves it further from the
+  centre, and check that the projection lands at the same relative position at
+  1920×1080 and 3840×2160.
 - `python3 tools/test_template.py` and `python3 tools/test_stage.py`: pass.
 - Actual pinned Horizon client check: pass; runtime tests inside the pinned
   client: 81 passed, one benchmark ignored.
