@@ -155,7 +155,9 @@ language in its language settings. Saved waypoint names are preserved as entered
   3D world they appear above the HUD as coloured first-letter markers (or a
   skull for deaths), through walls and only in their own dimension. The marker
   label is configurable: **3D marker** chooses *letter + distance* (default),
-  *letter only*, or *name + distance*. **Show waypoints in the 3D world** turns
+  *letter only*, or *name + distance*. **3D labels only on hover** (default on)
+  shows that label only while the crosshair is on the marker; turn it off to
+  always show it. **Show waypoints in the 3D world** turns
   the whole overlay off, leaving markers only on the maps. Each waypoint can
   also hide its own 3D marker — toggle the `3D` button on its row in the
   waypoint manager or the *Show/Hide in 3D world* entry in the world map's

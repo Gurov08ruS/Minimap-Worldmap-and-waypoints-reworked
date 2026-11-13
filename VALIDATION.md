@@ -1,5 +1,26 @@
 # Validation
 
+## Unreleased — 3D-waypoint labels on hover, 2026-11-14
+
+Validated on Linux with Rust 1.95.0 against the unchanged Horizon Nightly
+2026-11-13 (`9f42064`) and Horizon Mixins `d9c83d7` pins.
+
+- A 3D waypoint's label is drawn only while the crosshair (the screen centre in
+  the 3D view) is over its marker, when **3D labels only on hover** is on
+  (default). The toggle restores always-on labels.
+- `cargo fmt --all --check` and clippy with warnings denied: pass; injected
+  adapter/helper files are rustfmt-clean.
+- Locked offline workspace tests: 82 runtime tests and one source-audit test
+  passed; one manual benchmark ignored. The new `labels_on_hover` setting has a
+  round-trip/toggle/reset regression.
+- `python3 tools/test_template.py` and `python3 tools/test_stage.py`: pass, with
+  the settings list now 19 rows.
+- Actual pinned Horizon client check: pass; runtime tests inside the pinned
+  client: 82 passed, one benchmark ignored.
+
+No live-game launch was performed; the hover check is type-checked and unit
+tested, not reviewed interactively.
+
 ## Unreleased — 3D-waypoint camera fix, 2026-11-13
 
 Validated on Linux with Rust 1.95.0 against the unchanged Horizon Nightly

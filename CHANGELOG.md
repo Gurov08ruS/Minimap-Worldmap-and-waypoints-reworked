@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Show a 3D waypoint's label (distance, or name and distance) only while the
+  crosshair is on its marker, instead of always. A new **3D labels only on
+  hover** setting (on by default) can switch back to always showing them.
 - Fix 3D-world waypoint markers never appearing: `native_camera` only returns a
   frame when a trait mod (`[api]`) is registered, and this injection-based mod
   has none. Markers now use the game's exact camera — position, yaw/pitch, bob

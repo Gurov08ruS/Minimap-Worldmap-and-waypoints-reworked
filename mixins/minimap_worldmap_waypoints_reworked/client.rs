@@ -2492,6 +2492,11 @@ fn draw_world_waypoints(
     let camera = world_camera(game, &player, [batch.width, batch.height]);
     let dimension = Dimension::from_id(player.dimension);
     let style = settings.world_waypoint_style;
+    // In the 3D view the pointer is the crosshair at the screen centre: a label
+    // is "hovered" when its marker sits under it. The radius is forgiving so a
+    // marker just off the crosshair still counts.
+    let crosshair = [batch.width / 2.0, batch.height / 2.0];
+    const HOVER_RADIUS: f32 = 24.0;
     for waypoint in &state.waypoints {
         if !waypoint.show_3d || waypoint.dimension != dimension {
             continue;
@@ -2527,22 +2532,29 @@ fn draw_world_waypoints(
         }
         // The coloured marker is always drawn; the label below it depends on the
         // selected style. Distance changes each frame, so it is only composed
-        // when the style asks for it.
-        let label = match style {
-            runtime::minimap::WorldMarkerStyle::Letter => None,
-            runtime::minimap::WorldMarkerStyle::LetterDistance
-            | runtime::minimap::WorldMarkerStyle::NameDistance => {
-                let dx = f64::from(waypoint.x) + 0.5 - player.x;
-                let dy = f64::from(waypoint.y) + 1.5 - player.y;
-                let dz = f64::from(waypoint.z) + 0.5 - player.z;
-                let distance = (dx * dx + dy * dy + dz * dz).sqrt().round() as i64;
-                match style {
-                    runtime::minimap::WorldMarkerStyle::NameDistance => {
-                        Some(format!("{}  {} m", waypoint.name, distance))
+        // when the style asks for it and, with "labels only on hover", when the
+        // crosshair is over the marker.
+        let hovered =
+            (x - crosshair[0]).abs() <= HOVER_RADIUS && (y - crosshair[1]).abs() <= HOVER_RADIUS;
+        let label = if !settings.labels_on_hover || hovered {
+            match style {
+                runtime::minimap::WorldMarkerStyle::Letter => None,
+                runtime::minimap::WorldMarkerStyle::LetterDistance
+                | runtime::minimap::WorldMarkerStyle::NameDistance => {
+                    let dx = f64::from(waypoint.x) + 0.5 - player.x;
+                    let dy = f64::from(waypoint.y) + 1.5 - player.y;
+                    let dz = f64::from(waypoint.z) + 0.5 - player.z;
+                    let distance = (dx * dx + dy * dy + dz * dz).sqrt().round() as i64;
+                    match style {
+                        runtime::minimap::WorldMarkerStyle::NameDistance => {
+                            Some(format!("{}  {} m", waypoint.name, distance))
+                        }
+                        _ => Some(format!("{distance} m")),
                     }
-                    _ => Some(format!("{distance} m")),
                 }
             }
+        } else {
+            None
         };
         if let Some(label) = label {
             let width = game.native_text_width(&label);
