@@ -3274,14 +3274,110 @@ pub mod container {
         }
     }
     pub fn world_path(directory: &Path, world: &str) -> PathBuf {
-        // The exact identity is also checked in each root: a hash collision never merges worlds.
+        // Name the file after the world's folder/address so it can be told apart
+        // in `cache/`, with a short identity hash so two names that sanitize to
+        // the same string never share one file. The exact identity is also
+        // checked in each root: a hash collision never merges worlds.
+        directory.join(cache_file_name(world))
+    }
+    /// The stable 128-bit identity hash: used for the readable name's suffix and
+    /// to find caches written before files were named after their world.
+    fn cache_hash_pair(world: &str) -> (u64, u64) {
         let mut a = 0xcbf29ce484222325u64;
         let mut b = 0x84222325cbf29ce4u64;
         for byte in world.bytes() {
             a = (a ^ u64::from(byte)).wrapping_mul(0x100000001b3);
             b = (b ^ u64::from(byte)).wrapping_mul(0x100000001b3);
         }
-        directory.join(format!("{a:016x}{b:016x}.mwwr"))
+        (a, b)
+    }
+    fn cache_file_name(world: &str) -> String {
+        let (kind, id) = world.split_once(':').unwrap_or(("world", world));
+        let readable = cache_component(id);
+        let (a, _) = cache_hash_pair(world);
+        if readable.is_empty() {
+            format!("{kind}-{a:016x}.mwwr")
+        } else {
+            format!("{kind}-{readable}-{a:016x}.mwwr")
+        }
+    }
+    /// Filesystem-safe form of a save folder or server address: keeps letters,
+    /// digits, spaces and `-_.`, replaces control characters and the characters
+    /// Windows rejects, trims trailing dots/spaces, and bounds the byte length so
+    /// the whole name stays under the filesystem limit.
+    fn cache_component(id: &str) -> String {
+        let mut out = String::new();
+        for c in id.chars() {
+            if c.is_control() || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') {
+                out.push('_');
+            } else {
+                out.push(c);
+            }
+            if out.len() >= 80 {
+                break;
+            }
+        }
+        out.trim_matches(|c| c == '.' || c == ' ').to_string()
+    }
+    /// Before files were named after their world, a cache was
+    /// `<128-bit-hash>.mwwr`. Rename such a file to the readable name so
+    /// existing terrain is kept; a failed rename just starts a fresh cache.
+    fn migrate_legacy_cache(directory: &Path, world: &str, target: &Path) {
+        if target.exists() {
+            return;
+        }
+        let (a, b) = cache_hash_pair(world);
+        let legacy = directory.join(format!("{a:016x}{b:016x}.mwwr"));
+        if legacy.exists() {
+            let _ = std::fs::rename(legacy, target);
+        }
+    }
+    /// Rename every legacy hash-named cache in `directory` to the readable name
+    /// its stored world identity gives, without waiting for that world to be
+    /// opened. A file another process holds open, or whose readable name already
+    /// exists, is left as it is.
+    pub fn migrate_cache_names(directory: &Path) {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("mwwr") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            // Legacy names are exactly 32 lowercase hex digits.
+            if stem.len() != 32 || !stem.bytes().all(|b| b.is_ascii_hexdigit()) {
+                continue;
+            }
+            let Some(world) = read_world_identity(&path) else {
+                continue;
+            };
+            let target = world_path(directory, &world);
+            if target == path || target.exists() {
+                continue;
+            }
+            let _ = std::fs::rename(&path, &target);
+        }
+    }
+    /// The world identity stored in a cache's first header, when it is a valid
+    /// container header.
+    fn read_world_identity(path: &Path) -> Option<String> {
+        let mut file = File::open(path).ok()?;
+        let mut header = vec![0; PAGE];
+        read_at(&mut file, 0, &mut header).ok()?;
+        if &header[..8] != b"MWWRC002" || !checked(&header) {
+            return None;
+        }
+        let world_len = u32_at(&header, 40) as usize;
+        if world_len == 0 || world_len > 2048 || 48 + world_len > header.len() {
+            return None;
+        }
+        std::str::from_utf8(&header[48..48 + world_len])
+            .ok()
+            .map(str::to_owned)
     }
     impl Store {
         pub fn open(directory: &Path, world: &str) -> Result<Self, LeaseError> {
@@ -3289,6 +3385,9 @@ pub mod container {
                 return Err(LeaseError::Io(invalid("invalid world identity")));
             }
             std::fs::create_dir_all(directory).map_err(LeaseError::Io)?;
+            // Keep terrain from caches named after a hash before this change.
+            let path = world_path(directory, world);
+            migrate_legacy_cache(directory, world, &path);
             // No participant renames/unlinks these files. A create race converges
             // on one inode; initialization happens only after try_lock succeeds.
             let file = OpenOptions::new()
@@ -3296,7 +3395,7 @@ pub mod container {
                 .write(true)
                 .create(true)
                 .truncate(false)
-                .open(world_path(directory, world))
+                .open(&path)
                 .map_err(LeaseError::Io)?;
             file.try_lock().map_err(|e| match e {
                 TryLockError::WouldBlock => LeaseError::Busy,
@@ -3682,6 +3781,32 @@ pub mod container {
             fn drop(&mut self) {
                 let _ = std::fs::remove_dir_all(&self.0);
             }
+        }
+        #[test]
+        fn cache_files_are_named_after_the_world_and_legacy_files_are_kept() {
+            let dir = TestDir::new("names");
+            let save = world_path(&dir.0, "save:My World");
+            let name = save.file_name().unwrap().to_str().unwrap();
+            assert!(name.starts_with("save-My World-"), "{name}");
+            assert!(name.ends_with(".mwwr"));
+            let server = world_path(&dir.0, "server:play.example.com:25565");
+            let name = server.file_name().unwrap().to_str().unwrap();
+            assert!(name.starts_with("server-play.example.com_25565-"), "{name}");
+            // Worlds whose names sanitize the same still get different files.
+            assert_ne!(
+                world_path(&dir.0, "save:a/b"),
+                world_path(&dir.0, "save:a?b")
+            );
+            // A cache written under the old hash-only name is renamed on open.
+            let world = "server:legacy:25565";
+            let (a, b) = cache_hash_pair(world);
+            let legacy = dir.0.join(format!("{a:016x}{b:016x}.mwwr"));
+            drop(Store::open(&dir.0, world).unwrap());
+            std::fs::rename(world_path(&dir.0, world), &legacy).unwrap();
+            assert!(!world_path(&dir.0, world).exists());
+            drop(Store::open(&dir.0, world).unwrap());
+            assert!(!legacy.exists());
+            assert!(world_path(&dir.0, world).exists());
         }
         #[test]
         fn records_reopen_across_pages_and_worlds_and_reuse_space() {
