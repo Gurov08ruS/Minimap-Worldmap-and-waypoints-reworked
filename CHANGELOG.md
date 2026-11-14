@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 — 2026-11-14
 
 - Show a 3D waypoint's label (distance, or name and distance) only while the
   crosshair is on its marker, instead of always. A new **3D labels only on
@@ -49,6 +49,9 @@
   biome names and icons survive chunk unloads, dimension changes and reconnects
   instead of living only in the current connection's memory. Older `v2`/`v3`
   records load unchanged with a letter icon and an empty biome.
+- Sign release packages with minisign and the original GPG key; distribute the
+  public keys, detached signatures and a signed `SHA256SUMS`. See
+  [SIGNING.md](SIGNING.md).
 
 ## 0.5.1 — 2026-11-11
 

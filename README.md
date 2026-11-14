@@ -1,10 +1,12 @@
 # Minimap, Worldmap and waypoints reworked
 
 A native Horizon mod by daniliammo, continued as [Gurov08ruS](https://github.com/Gurov08ruS).
-Version **0.5.1** includes 67 individual biome icons at 16×16, retained biome names
-after chunk unload, LOD terrain caching, German localization, coloured waypoints
-and Show on map. The full-screen map keeps terrain detail at every zoom and
-skips rendering the 3D world behind it.
+Version **0.6.0** adds 3D-world waypoint markers with hover labels, death
+waypoints, compass direction letters, and a persistent `.mwwr` map container
+with a Map RAM budget. Earlier releases added 67 individual biome icons at
+16×16, retained biome names after chunk unload, LOD terrain caching, German
+localization, coloured waypoints and Show on map. The full-screen map keeps
+terrain detail at every zoom and skips rendering the 3D world behind it.
 Old unscoped waypoints from 0.3.x are deleted on first load; preferences remain.
 
 <p align="center">
@@ -386,7 +388,7 @@ python3 tools/package.py
 
 Fetch the pinned Mixins checkout's dependencies with `cargo fetch --locked`
 before the offline checks. The output is
-`target/minimap_worldmap_waypoints_reworked-0.5.1.hnmod`.
+`target/minimap_worldmap_waypoints_reworked-0.6.0.hnmod`.
 Check it with `cargo horizon-mod check <file>` using Horizon's official
 `cargo-horizon-mod` tool. The [validation workflow](.github/workflows/validate.yml)
 runs the standalone tests, source audit, real client check and tests, and official

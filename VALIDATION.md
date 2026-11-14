@@ -1,6 +1,30 @@
 # Validation
 
-## Unreleased — 3D-waypoint labels on hover, 2026-11-14
+## 0.6.0 — signed release validation, 2026-11-14
+
+Validated on Linux with Rust 1.95.0 against the unchanged Horizon Nightly
+2026-11-13 (`9f42064c11efe7ef3e5ed2baad7ddc2a3b36eea0`) and Horizon Mixins
+`d9c83d7096b7ea5b83678da2efdfd6161f74997e` (schema 6).
+
+- Formatting and clippy with warnings denied: pass.
+- Locked offline workspace tests: 83 runtime tests and one source-audit test
+  passed; one manual benchmark ignored.
+- Template integration, full source audit and deterministic AST staging: pass;
+  the original Horizon checkout and its existing changes are preserved.
+- Actual pinned Horizon client check: pass.
+- Runtime tests inside the pinned client: 83 passed, one benchmark ignored.
+- Packaging twice produces identical bytes and SHA-256.
+- Official `cargo horizon-mod check` with the pinned minisign public key and
+  `.minisig`: `ok: true`, `signed: true`.
+- GPG signatures of the package, SHA256SUMS and minisign public key: verified
+  using the original key `9FDE42EE71F7AB70D1767C13215D4C2574068FCC`.
+- Artifact: `minimap_worldmap_waypoints_reworked-0.6.0.hnmod`, 137,165 bytes.
+  SHA-256: `7892716e30548682f85ea907d41c784d7722bbc65d3ddf53b62574aa49e95a7d`.
+
+No new live-game visual review, FPS profiling or macOS/Windows run was performed.
+Publishing the release does not change the Horizon registry entry or its owners.
+
+## 0.6.0 pre-release — 3D-waypoint labels on hover, 2026-11-14
 
 Validated on Linux with Rust 1.95.0 against the unchanged Horizon Nightly
 2026-11-13 (`9f42064`) and Horizon Mixins `d9c83d7` pins.
@@ -21,7 +45,7 @@ Validated on Linux with Rust 1.95.0 against the unchanged Horizon Nightly
 No live-game launch was performed; the hover check is type-checked and unit
 tested, not reviewed interactively.
 
-## Unreleased — 3D-waypoint camera fix, 2026-11-13
+## 0.6.0 pre-release — 3D-waypoint camera fix, 2026-11-13
 
 Validated on Linux with Rust 1.95.0 against the unchanged Horizon Nightly
 2026-11-13 (`9f42064`) and Horizon Mixins `d9c83d7` pins.
@@ -46,7 +70,7 @@ Validated on Linux with Rust 1.95.0 against the unchanged Horizon Nightly
 No live-game launch was performed; the projection is verified by unit tests, not
 an interactive session.
 
-## Unreleased — map direction letters, 2026-11-13
+## 0.6.0 pre-release — map direction letters, 2026-11-13
 
 Validated on Linux with Rust 1.95.0 against the unchanged Horizon Nightly
 2026-11-13 (`9f42064`) and Horizon Mixins `d9c83d7` pins.
@@ -70,7 +94,7 @@ No live-game launch or visual review of the compass letters (including their
 rotation on a rotating minimap) was performed; placement is exercised by the
 type-checked renderer, not an interactive session.
 
-## Unreleased — 3D-world waypoint markers and per-point visibility, 2026-11-13
+## 0.6.0 pre-release — 3D-world waypoint markers and per-point visibility, 2026-11-13
 
 Validated on Linux with Rust 1.95.0 against the unchanged Horizon Nightly
 2026-11-13 (`9f42064`) and Horizon Mixins `d9c83d7` pins.
@@ -96,7 +120,7 @@ No live-game launch, visual review of the 3D markers or macOS/Windows run was
 performed. The marker style and per-point toggles are exercised by unit tests
 and the injected-client build, not by an interactive session.
 
-## Unreleased — Horizon Nightly 2026-11-13 compatibility, 2026-11-13
+## 0.6.0 pre-release — Horizon Nightly 2026-11-13 compatibility, 2026-11-13
 
 Validated on Linux with Rust 1.95.0 against Horizon Nightly 2026-11-13
 (`9f42064c11efe7ef3e5ed2baad7ddc2a3b36eea0`) and the unchanged Horizon Mixins
@@ -128,7 +152,7 @@ No live-game launch, FPS profiling, macOS/Windows run or new gameplay check was
 performed for this compatibility update. The launcher was not driven here; the
 supported claim is the pinned-source build and the checks above.
 
-## Unreleased — persistent map container, 2026-11-12
+## 0.6.0 pre-release — persistent map container, 2026-11-12
 
 Validated on Linux with Rust 1.95.0. Horizon and Mixins revisions are unchanged;
 `compatibility.json` additionally checks the pinned renderer `ui.rs` because the
@@ -168,7 +192,7 @@ operations, compaction, full vertical pages and physical unlink are not claimed.
 No live game window, power-loss hardware test, macOS/Windows run or network-FS
 qualification was performed. See `CONTAINER.md` for the format and limits.
 
-## Unreleased — death waypoints and persistent biome samples, 2026-11-12
+## 0.6.0 pre-release — death waypoints and persistent biome samples, 2026-11-12
 
 Validated on Linux with Rust 1.95.0 and the unchanged compatibility pins.
 
