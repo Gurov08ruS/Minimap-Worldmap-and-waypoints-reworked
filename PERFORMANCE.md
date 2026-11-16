@@ -1,4 +1,4 @@
-# World-map rendering (updated 2026-11-10)
+# World-map rendering (updated 2026-11-14)
 
 The old path rasterized a screen-sized image on the terrain worker whenever the
 camera changed. At 1024×1024, that meant up to 1,048,576 coordinate, colour and
@@ -13,7 +13,8 @@ relief are baked at one texel per block. Pan/zoom updates geometry immediately o
 the client, independently of the sampling worker. Pointer/marker/overlay mapping
 uses the same displayed view. Camera movement inside uploaded coverage needs no
 terrain raster or texture upload. The camera advances while wider coverage is
-prepared. The minimap still uses its previous CPU path.
+prepared. The minimap also uses GPU geometry when its selected coverage fits; oversized
+or paged coverage retains the CPU path.
 
 Zoom-dependent averaged texture levels and their setting have been removed.
 Detailed chunks always use one texel per block; LOD uses its original samples.
@@ -21,6 +22,53 @@ GPU sampling is nearest. Publication compares immutable texture snapshots and
 uploads the matching pixels before advancing geometry. A failed upload leaves
 the previous complete frame intact. Atlas invalidation clears the displayed
 frame so its texture is uploaded again before drawing.
+
+## Performance changes under development (2026-11-14)
+
+- Camera-only GPU frames inside prepared coverage bypass disk-index scanning,
+  residency preparation and reconstruction of coverage/portal snapshots.
+- Both views can use the same GPU terrain atlas. Minimap rotation changes
+  geometry/UV clipping, with a 64-sided circular mask. It does not rerasterize
+  terrain or upload a replacement image simply because yaw changed. Coverage
+  reserves the rotated rectangle's bounding extent.
+- Atlas preparation shades a detailed chunk with three tile lookups (the chunk,
+  north and west), instead of invoking the generic per-pixel renderer for it.
+  Existing CPU/GPU equality and relief tests check the resulting colours.
+- GPU uploads compare final pixel bands. A one-tile change in a stable-size atlas
+  transfers 1,024 bytes; broad changes or image resize use a full transfer. This
+  also handles slot repacking and clearing transparencies. It does not yet give
+  tiles stable atlas slots or eliminate the whole-atlas preparation itself.
+- Raster fallback traverses only LOD levels actually present in the dimension.
+  Per-level cursors remember the current footprint including negative lookups.
+  At most 23 cursor entries are retained, independent of history size. Opening a
+  container initializes its level mask from the index without reading payloads.
+- Disk-read LRU eviction uses an ordered set instead of scanning every cached
+  record for each eviction. Payload limits are unchanged; the ordered set adds
+  bounded metadata proportional to the bounded read cache.
+
+A regression renders 65,536 pixels from a reopened LOD container with fewer than
+5,000 backing lookups including missing detailed chunks, and checks exact pixel
+colours. Other tests check rotated UVs/mask boundaries, texture identity across
+minimap rotation, LRU order, and reconstruction after partial texture uploads.
+The existing oversized-view tests exercise more than 4,096 entries and paging
+under a limited RAM budget. These are not a live huge-world FPS measurement.
+
+The manual benchmark now builds a separate atlas for each tested view, reporting
+its actual tile count. In a local optimized run the current implementation used
+256/576/4,096 atlas tiles for spans 32/256/2048, with GPU quad preparation
+0.001/0.004/0.041 ms respectively. CPU raster times were
+39.711/42.584/23.384 ms. The preceding run of HEAD's runtime on the same host
+measured 41.356/42.032/89.154 ms for the CPU raster. Both test binaries were
+compiled with `rustc --edition=2024 --test -O`; background compilation was active.
+The sparse wide-view reduction is consistent with skipping absent LOD levels;
+these are diagnostic observations, not a controlled FPS claim. GPU execution,
+vertex submission, uploads, sampling and disk I/O are outside this benchmark.
+
+Still required for the complete large-history design in RENDERING_REVIEW.md:
+persistent overview levels, a spatial history index, GPU paging beyond the
+shared slot, predictive loading and separation of disk I/O from preparation.
+The fallback can still delay new terrain and show newly exposed areas; this
+change does not claim to eliminate that limitation for an arbitrary cache.
 
 ## Reproduce the CPU comparison
 
@@ -47,8 +95,8 @@ chunk sampling and the rest of the game. They are not an FPS prediction.
 
 1. Stable atlas slots and dirty-region uploads. Currently repository changes
    rebuild the selected layer's visible atlas and upload its replacement. The
-   existing API exposes a full image upload, so partial patches need an injected
-   adapter through Horizon Mixins. Invalidate the changed tile and its south/east
+   adapter now submits changed image bands through Horizon's patch queue;
+   stable slots and incremental preparation are still needed. Invalidate the changed tile and its south/east
    neighbours because relief depends on north/west heights.
 2. A dedicated paged map texture to retain GPU rendering when visible terrain
    exceeds the shared slot, preserving original source texels at every zoom.
@@ -59,9 +107,9 @@ chunk sampling and the rest of the game. They are not an FPS prediction.
    Camera motion no longer waits for sampling, but preparation can still consume
    client/worker time. Use budgets and dirty notifications rather than repeatedly
    sorting all loaded chunks where the engine offers those notifications.
-4. Spatial indexing of retained terrain and GPU rendering for the rotated,
-   circular minimap. Atlas entries already use a padded visible region; selecting
-   them still scans the retained layer.
+4. Spatial indexing of retained terrain. Atlas entries already use a padded
+   visible region; selecting them still scans the retained layer. GPU rendering
+   for the rotated/circular minimap is implemented when coverage fits.
 
 The shared 1024×1024 slot holds up to 4,096 full-resolution tiles (detailed and
 LOD rows are packed separately). One atlas generation consumes at most 4 MiB

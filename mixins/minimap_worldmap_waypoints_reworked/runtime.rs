@@ -4357,7 +4357,12 @@ pub mod maps {
                     .ceil(),
             );
             let origin = self.center.map(|v| (v / step).round() * step);
-            let radius = self.span.map(|v| (v / 2.0 / step).ceil() * step + step);
+            let extent = if self.large {
+                self.span
+            } else {
+                [self.span[0].hypot(self.span[1]); 2]
+            };
+            let radius = extent.map(|v| (v / 2.0 / step).ceil() * step + step);
             [
                 (origin[0] - radius[0]) as i64,
                 (origin[1] - radius[1]) as i64,
@@ -4745,9 +4750,14 @@ pub mod maps {
     }
     impl TerrainAtlas {
         pub fn covers(&self, view: &View) -> bool {
+            let extent = if view.large {
+                view.span
+            } else {
+                [view.span[0].hypot(view.span[1]); 2]
+            };
             (0..2).all(|axis| {
-                view.center[axis] - view.span[axis] / 2.0 >= self.region[axis] as f64
-                    && view.center[axis] + view.span[axis] / 2.0
+                view.center[axis] - extent[axis] / 2.0 >= self.region[axis] as f64
+                    && view.center[axis] + extent[axis] / 2.0
                         <= (self.region[axis] + self.region[axis + 2]) as f64
             })
         }
@@ -4812,6 +4822,81 @@ pub mod maps {
             Some((src, dst))
         }
     }
+    /// Clip textured terrain in normalized map coordinates before emitting GPU geometry.
+    /// The 64-sided mask differs from a true circle by less than 0.16 GUI pixels at size 256.
+    pub fn terrain_polygon(view: &View, bounds: [i64; 4], uv: [f32; 4]) -> Vec<[f64; 4]> {
+        let (sn, cs) = view.angle.sin_cos();
+        let mut points: Vec<_> = [[0., 0.], [1., 0.], [1., 1.], [0., 1.]]
+            .into_iter()
+            .map(|p| {
+                let dx = bounds[0] as f64 + p[0] * bounds[2] as f64 - view.center[0];
+                let dz = bounds[1] as f64 + p[1] * bounds[3] as f64 - view.center[1];
+                [
+                    (dx * cs + dz * sn) / view.span[0],
+                    (-dx * sn + dz * cs) / view.span[1],
+                    f64::from(uv[0]) + p[0] * f64::from(uv[2]),
+                    f64::from(uv[1]) + p[1] * f64::from(uv[3]),
+                ]
+            })
+            .collect();
+        if (0..2).any(|axis| {
+            points.iter().all(|p| p[axis] < -0.5) || points.iter().all(|p| p[axis] > 0.5)
+        }) {
+            return Vec::new();
+        }
+        if view.round && points.iter().all(|p| p[0] * p[0] + p[1] * p[1] < 0.249) {
+            return points;
+        }
+        if !view.round
+            && points
+                .iter()
+                .all(|p| p[0].abs() <= 0.5 && p[1].abs() <= 0.5)
+        {
+            return points;
+        }
+        static CIRCLE: std::sync::OnceLock<[[f64; 2]; 64]> = std::sync::OnceLock::new();
+        let planes: &[[f64; 2]] = if view.round {
+            CIRCLE.get_or_init(|| {
+                std::array::from_fn(|edge| {
+                    let (s, c) = ((edge as f64 + 0.5) * std::f64::consts::TAU / 64.).sin_cos();
+                    [c, s]
+                })
+            })
+        } else {
+            &[[1., 0.], [0., 1.], [-1., 0.], [0., -1.]]
+        };
+        let limit = if view.round {
+            0.5 * (std::f64::consts::PI / 64.).cos()
+        } else {
+            0.5
+        };
+        let mut out = Vec::with_capacity(12);
+        for &[c, s] in planes {
+            out.clear();
+            if points.is_empty() {
+                break;
+            }
+            let mut previous = *points.last().unwrap();
+            let distance = |p: [f64; 4]| p[0] * c + p[1] * s - limit;
+            let mut before = distance(previous);
+            for &point in &points {
+                let after = distance(point);
+                if (before <= 0.) != (after <= 0.) {
+                    let t = before / (before - after);
+                    out.push(std::array::from_fn(|i| {
+                        previous[i] + (point[i] - previous[i]) * t
+                    }));
+                }
+                if after <= 0. {
+                    out.push(point);
+                }
+                previous = point;
+                before = after;
+            }
+            std::mem::swap(&mut points, &mut out);
+        }
+        points
+    }
     struct AtlasCache {
         key: (u64, Dimension, Layer, u64),
         terrain: Arc<TerrainAtlas>,
@@ -4846,6 +4931,47 @@ pub mod maps {
         Some((src, dst))
     }
 
+    /// Coalesce changed 16-row bands. Repacking is safe: comparison is of final
+    /// pixels, so a slot move updates both its old and new image locations.
+    pub fn image_patch_regions(
+        previous: &[u8],
+        next: &[u8],
+        width: usize,
+        height: usize,
+    ) -> Vec<[usize; 4]> {
+        if width == 0 || height == 0 || next.len() != width * height * 4 {
+            return Vec::new();
+        }
+        if previous.len() != next.len() {
+            return vec![[0, 0, width, height]];
+        }
+        let mut patches = Vec::new();
+        let mut bytes = 0;
+        for y in (0..height).step_by(16) {
+            let rows = 16.min(height - y);
+            let mut left = width;
+            let mut right = 0;
+            for x in (0..width).step_by(16) {
+                let columns = 16.min(width - x);
+                if (y..y + rows).any(|row| {
+                    let start = (row * width + x) * 4;
+                    previous[start..start + columns * 4] != next[start..start + columns * 4]
+                }) {
+                    left = left.min(x);
+                    right = x + columns;
+                }
+            }
+            if right > left {
+                patches.push([left, y, right - left, rows]);
+                bytes += (right - left) * rows * 4;
+            }
+        }
+        if bytes > next.len() / 2 {
+            vec![[0, 0, width, height]]
+        } else {
+            patches
+        }
+    }
     /// Publish geometry only after its exact immutable texture is uploaded.
     /// Keeping the previous Arc alive also makes pointer identity safe: equal
     /// dimensions or serials alone do not identify a texture's slot layout.
@@ -5075,6 +5201,7 @@ pub mod maps {
     struct Backing {
         store: Store,
         reads: BTreeMap<RecordKey, (u64, Arc<Tile>)>,
+        read_order: BTreeSet<(u64, RecordKey)>,
         read_bytes: usize,
         clock: u64,
         limit: usize,
@@ -5084,7 +5211,9 @@ pub mod maps {
         fn get(&mut self, key: RecordKey) -> Option<Arc<Tile>> {
             self.clock += 1;
             if let Some((stamp, tile)) = self.reads.get_mut(&key) {
+                self.read_order.remove(&(*stamp, key));
                 *stamp = self.clock;
+                self.read_order.insert((*stamp, key));
                 return Some(tile.clone());
             }
             let tile = match self
@@ -5101,18 +5230,14 @@ pub mod maps {
             };
             let bytes = tile_bytes(&tile);
             while self.read_bytes + bytes > self.limit {
-                let Some(key) = self
-                    .reads
-                    .iter()
-                    .min_by_key(|(_, (stamp, _))| *stamp)
-                    .map(|(key, _)| *key)
-                else {
+                let Some((_, key)) = self.read_order.pop_first() else {
                     break;
                 };
                 self.read_bytes -= tile_bytes(&self.reads.remove(&key).unwrap().1);
             }
             self.read_bytes += bytes;
             self.reads.insert(key, (self.clock, tile.clone()));
+            self.read_order.insert((self.clock, key));
             Some(tile)
         }
     }
@@ -5126,6 +5251,7 @@ pub mod maps {
         backing: Option<RefCell<Backing>>,
         limit: usize,
         paged: bool,
+        lod_levels: BTreeMap<Dimension, u32>,
     }
     impl Cache {
         fn open(
@@ -5133,10 +5259,22 @@ pub mod maps {
             world: &str,
             limit: usize,
         ) -> Result<Self, container::LeaseError> {
+            let store = Store::open(directory, world)?;
+            let mut lod_levels = BTreeMap::new();
+            for key in store
+                .keys()
+                .filter(|key| key[1] == 2 && (0..=22).contains(&key[5]))
+            {
+                if let Some(dimension) = record_dimension(key) {
+                    *lod_levels.entry(dimension).or_insert(0) |= 1 << key[5];
+                }
+            }
             Ok(Self {
+                lod_levels,
                 backing: Some(RefCell::new(Backing {
-                    store: Store::open(directory, world)?,
+                    store,
                     reads: BTreeMap::new(),
+                    read_order: BTreeSet::new(),
                     read_bytes: 0,
                     clock: 0,
                     limit: limit / 4,
@@ -5162,7 +5300,8 @@ pub mod maps {
         fn save(&mut self, key: RecordKey, tile: Arc<Tile>) -> io::Result<()> {
             if let Some(backing) = &self.backing {
                 let mut backing = backing.borrow_mut();
-                if let Some((_, old)) = backing.reads.remove(&key) {
+                if let Some((stamp, old)) = backing.reads.remove(&key) {
+                    backing.read_order.remove(&(stamp, key));
                     backing.read_bytes -= tile_bytes(&old);
                 }
                 backing.store.put(key, tile_encode(&tile)?)?;
@@ -5212,6 +5351,7 @@ pub mod maps {
             if let Some(b) = &self.backing {
                 let mut b = b.borrow_mut();
                 b.reads.clear();
+                b.read_order.clear();
                 b.read_bytes = 0;
             }
             self.clock += 1;
@@ -5291,6 +5431,11 @@ pub mod maps {
                                     .bounds(),
                                 ))
                 });
+                b.read_order = b
+                    .reads
+                    .iter()
+                    .map(|(key, (stamp, _))| (*stamp, *key))
+                    .collect();
                 b.read_bytes = b.reads.values().map(|(_, tile)| tile_bytes(tile)).sum();
             }
             // Keep only the requested layer and its padded display region.
@@ -5380,6 +5525,7 @@ pub mod maps {
             {
                 return false;
             }
+            *self.lod_levels.entry(dimension).or_default() |= 1 << key.level;
             if !self.lod_tiles.contains_key(&(dimension, key))
                 && let Some(old) = self.coarse_at(dimension, key)
             {
@@ -5478,6 +5624,7 @@ pub mod maps {
                 lod_data: coarse,
             }
         }
+        #[cfg(test)]
         fn lod_pixel(
             &self,
             dimension: Dimension,
@@ -5531,7 +5678,44 @@ pub mod maps {
             };
             fine.div_ceil(64) + coarse.div_ceil(64) <= 64
         }
-        fn terrain_atlas(&self, view: &View, serial: u64) -> TerrainAtlas {
+        fn shaded_chunk(&self, dimension: Dimension, layer: Layer, chunk: [i32; 2]) -> Vec<u8> {
+            let Some(tile) = self.tile_at((dimension, layer, chunk[0], chunk[1])) else {
+                return vec![0; 1024];
+            };
+            // Neighbour handles are resolved once per tile, never once per block.
+            let north = self.tile_at((dimension, layer, chunk[0], chunk[1] - 1));
+            let west = self.tile_at((dimension, layer, chunk[0] - 1, chunk[1]));
+            let mut pixels = tile.pixels.clone();
+            for z in 0..16 {
+                for x in 0..16 {
+                    let i = z * 16 + x;
+                    let height = tile.heights[i];
+                    let n = if z > 0 {
+                        tile.heights[i - 16]
+                    } else {
+                        north.as_ref().map_or(height, |t| t.heights[240 + x])
+                    };
+                    let w = if x > 0 {
+                        tile.heights[i - 1]
+                    } else {
+                        west.as_ref().map_or(height, |t| t.heights[z * 16 + 15])
+                    };
+                    let relief = f32::from(n.saturating_sub(height).clamp(-64, 64) as i8) * -0.085
+                        + f32::from(w.saturating_sub(height).clamp(-64, 64) as i8) * -0.05;
+                    let shade = if tile.walls[i] {
+                        0.55
+                    } else {
+                        (1.09 + relief).clamp(0.65, 1.38)
+                    };
+                    for channel in 0..3 {
+                        pixels[i * 4 + channel] =
+                            (f32::from(pixels[i * 4 + channel]) * shade).round() as u8;
+                    }
+                }
+            }
+            pixels
+        }
+        fn terrain_atlas(&self, view: &View, _serial: u64) -> TerrainAtlas {
             let region = view.atlas_region();
             let chunks: Vec<_> = self
                 .tiles
@@ -5569,27 +5753,11 @@ pub mod maps {
             let height = (chunks.len().div_ceil(64) + coarse.len().div_ceil(64)).max(1) * 16;
             let mut pixels = vec![0; 1024 * height * 4];
             for (slot, chunk) in chunks.iter().enumerate() {
-                // Bake lighting once per block, including neighbouring chunks.
-                // No screen-space raster is produced for the large map.
-                let tile = self.render(
-                    View {
-                        center: [
-                            f64::from(chunk[0]) * 16.0 + 8.0,
-                            f64::from(chunk[1]) * 16.0 + 8.0,
-                        ],
-                        span: [16.0; 2],
-                        width: 16,
-                        height: 16,
-                        angle: 0.0,
-                        round: false,
-                        ..view.clone()
-                    },
-                    serial,
-                );
+                let tile_pixels = self.shaded_chunk(view.dimension, view.layer, *chunk);
                 for row in 0..16 {
                     let target = ((slot / 64 * 16 + row) * 1024 + slot % 64 * 16) * 4;
                     pixels[target..target + 64]
-                        .copy_from_slice(&tile.pixels[row * 64..row * 64 + 64]);
+                        .copy_from_slice(&tile_pixels[row * 64..row * 64 + 64]);
                 }
             }
             for draw in &coarse {
@@ -5627,6 +5795,12 @@ pub mod maps {
             let mut tile: TileCursor = None;
             let mut north: TileCursor = None;
             let mut west: TileCursor = None;
+            let levels = if view.layer == Layer::Surface {
+                self.lod_levels.get(&view.dimension).copied().unwrap_or(0)
+            } else {
+                0
+            };
+            let mut lod: [Option<(LodKey, Option<Arc<Tile>>)>; 23] = std::array::from_fn(|_| None);
             for y in 0..height {
                 let dz = (y as f64 + 0.5 - half_z) * step_z;
                 let (tilt_x, tilt_z) = (dz * sin, dz * cos);
@@ -5652,9 +5826,30 @@ pub mod maps {
                     let i = (y * width + x) * 4;
                     let local = (bz.rem_euclid(16) * 16 + bx.rem_euclid(16)) as usize;
                     let Some(current) = current else {
-                        if let Some(color) = self.lod_pixel(view.dimension, view.layer, [bx, bz]) {
-                            pixels[i..i + 4].copy_from_slice(&color);
-                            known += 1;
+                        let mut remaining = levels;
+                        while remaining != 0 {
+                            let level = remaining.trailing_zeros() as usize;
+                            remaining &= remaining - 1;
+                            let size = 16_i64 << level;
+                            let key = LodKey {
+                                x: i64::from(bx).div_euclid(size) as i32,
+                                z: i64::from(bz).div_euclid(size) as i32,
+                                level: level as u8,
+                            };
+                            if lod[level].as_ref().is_none_or(|(old, _)| *old != key) {
+                                lod[level] = Some((key, self.coarse_at(view.dimension, key)));
+                            }
+                            if let Some(tile) =
+                                lod[level].as_ref().and_then(|(_, tile)| tile.as_ref())
+                            {
+                                let cell = key.cell([bx, bz]).unwrap();
+                                let color = &tile.pixels[cell * 4..cell * 4 + 4];
+                                if color[3] != 0 {
+                                    pixels[i..i + 4].copy_from_slice(color);
+                                    known += 1;
+                                    break;
+                                }
+                            }
                         }
                         continue;
                     };
@@ -5667,7 +5862,7 @@ pub mod maps {
                     let north_z = bz - 1;
                     let north_chunk = (bx.div_euclid(16), north_z.div_euclid(16));
                     let neighbour = if north_chunk == chunk {
-                        Some(current.clone())
+                        Some(current.as_ref())
                     } else {
                         if north.as_ref().is_none_or(|(key, _)| *key != north_chunk) {
                             north = Some((
@@ -5680,12 +5875,12 @@ pub mod maps {
                                 )),
                             ));
                         }
-                        north.as_ref().and_then(|(_, tile)| tile.clone())
+                        north.as_ref().and_then(|(_, tile)| tile.as_deref())
                     };
                     let west_x = bx - 1;
                     let west_chunk = (west_x.div_euclid(16), bz.div_euclid(16));
                     let west_tile = if west_chunk == chunk {
-                        Some(current.clone())
+                        Some(current.as_ref())
                     } else {
                         if west.as_ref().is_none_or(|(key, _)| *key != west_chunk) {
                             west = Some((
@@ -5698,7 +5893,7 @@ pub mod maps {
                                 )),
                             ));
                         }
-                        west.as_ref().and_then(|(_, tile)| tile.clone())
+                        west.as_ref().and_then(|(_, tile)| tile.as_deref())
                     };
                     let height = current.heights[local];
                     let north_height = neighbour.map_or(height, |tile| {
@@ -5892,6 +6087,7 @@ pub mod maps {
                                     let mut b = backing.borrow_mut();
                                     b.limit = new.limit / 4;
                                     b.reads.clear();
+                b.read_order.clear();
                                     b.read_bytes = 0;
                                 }
                                 if let Err(e) = cache.trim() {
@@ -5982,11 +6178,28 @@ pub mod maps {
                         if same && !changed {
                             continue;
                         }
+                        // Camera-only frames reuse immutable GPU data without scanning the
+                        // disk index, touching residency or rebuilding coverage snapshots.
+                        if !changed && let Some(ready) = &atlas
+                            && ready.key == (view.session, view.dimension, view.layer, cache.clock)
+                            && ready.terrain.covers(&view)
+                        {
+                            serial += 1;
+                            *result.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(Frame {
+                                raster_source: None,
+                                serial,
+                                known: ready.terrain.chunks.len() + ready.terrain.coarse.len(),
+                                atlas: Some(ready.terrain.clone()),
+                                view,
+                                pixels: Vec::new(),
+                            }));
+                            continue;
+                        }
                         if !paused && let Err(e) = cache.prepare(&view) {
                             *errors.lock().unwrap_or_else(|e| e.into_inner()) = Some(e.to_string());
                         }
                         serial += 1;
-                        let frame = if view.large && cache.gpu_atlas_fits(&view) {
+                        let frame = if cache.gpu_atlas_fits(&view) {
                             let key = (view.session, view.dimension, view.layer, cache.clock);
                             if atlas
                                 .as_ref()
@@ -6450,6 +6663,31 @@ pub mod maps {
             }
         }
         #[test]
+        fn minimap_camera_rotation_reuses_the_uploaded_terrain() {
+            let service = Service::new();
+            service.reset(1);
+            let mut v = view(Dimension::Overworld);
+            v.large = false;
+            v.round = true;
+            service.request(v.clone());
+            assert!(service.submit(1, Dimension::Overworld, Layer::Surface, [-1, 0], saved_tile));
+            let first = wait_frame(&service, |f| {
+                f.atlas
+                    .as_ref()
+                    .is_some_and(|a| a.chunks.contains(&[-1, 0]))
+            });
+            v.angle = 1.2;
+            v.center[0] += 4.;
+            service.request(v.clone());
+            let rotated = wait_frame(&service, |f| f.view == v);
+            assert!(Arc::ptr_eq(
+                first.atlas.as_ref().unwrap(),
+                rotated.atlas.as_ref().unwrap()
+            ));
+            assert!(rotated.pixels.is_empty());
+            service.shutdown();
+        }
+        #[test]
         fn service_dimension_switch_flushes_and_releases_old_payload_then_restart_loads_disk() {
             let dir = CacheDir::new("service");
             let service = Service::with_directory(Some(dir.0.clone()));
@@ -6459,7 +6697,11 @@ pub mod maps {
             v.large = false;
             service.request(v.clone());
             assert!(service.submit(1, Dimension::Overworld, Layer::Surface, [-1, 0], saved_tile));
-            let old = wait_frame(&service, |f| f.known == 256);
+            let old = wait_frame(&service, |f| {
+                f.atlas
+                    .as_ref()
+                    .is_some_and(|a| a.chunks.contains(&[-1, 0]))
+            });
             drop(old);
             let old_coverage = service.coverage();
             let weak = Arc::downgrade(old_coverage.detailed_data.values().next().unwrap());
@@ -6480,7 +6722,14 @@ pub mod maps {
             v.session = 2;
             v.dimension = Dimension::Overworld;
             reopened.request(v);
-            assert_eq!(wait_frame(&reopened, |f| f.known == 256).known, 256);
+            assert!(
+                wait_frame(&reopened, |f| f.known > 0)
+                    .atlas
+                    .as_ref()
+                    .unwrap()
+                    .chunks
+                    .contains(&[-1, 0])
+            );
             reopened.shutdown();
             assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 1);
         }
@@ -6495,7 +6744,11 @@ pub mod maps {
             anonymous_view.large = false;
             anonymous.request(anonymous_view);
             assert!(anonymous.submit(1, Dimension::Overworld, Layer::Surface, [-1, 0], saved_tile));
-            drop(wait_frame(&anonymous, |f| f.known == 256));
+            drop(wait_frame(&anonymous, |f| {
+                f.atlas
+                    .as_ref()
+                    .is_some_and(|a| a.chunks.contains(&[-1, 0]))
+            }));
             assert!(anonymous.status().is_some());
             anonymous.shutdown();
             assert!(
@@ -6612,6 +6865,137 @@ pub mod maps {
                 round: false,
                 large: true,
             }
+        }
+        #[test]
+        fn partial_uploads_reproduce_repacked_pixels_and_clear_old_tiles() {
+            let width = 1024;
+            let height = 64;
+            let original = vec![7; width * height * 4];
+            let mut next = original.clone();
+            for row in 16..32 {
+                next[(row * width + 48) * 4..(row * width + 64) * 4].fill(0);
+            }
+            let patches = image_patch_regions(&original, &next, width, height);
+            assert_eq!(patches, [[48, 16, 16, 16]]);
+            let mut gpu = original.clone();
+            for [x, y, w, h] in patches {
+                for row in y..y + h {
+                    let start = (row * width + x) * 4;
+                    gpu[start..start + w * 4].copy_from_slice(&next[start..start + w * 4]);
+                }
+            }
+            assert_eq!(gpu, next);
+            assert!(image_patch_regions(&next, &next, width, height).is_empty());
+            assert_eq!(
+                image_patch_regions(&[], &next, width, height),
+                [[0, 0, width, height]]
+            );
+            next.fill(2);
+            assert_eq!(
+                image_patch_regions(&original, &next, width, height),
+                [[0, 0, width, height]]
+            );
+        }
+        #[test]
+        fn disk_lru_touch_and_eviction_preserve_the_recent_tile() {
+            let dir = CacheDir::new("read-order");
+            let mut cache = Cache::open(&dir.0, "save:read-order", 1024 * 1024).unwrap();
+            for x in 0..3 {
+                save_chunk(
+                    &mut cache,
+                    Dimension::Overworld,
+                    Layer::Surface,
+                    [x, 0],
+                    saved_tile(),
+                );
+            }
+            cache.flush().unwrap();
+            cache.clear_payloads();
+            let mut b = cache.backing.as_ref().unwrap().borrow_mut();
+            let size = tile_bytes(&tile_decode(&tile_encode(&saved_tile()).unwrap()).unwrap());
+            b.limit = size * 2;
+            let keys: [_; 3] = std::array::from_fn(|x| {
+                record_key(Dimension::Overworld, Layer::Surface, x as i32, 0)
+            });
+            for key in [keys[0], keys[1], keys[0], keys[2]] {
+                assert!(b.get(key).is_some());
+            }
+            assert!(b.reads.contains_key(&keys[0]));
+            assert!(!b.reads.contains_key(&keys[1]));
+            assert!(b.reads.contains_key(&keys[2]));
+            assert_eq!(b.read_order.len(), b.reads.len());
+            assert!(b.read_bytes <= b.limit);
+        }
+        #[test]
+        fn gpu_minimap_clips_rotated_uvs_without_stretching() {
+            let mut v = view(Dimension::Overworld);
+            v.span = [64., 64.];
+            for round in [false, true] {
+                v.round = round;
+                for angle in [0., 0.37, std::f64::consts::FRAC_PI_2, std::f64::consts::PI] {
+                    v.angle = angle;
+                    for bounds in [[-32, -32, 64, 64], [-8, 0, 16, 16], [1000, 1000, 16, 16]] {
+                        let points = terrain_polygon(&v, bounds, [16., 32., 16., 16.]);
+                        for p in points {
+                            assert!(p[0].abs() <= 0.500001 && p[1].abs() <= 0.500001);
+                            if round {
+                                assert!(p[0].hypot(p[1]) <= 0.500001);
+                            }
+                            let world = v.world_at(
+                                (p[0] + 0.5) * v.width as f64,
+                                (p[1] + 0.5) * v.height as f64,
+                            );
+                            assert!(
+                                (world[0]
+                                    - (bounds[0] as f64 + (p[2] - 16.) / 16. * bounds[2] as f64))
+                                    .abs()
+                                    < 1e-8
+                            );
+                            assert!(
+                                (world[1]
+                                    - (bounds[1] as f64 + (p[3] - 32.) / 16. * bounds[3] as f64))
+                                    .abs()
+                                    < 1e-8
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        #[test]
+        fn reopened_lod_raster_reuses_footprints_instead_of_querying_every_pixel() {
+            let dir = CacheDir::new("lod-cursors");
+            let key = LodKey {
+                x: 0,
+                z: 0,
+                level: 8,
+            };
+            {
+                let mut cache = Cache::open(&dir.0, "save:lod-cursors", 1024 * 1024).unwrap();
+                cache.insert_lod(Dimension::Overworld, key, coarse_tile([20, 40, 60]));
+                cache
+                    .save(
+                        lod_record(Dimension::Overworld, key),
+                        cache.lod_tiles[&(Dimension::Overworld, key)].1.clone(),
+                    )
+                    .unwrap();
+                cache.flush().unwrap();
+            }
+            let cache = Cache::open(&dir.0, "save:lod-cursors", 1024 * 1024).unwrap();
+            let mut v = view(Dimension::Overworld);
+            v.center = [128.; 2];
+            v.span = [256.; 2];
+            v.width = 256;
+            v.height = 256;
+            let frame = cache.render(v, 1);
+            assert!(frame.pixels.chunks_exact(4).all(|p| p == [20, 40, 60, 255]));
+            let backing = cache.backing.as_ref().unwrap().borrow();
+            assert!(
+                backing.clock < 5000,
+                "{} lookups for one LOD footprint",
+                backing.clock
+            );
+            assert!(backing.read_bytes <= backing.limit);
         }
         #[test]
         fn grass_and_leaves_take_the_biome_colour_with_distinct_birch_and_oak() {
@@ -6879,15 +7263,16 @@ pub mod maps {
             view.width = 1024;
             view.height = 1024;
             view.large = true;
-            let start = Instant::now();
-            let atlas = cache.terrain_atlas(&view, 1);
-            eprintln!(
-                "atlas preparation {:?}, {} bytes",
-                start.elapsed(),
-                atlas.pixels.len()
-            );
             for span in [32.0, 256.0, 2048.0] {
                 view.span = [span; 2];
+                let build = Instant::now();
+                let atlas = cache.terrain_atlas(&view, 1);
+                eprintln!(
+                    "span={span}: atlas {:?}, {} tiles, {} bytes",
+                    build.elapsed(),
+                    atlas.chunks.len(),
+                    atlas.pixels.len()
+                );
                 let start = Instant::now();
                 for i in 0..60 {
                     view.center[0] = i as f64 * 0.137;

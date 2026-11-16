@@ -1,5 +1,30 @@
 # Validation
 
+## Unreleased rendering performance — 2026-11-14
+
+Development changes against pinned Horizon `9f42064` and Mixins `d9c83d7`:
+
+- Formatting, clippy with warnings denied and locked offline workspace tests:
+  pass (88 runtime tests, one source-audit test, one manual benchmark ignored).
+- Template integration and deterministic AST staging: pass; the original
+  checkout is unchanged. Native client check: pass. Final runtime tests
+  inside the pinned client: 88 passed, one benchmark ignored.
+- Regression coverage includes rotated minimap UVs/clipping, texture reuse while
+  rotating/following, reconstruction from partial uploads, ordered LRU eviction,
+  disk LOD cursor reuse, paging under limited RAM and more than 4,096 entries.
+- Official package check: pass for the separate, unsigned development artifact
+  `target/minimap_worldmap_waypoints_reworked-0.6.0-performance-dev.hnmod`.
+  Size 141,310 bytes; SHA-256
+  `6410547ccdfbcdd31f33b1eb3108a310e6bf962aa05ce546dd880b08cf3e7f50`.
+  The archived runtime and adapter match the current sources. It retains the
+  0.6.0 manifest version and is not the signed release documented below.
+
+Full native test compilation initially exhausted local disk space; the final
+successful run disabled incremental compilation. No live-game GPU/FPS or
+macOS/Windows validation was performed. Persistent overview levels, GPU paging
+beyond the shared slot and removal of the oversized-view CPU fallback are still
+outstanding; this is not completion of the large-history design.
+
 ## 0.6.0 — signed release validation, 2026-11-14
 
 Validated on Linux with Rust 1.95.0 against the unchanged Horizon Nightly

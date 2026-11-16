@@ -3290,8 +3290,17 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
         } else {
             image
         };
+        let previous = if next.atlas.is_some() {
+            state.frame.as_ref().and_then(|f| f.atlas.clone())
+        } else {
+            None
+        };
         maps::present_frame(&mut state.frame, next, |width, height, pixels| {
-            game.native_mod_image(width, height, pixels)
+            if let Some(previous) = &previous {
+                upload_terrain_patches(game, previous, width, height, pixels)
+            } else {
+                game.native_mod_image(width, height, pixels)
+            }
         });
     }
 }
@@ -3476,6 +3485,88 @@ fn draw_directions(
     }
 }
 
+fn upload_terrain_patches(
+    game: &mut Game<'_>,
+    previous: &maps::TerrainAtlas,
+    width: u32,
+    height: u32,
+    pixels: &[u8],
+) -> bool {
+    if previous.width != width as usize || previous.height != height as usize {
+        return game.native_mod_image(width, height, pixels);
+    }
+    let Some(sprite) = game
+        .gui
+        .atlas
+        .sprites
+        .get(horizon_client::hud::MOD_IMAGE_SPRITE)
+        .copied()
+    else {
+        return false;
+    };
+    if width > sprite.w || height > sprite.h || pixels.len() != width as usize * height as usize * 4
+    {
+        return false;
+    }
+    let origin = [
+        (sprite.u0 * game.gui.atlas.width as f32).round() as u32,
+        (sprite.v0 * game.gui.atlas.height as f32).round() as u32,
+    ];
+    for [x, y, w, h] in
+        maps::image_patch_regions(&previous.pixels, pixels, width as usize, height as usize)
+    {
+        let mut rgba = Vec::with_capacity(w * h * 4);
+        for row in y..y + h {
+            let start = (row * width as usize + x) * 4;
+            rgba.extend_from_slice(&pixels[start..start + w * 4]);
+        }
+        game.map_patches.push(horizon_client::font::Patch {
+            x: origin[0] + x as u32,
+            y: origin[1] + y as u32,
+            width: w as u32,
+            height: h as u32,
+            rgba,
+        });
+    }
+    true
+}
+
+fn draw_terrain_polygon(
+    game: &Game<'_>,
+    batch: &mut HudBatch,
+    view: &View,
+    rect: [f32; 4],
+    bounds: [i64; 4],
+    uv: [f32; 4],
+) -> bool {
+    let points = maps::terrain_polygon(view, bounds, uv);
+    let Some(sprite) = game
+        .gui
+        .atlas
+        .sprites
+        .get(horizon_client::hud::MOD_IMAGE_SPRITE)
+    else {
+        return false;
+    };
+    let pos = |p: [f64; 4]| {
+        [
+            rect[0] + (p[0] as f32 + 0.5) * rect[2],
+            rect[1] + (p[1] as f32 + 0.5) * rect[3],
+        ]
+    };
+    let texture = |p: [f64; 4]| {
+        [
+            sprite.u0 + p[2] as f32 / sprite.w as f32 * (sprite.u1 - sprite.u0),
+            sprite.v0 + p[3] as f32 / sprite.h as f32 * (sprite.v1 - sprite.v0),
+        ]
+    };
+    for i in 1..points.len().saturating_sub(1) {
+        let p = [points[0], points[i], points[i + 1], points[i + 1]];
+        batch.quad(p.map(pos), p.map(texture), u32::MAX);
+    }
+    points.len() >= 3
+}
+
 fn draw(
     game: &Game<'_>,
     batch: &mut HudBatch,
@@ -3500,16 +3591,54 @@ fn draw(
             terrain_visible = false;
             for coarse in &atlas.coarse {
                 for part in &coarse.fragments {
-                    if let Some((src, dst)) = atlas.coarse_quad(&frame.view, rect, coarse, *part) {
-                        game.native_sprite(batch, horizon_client::hud::MOD_IMAGE_SPRITE, src, dst);
-                        terrain_visible = true;
+                    if large {
+                        if let Some((src, dst)) =
+                            atlas.coarse_quad(&frame.view, rect, coarse, *part)
+                        {
+                            game.native_sprite(
+                                batch,
+                                horizon_client::hud::MOD_IMAGE_SPRITE,
+                                src,
+                                dst,
+                            );
+                            terrain_visible = true;
+                        }
+                    } else {
+                        let bounds = coarse.key.bounds();
+                        let uv = [
+                            coarse.uv_origin[0] as f32
+                                + ((part[0] - bounds[0]) as f64 * 16.0 / bounds[2] as f64) as f32,
+                            coarse.uv_origin[1] as f32
+                                + ((part[1] - bounds[1]) as f64 * 16.0 / bounds[3] as f64) as f32,
+                            (part[2] as f64 * 16.0 / bounds[2] as f64) as f32,
+                            (part[3] as f64 * 16.0 / bounds[3] as f64) as f32,
+                        ];
+                        terrain_visible |=
+                            draw_terrain_polygon(game, batch, &frame.view, rect, *part, uv);
                     }
                 }
             }
             for (slot, chunk) in atlas.chunks.iter().enumerate() {
-                if let Some((src, dst)) = atlas.quad(&frame.view, rect, *chunk, slot) {
-                    game.native_sprite(batch, horizon_client::hud::MOD_IMAGE_SPRITE, src, dst);
-                    terrain_visible = true;
+                if large {
+                    if let Some((src, dst)) = atlas.quad(&frame.view, rect, *chunk, slot) {
+                        game.native_sprite(batch, horizon_client::hud::MOD_IMAGE_SPRITE, src, dst);
+                        terrain_visible = true;
+                    }
+                } else {
+                    let columns = atlas.width / 16;
+                    terrain_visible |= draw_terrain_polygon(
+                        game,
+                        batch,
+                        &frame.view,
+                        rect,
+                        [i64::from(chunk[0]) * 16, i64::from(chunk[1]) * 16, 16, 16],
+                        [
+                            (slot % columns * 16) as f32,
+                            (slot / columns * 16) as f32,
+                            16.,
+                            16.,
+                        ],
+                    );
                 }
             }
         } else if let Some(source) = &frame.raster_source {

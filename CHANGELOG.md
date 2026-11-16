@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased — rendering performance
+
+- Draw the minimap with GPU terrain tiles when coverage fits, including rotated
+  UVs and circular clipping; camera-only updates reuse the uploaded terrain.
+- Upload changed atlas bands instead of copying the entire image for small edits.
+- Prepare relief shading with tile-level neighbour lookups.
+- Skip camera-only residency/index/coverage rebuilding inside prepared GPU coverage.
+- Limit raster LOD searches to existing levels and cache footprint lookups;
+  use ordered disk-read LRU eviction for bounded-cache misses.
+- Correct the manual benchmark to prepare coverage for each measured zoom.
+
 ## 0.6.0 — 2026-11-14
 
 - Show a 3D waypoint's label (distance, or name and distance) only while the

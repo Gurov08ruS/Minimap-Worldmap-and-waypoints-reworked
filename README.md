@@ -281,12 +281,16 @@ geometry are published together; a failed upload preserves the previous frame.
 
 The worker prepares colours and relief shading once per block when the terrain
 repository changes. Up to 4,096 tiles fit in the existing 1024×1024 RGBA slot
-(4 MiB); the current implementation rebuilds/uploads the selected layer's atlas
-when its data or padded visible coverage changes. Camera movement inside that
+(4 MiB); the current implementation rebuilds the selected layer's atlas
+when its data or padded visible coverage changes. Uploads compare final pixels
+and transfer changed bands; extensive changes use a full upload. Camera movement inside that
 coverage reuses it. Off-screen data stays in the world container and is read on demand. If visible entries exceed the
 1024×1024 GPU slot, a worker raster fallback presents the retained data without
-truncating the cache; extreme views can therefore cost more CPU. The minimap retains its
-CPU renderer for rotation and circular masking. Nearest texture sampling keeps
+truncating the cache; extreme views can therefore cost more CPU. Both maps use
+GPU tile geometry when the selected coverage fits. The minimap rotates that
+geometry and clips it to a square or a 64-sided circle (under 0.16 GUI pixel
+boundary error at size 256), reusing its texture during player rotation.
+Oversized or paged views retain the CPU fallback. Nearest texture sampling keeps
 block boundaries sharp; unknown terrain is transparent. Detailed chunks keep one
 texel per block and LOD textures keep their original sample resolution at every
 zoom. Distant smoothing and its setting have been removed; legacy
