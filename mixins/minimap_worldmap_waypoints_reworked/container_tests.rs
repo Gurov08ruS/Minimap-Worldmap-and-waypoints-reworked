@@ -7,6 +7,53 @@ macro_rules! define_tests {
     () => {
         mod tests {
             #[test]
+            fn spatial_queries_match_history_before_and_after_recovery() {
+                let dir = TestDir::new("spatial");
+                let mut store = Store::open(&dir.0, "save:spatial").unwrap();
+                for x in -40..40 {
+                    for z in [-33, -1, 0, 31, 32, 1000] {
+                        for (d, kind, y, level) in
+                            [(1, 0, 0, 0), (1, 1, -16, 0), (2, 0, 0, 0), (1, 2, 0, 3)]
+                        {
+                            store.put([d, kind, y, x, z, level], vec![1; 8]).unwrap();
+                        }
+                    }
+                }
+                let check = |store: &Store| {
+                    for (kind, y, level) in [(0, 0, 0), (1, -16, 0), (2, 0, 3)] {
+                        let size = 16_i64 << level;
+                        let rect = [-35 * size, -size, 70 * size, 34 * size];
+                        let expected: std::collections::BTreeSet<_> = store
+                            .keys()
+                            .filter(|k| {
+                                k[0] == 1
+                                    && k[1] == kind
+                                    && k[2] == y
+                                    && (rect[0]..rect[0] + rect[2])
+                                        .contains(&(i64::from(k[3]) * size))
+                                    && (rect[1]..rect[1] + rect[3])
+                                        .contains(&(i64::from(k[4]) * size))
+                            })
+                            .collect();
+                        assert_eq!(
+                            store
+                                .query(1, kind, y, rect, usize::MAX)
+                                .into_iter()
+                                .collect::<std::collections::BTreeSet<_>>(),
+                            expected
+                        );
+                        assert_eq!(store.query(1, kind, y, rect, 7).len(), 7);
+                    }
+                    assert!(store.query(1, 0, 0, [0, 0, 0, 16], 10).is_empty());
+                };
+                check(&store);
+                store.commit().unwrap();
+                drop(store);
+                let store = Store::open(&dir.0, "save:spatial").unwrap();
+                check(&store);
+            }
+
+            #[test]
             fn store_creation_child() {
                 let Some(dir) = std::env::var_os("MWWR_STORE_CREATE_DIR") else {
                     return;

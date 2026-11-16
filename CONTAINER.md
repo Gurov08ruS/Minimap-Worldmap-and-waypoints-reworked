@@ -116,9 +116,14 @@ dimension switch flushes before clearing old payloads and display references.
 Selecting a previously visited dimension loads the requested area again.
 
 The index currently materializes key/reference metadata for both recoverable
-roots and writes a new index on commit. It does not materialize historical tile
-payloads, but metadata and commit work still grow with file size. A bounded
+roots and writes a new index on commit. A derived region-column index supports
+rectangle queries without scanning all disk keys; per-record in-memory versions
+keep visual tiles valid across payload eviction and commits. These additions do
+not change schema 2 bytes and are metadata outside the terrain RAM budget.
+It does not materialize historical tile payloads, but metadata and commit work
+still grow with file size. A bounded
 index-page cache and incremental COW index updates remain future optimizations.
-Large views use a bounded read LRU and rasterize the requested pixels on the
-worker instead of retaining all visible terrain. This can increase worker I/O
+GPU pages can stream visible tiles through the bounded read LRU without retaining
+all decoded payloads. Views beyond the separate visual budget still rasterize
+the requested pixels on the worker. This can increase worker I/O
 and latency on slow disks; FPS and huge-world behaviour require game profiling.

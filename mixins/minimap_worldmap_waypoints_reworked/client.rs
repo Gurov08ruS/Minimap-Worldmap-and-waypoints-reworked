@@ -306,6 +306,9 @@ struct State {
     session: u64,
     dimension: Dimension,
     seen: BTreeMap<(i32, i32), (Weak<Chunk>, Layer, Instant)>,
+    chunk_keys: BTreeSet<(i32, i32)>,
+    chunk_revision: u64,
+    chunk_cursor: Option<(i32, i32)>,
     layers: BTreeMap<Dimension, Layer>,
     selected: Dimension,
     large: bool,
@@ -313,6 +316,10 @@ struct State {
     marker: [f64; 2],
     elapsed: f64,
     frame: Option<Arc<maps::Frame>>,
+    page_images: Vec<(
+        Arc<maps::AtlasPage>,
+        Arc<horizon_client::hud::pictures::Picture>,
+    )>,
     dragging: bool,
     close: bool,
     mode: Mode,
@@ -343,6 +350,9 @@ impl Default for State {
             session: 0,
             dimension: Dimension::Player,
             seen: BTreeMap::new(),
+            chunk_keys: BTreeSet::new(),
+            chunk_revision: 0,
+            chunk_cursor: None,
             layers: BTreeMap::new(),
             selected: Dimension::Player,
             large: false,
@@ -350,6 +360,7 @@ impl Default for State {
             marker: [0.0; 2],
             elapsed: 1.0,
             frame: None,
+            page_images: Vec::new(),
             dragging: false,
             close: false,
             mode: Mode::Map,
@@ -2649,6 +2660,7 @@ pub(super) fn client_packet(
 }
 
 pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
+    let _timing = runtime::profiling::measure("client-frame");
     if !game.native_window() {
         return;
     }
@@ -2733,6 +2745,9 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
         state.portals.clear();
 
         state.seen.clear();
+        state.chunk_keys.clear();
+        state.chunk_revision = 0;
+        state.chunk_cursor = None;
         state.dimension = dimension;
     }
     let head = (player.y + 1.62).floor() as i32;
@@ -2984,13 +2999,67 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
         }
         let cx = (player.x.floor() as i32).div_euclid(16);
         let cz = (player.z.floor() as i32).div_euclid(16);
-        let mut chunks: Vec<_> = game
-            .world
-            .chunks
-            .iter()
-            .map(|(&pos, chunk)| (pos, Arc::downgrade(chunk)))
-            .collect();
+        let _timing = runtime::profiling::measure("chunk-collection");
+        let revision = game.world.chunks.membership_revision();
+        if state.chunk_revision != revision {
+            if let Some(deltas) = game.world.chunks.deltas_since(state.chunk_revision) {
+                use horizon_client::chunk_map::ChunkMembershipDelta;
+                for (_, delta) in deltas {
+                    match delta {
+                        ChunkMembershipDelta::Added(pos) => {
+                            state.chunk_keys.insert(pos);
+                        }
+                        ChunkMembershipDelta::Removed(pos) => {
+                            state.chunk_keys.remove(&pos);
+                            state.seen.remove(&pos);
+                        }
+                        ChunkMembershipDelta::Reset => {
+                            unreachable!("reset requires membership rebuild")
+                        }
+                    }
+                }
+            } else {
+                let keys: BTreeSet<_> = game.world.chunks.keys().copied().collect();
+                state.seen.retain(|pos, _| keys.contains(pos));
+                state.chunk_keys = keys;
+            }
+            state.chunk_revision = revision;
+        }
         let requested = controller.maps.requested();
+        let anchor = requested
+            .as_ref()
+            .filter(|v| v.dimension == dimension)
+            .map_or([cx, cz], |v| {
+                v.center.map(|v| (v.floor() as i32).div_euclid(16))
+            });
+        let mut positions: BTreeSet<_> = arrived.iter().copied().take(64).collect();
+        for z in -4..=4 {
+            for x in -4..=4 {
+                positions.insert((anchor[0].saturating_add(x), anchor[1].saturating_add(z)));
+            }
+        }
+        use std::ops::Bound::{Excluded, Unbounded};
+        let scan: Vec<_> = state
+            .chunk_keys
+            .range((state.chunk_cursor.map_or(Unbounded, Excluded), Unbounded))
+            .take(64)
+            .copied()
+            .collect();
+        state.chunk_cursor = if scan.len() == 64 {
+            scan.last().copied()
+        } else {
+            None
+        };
+        positions.extend(scan);
+        let mut chunks: Vec<_> = positions
+            .into_iter()
+            .filter_map(|pos| {
+                game.world
+                    .chunks
+                    .get(&pos)
+                    .map(|chunk| (pos, Arc::downgrade(chunk)))
+            })
+            .collect();
         chunks.sort_by_key(|(pos, _)| {
             (
                 !requested
@@ -2999,11 +3068,13 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
                 i64::from(pos.0 - cx).pow(2) + i64::from(pos.1 - cz).pow(2),
             )
         });
-        state
-            .seen
-            .retain(|pos, _| game.world.chunks.contains_key(pos));
         let mut sent = 0;
+        let mut attempted = 0;
+        let collection_start = Instant::now();
         for (pos, weak) in chunks {
+            if attempted > 0 && collection_start.elapsed() >= Duration::from_micros(800) {
+                break;
+            }
             let visible = requested
                 .as_ref()
                 .is_some_and(|v| v.demands(dimension, layer, [pos.0, pos.1]));
@@ -3016,9 +3087,12 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
             }) {
                 continue;
             }
-            let Ok(snapshot) =
+            attempted += 1;
+            let snapshot = {
+                let _sampling = runtime::profiling::measure("snapshot-collection");
                 game.native_client_chunks([pos.0 - 1, pos.1 - 1], [pos.0 + 1, pos.1 + 1])
-            else {
+            };
+            let Ok(snapshot) = snapshot else {
                 continue;
             };
             let resources = Arc::clone(&game.res);
@@ -3252,7 +3326,13 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
             round: !large && settings.round,
             large,
         };
-        controller.maps.request(view.clone());
+        let mut target = view.clone();
+        target.center = state.camera.target;
+        if large {
+            let ratio = state.camera.zoom_target / state.camera.zoom;
+            target.span = span.map(|size| size * ratio);
+        }
+        controller.maps.request_ahead(view.clone(), target);
         current_view = Some(view);
     }
     if let Some(image) = controller.maps.frame()
@@ -3290,13 +3370,49 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
         } else {
             image
         };
+        let paged = next.atlas.as_ref().is_some_and(|a| !a.pages.is_empty());
+        if paged {
+            let _timing = runtime::profiling::measure("page-upload");
+            state.page_images = next
+                .atlas
+                .as_ref()
+                .unwrap()
+                .pages
+                .iter()
+                .map(|page| {
+                    let image = state
+                        .page_images
+                        .iter()
+                        .find(|(old, _)| Arc::ptr_eq(old, page))
+                        .map(|(_, image)| image.clone())
+                        .unwrap_or_else(|| {
+                            runtime::profiling::record(
+                                "texture-transfer",
+                                Duration::ZERO,
+                                1,
+                                page.pixels.len() as u64,
+                            );
+                            horizon_client::hud::minimap_pages::create(
+                                page.width as u32,
+                                page.height as u32,
+                                page.pixels.clone(),
+                            )
+                        });
+                    (page.clone(), image)
+                })
+                .collect();
+        } else {
+            state.page_images.clear();
+        }
         let previous = if next.atlas.is_some() {
             state.frame.as_ref().and_then(|f| f.atlas.clone())
         } else {
             None
         };
         maps::present_frame(&mut state.frame, next, |width, height, pixels| {
-            if let Some(previous) = &previous {
+            if paged {
+                true
+            } else if let Some(previous) = &previous {
                 upload_terrain_patches(game, previous, width, height, pixels)
             } else {
                 game.native_mod_image(width, height, pixels)
@@ -3492,6 +3608,7 @@ fn upload_terrain_patches(
     height: u32,
     pixels: &[u8],
 ) -> bool {
+    let _timing = runtime::profiling::measure("upload");
     if previous.width != width as usize || previous.height != height as usize {
         return game.native_mod_image(width, height, pixels);
     }
@@ -3515,6 +3632,7 @@ fn upload_terrain_patches(
     for [x, y, w, h] in
         maps::image_patch_regions(&previous.pixels, pixels, width as usize, height as usize)
     {
+        runtime::profiling::record("texture-transfer", Duration::ZERO, 1, (w * h * 4) as u64);
         let mut rgba = Vec::with_capacity(w * h * 4);
         for row in y..y + h {
             let start = (row * width as usize + x) * 4;
@@ -3567,6 +3685,62 @@ fn draw_terrain_polygon(
     points.len() >= 3
 }
 
+fn draw_paged_terrain(
+    batch: &mut HudBatch,
+    state: &State,
+    frame: &maps::Frame,
+    atlas: &maps::TerrainAtlas,
+    rect: [f32; 4],
+) -> bool {
+    let mut visible = false;
+    // Keep the padded/predicted page set resident on the GPU, including pages
+    // just behind the camera. Horizon drops picture textures absent from a batch.
+    for (_, image) in &state.page_images {
+        if !batch.pictures.iter().any(|old| Arc::ptr_eq(old, image)) {
+            batch.pictures.push(image.clone());
+        }
+    }
+    let mut paint = |bounds: [i64; 4], mut uv: [f32; 4]| {
+        let page = uv[1] as usize / 64;
+        let Some((_, image)) = state.page_images.get(page) else {
+            return;
+        };
+        uv[1] -= (page * 64) as f32;
+        let mut points = maps::terrain_polygon(&frame.view, bounds, uv);
+        for p in &mut points {
+            p[0] = f64::from(rect[0]) + (p[0] + 0.5) * f64::from(rect[2]);
+            p[1] = f64::from(rect[1]) + (p[1] + 0.5) * f64::from(rect[3]);
+        }
+        visible |= points.len() >= 3;
+        horizon_client::hud::minimap_pages::paint(batch, image, &points);
+    };
+    for coarse in &atlas.coarse {
+        let bounds = coarse.key.bounds();
+        for part in &coarse.fragments {
+            paint(
+                *part,
+                [
+                    coarse.uv_origin[0] as f32
+                        + ((part[0] - bounds[0]) as f64 * 16. / bounds[2] as f64) as f32,
+                    coarse.uv_origin[1] as f32
+                        + ((part[1] - bounds[1]) as f64 * 16. / bounds[3] as f64) as f32,
+                    (part[2] as f64 * 16. / bounds[2] as f64) as f32,
+                    (part[3] as f64 * 16. / bounds[3] as f64) as f32,
+                ],
+            );
+        }
+    }
+    for &i in &atlas.draw_order {
+        let chunk = &atlas.chunks[i];
+        let slot = atlas.slots[i];
+        paint(
+            [i64::from(chunk[0]) * 16, i64::from(chunk[1]) * 16, 16, 16],
+            [(slot % 64 * 16) as f32, (slot / 64 * 16) as f32, 16., 16.],
+        );
+    }
+    visible
+}
+
 fn draw(
     game: &Game<'_>,
     batch: &mut HudBatch,
@@ -3575,6 +3749,7 @@ fn draw(
     large: bool,
     mouse: Option<[f32; 2]>,
 ) {
+    let _timing = runtime::profiling::measure("hud-map");
     let settings = runtime::initialize(game.native_data_dir(runtime::MOD_ID)).settings();
     let round = !large && settings.round;
     if !round {
@@ -3589,12 +3764,43 @@ fn draw(
         let mut terrain_visible = frame.known > 0;
         if let Some(atlas) = &frame.atlas {
             terrain_visible = false;
-            for coarse in &atlas.coarse {
-                for part in &coarse.fragments {
+            if !atlas.pages.is_empty() {
+                terrain_visible = draw_paged_terrain(batch, state, frame, atlas, rect);
+            } else {
+                for coarse in &atlas.coarse {
+                    for part in &coarse.fragments {
+                        if large {
+                            if let Some((src, dst)) =
+                                atlas.coarse_quad(&frame.view, rect, coarse, *part)
+                            {
+                                game.native_sprite(
+                                    batch,
+                                    horizon_client::hud::MOD_IMAGE_SPRITE,
+                                    src,
+                                    dst,
+                                );
+                                terrain_visible = true;
+                            }
+                        } else {
+                            let bounds = coarse.key.bounds();
+                            let uv = [
+                                coarse.uv_origin[0] as f32
+                                    + ((part[0] - bounds[0]) as f64 * 16.0 / bounds[2] as f64)
+                                        as f32,
+                                coarse.uv_origin[1] as f32
+                                    + ((part[1] - bounds[1]) as f64 * 16.0 / bounds[3] as f64)
+                                        as f32,
+                                (part[2] as f64 * 16.0 / bounds[2] as f64) as f32,
+                                (part[3] as f64 * 16.0 / bounds[3] as f64) as f32,
+                            ];
+                            terrain_visible |=
+                                draw_terrain_polygon(game, batch, &frame.view, rect, *part, uv);
+                        }
+                    }
+                }
+                for (slot, chunk) in atlas.chunks.iter().enumerate() {
                     if large {
-                        if let Some((src, dst)) =
-                            atlas.coarse_quad(&frame.view, rect, coarse, *part)
-                        {
+                        if let Some((src, dst)) = atlas.quad(&frame.view, rect, *chunk, slot) {
                             game.native_sprite(
                                 batch,
                                 horizon_client::hud::MOD_IMAGE_SPRITE,
@@ -3604,41 +3810,22 @@ fn draw(
                             terrain_visible = true;
                         }
                     } else {
-                        let bounds = coarse.key.bounds();
-                        let uv = [
-                            coarse.uv_origin[0] as f32
-                                + ((part[0] - bounds[0]) as f64 * 16.0 / bounds[2] as f64) as f32,
-                            coarse.uv_origin[1] as f32
-                                + ((part[1] - bounds[1]) as f64 * 16.0 / bounds[3] as f64) as f32,
-                            (part[2] as f64 * 16.0 / bounds[2] as f64) as f32,
-                            (part[3] as f64 * 16.0 / bounds[3] as f64) as f32,
-                        ];
-                        terrain_visible |=
-                            draw_terrain_polygon(game, batch, &frame.view, rect, *part, uv);
+                        let columns = atlas.width / 16;
+                        let slot = atlas.slots[slot];
+                        terrain_visible |= draw_terrain_polygon(
+                            game,
+                            batch,
+                            &frame.view,
+                            rect,
+                            [i64::from(chunk[0]) * 16, i64::from(chunk[1]) * 16, 16, 16],
+                            [
+                                (slot % columns * 16) as f32,
+                                (slot / columns * 16) as f32,
+                                16.,
+                                16.,
+                            ],
+                        );
                     }
-                }
-            }
-            for (slot, chunk) in atlas.chunks.iter().enumerate() {
-                if large {
-                    if let Some((src, dst)) = atlas.quad(&frame.view, rect, *chunk, slot) {
-                        game.native_sprite(batch, horizon_client::hud::MOD_IMAGE_SPRITE, src, dst);
-                        terrain_visible = true;
-                    }
-                } else {
-                    let columns = atlas.width / 16;
-                    terrain_visible |= draw_terrain_polygon(
-                        game,
-                        batch,
-                        &frame.view,
-                        rect,
-                        [i64::from(chunk[0]) * 16, i64::from(chunk[1]) * 16, 16, 16],
-                        [
-                            (slot % columns * 16) as f32,
-                            (slot / columns * 16) as f32,
-                            16.,
-                            16.,
-                        ],
-                    );
                 }
             }
         } else if let Some(source) = &frame.raster_source {
@@ -4922,6 +5109,7 @@ pub(super) fn disconnect(game: &Game<'_>) {
 
 pub(super) fn atlas_invalidated() {
     state().frame = None;
+    state().page_images.clear();
 }
 
 #[cfg(test)]

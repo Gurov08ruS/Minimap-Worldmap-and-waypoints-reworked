@@ -6,6 +6,172 @@
 macro_rules! define_tests {
     () => {
         mod tests {
+            #[test]
+            #[ignore = "manual CPU preparation timing; not GPU execution or game FPS"]
+            fn benchmark_incremental_atlas_pages() {
+                let mut cache = Cache::default();
+                for x in -64..64 { for z in -32..32 {
+                    cache.insert(Dimension::Overworld, Layer::Surface, [x,z], Tile {
+                        pixels: [80,120,40,255].repeat(256), heights: [42;256], ..Tile::default()
+                    });
+                }}
+                let mut v = view(Dimension::Overworld);
+                v.center = [0.;2]; v.span = [4096.,2048.];
+                let started = Instant::now();
+                let first = cache.update_terrain_atlas(&v, None);
+                let full = started.elapsed();
+                let started = Instant::now();
+                let warm = cache.update_terrain_atlas(&v, Some(&first));
+                let reused = started.elapsed();
+                assert_eq!(warm.prepared_tiles, 0);
+                cache.insert(Dimension::Overworld, Layer::Surface, [0,0], Tile {
+                    pixels: [30,100,90,255].repeat(256), heights: [45;256], ..Tile::default()
+                });
+                let shading = Shading::new().unwrap();
+                let started = Instant::now();
+                let changed = cache.prepare_terrain_atlas(&v, Some(&warm), Some(&shading));
+                let update = started.elapsed();
+                assert_eq!(changed.prepared_tiles, 3);
+                let changed_pages = changed.pages.iter().zip(&warm.pages).filter(|(a,b)| !Arc::ptr_eq(a,b)).count();
+                assert!(changed_pages <= 3);
+                eprintln!("tiles={} pages={} full_us={} unchanged_us={} one_edit_us={} shaded={} changed_pages={}",
+                    first.chunks.len(), first.pages.len(), full.as_micros(), reused.as_micros(), update.as_micros(), changed.prepared_tiles, changed_pages);
+                super::super::profiling::report();
+            }
+
+            #[test]
+            fn incremental_atlas_retains_slots_and_updates_relief_dependants() {
+                let mut cache = Cache::default();
+                for z in -1..=1 { for x in -1..=1 {
+                    cache.insert(Dimension::Overworld, Layer::Surface, [x, z], saved_tile());
+                }}
+                let v = view(Dimension::Overworld);
+                let first = cache.update_terrain_atlas(&v, None);
+                assert_eq!(first.prepared_tiles, 9);
+                let same = cache.update_terrain_atlas(&v, Some(&first));
+                assert_eq!(same.prepared_tiles, 0);
+                let mut changed = saved_tile();
+                changed.heights.fill(50);
+                changed.pixels.fill(100);
+                cache.insert(Dimension::Overworld, Layer::Surface, [0, 0], changed);
+                let next = cache.update_terrain_atlas(&v, Some(&same));
+                assert_eq!(next.prepared_tiles, 3);
+                assert_eq!(next.slots, same.slots);
+                for (i, &chunk) in next.chunks.iter().enumerate() {
+                    let expected = cache.shaded_chunk(v.dimension, v.layer, chunk);
+                    let slot = next.slots[i];
+                    for row in 0..16 {
+                        let at = ((slot / 64 * 16 + row) * next.width + slot % 64 * 16) * 4;
+                        assert_eq!(&next.pixels[at..at+64], &expected[row*64..row*64+64]);
+                    }
+                }
+                cache.insert(Dimension::Overworld, Layer::Surface, [-2, 0], saved_tile());
+                let expanded = cache.update_terrain_atlas(&v, Some(&next));
+                for (&key, &slot) in &next.locations { assert_eq!(expanded.locations[&key], slot); }
+            }
+
+            #[test]
+            fn native_pages_reuse_unchanged_images_beyond_the_shared_slot() {
+                let mut cache = Cache::default();
+                let mut v = view(Dimension::Overworld);
+                v.span = [2048.; 2];
+                for x in -33..33 { for z in -33..33 {
+                    cache.insert(Dimension::Overworld, Layer::Surface, [x, z], saved_tile());
+                }}
+                assert!(cache.gpu_atlas_fits(&v));
+                let first = cache.update_terrain_atlas(&v, None);
+                assert!(first.height > 1024 && first.pages.len() > 16);
+                assert!(first.pages.iter().all(|p| p.width <= 1024 && p.height <= 64));
+                assert!(first.draw_order.windows(2).all(|p| first.slots[p[0]]/256 <= first.slots[p[1]]/256));
+                let next = cache.update_terrain_atlas(&v, Some(&first));
+                assert_eq!(next.prepared_tiles, 0);
+                assert!(first.pages.iter().zip(&next.pages).all(|(a,b)| Arc::ptr_eq(a,b)));
+                let mut tile = saved_tile(); tile.pixels[..4].copy_from_slice(&[1,2,3,255]);
+                cache.insert(v.dimension, v.layer, [0,0], tile);
+                let changed = cache.update_terrain_atlas(&v, Some(&next));
+                assert!(next.pages.iter().zip(&changed.pages).filter(|(a,b)| !Arc::ptr_eq(a,b)).count() <= 3);
+                assert_ne!(changed.pixels, next.pixels);
+            }
+
+            #[test]
+            fn unreadable_detail_does_not_hide_valid_lod_in_gpu_pages() {
+                let dir = CacheDir::new("bad-detail-visual");
+                let mut cache = Cache::open(&dir.0, "save:bad-detail-visual", 1024*1024).unwrap();
+                let key = LodKey { x:0, z:0, level:1 };
+                cache.insert_lod(Dimension::Overworld, key, coarse_tile([20,40,60]));
+                cache.save(lod_record(Dimension::Overworld,key), cache.lod_tiles[&(Dimension::Overworld,key)].1.clone()).unwrap();
+                cache.backing.as_ref().unwrap().borrow_mut().store.put(record_key(Dimension::Overworld,Layer::Surface,0,0), vec![1;8]).unwrap();
+                cache.flush().unwrap();
+                cache.clear_payloads();
+                let atlas = cache.update_terrain_atlas(&view(Dimension::Overworld), None);
+                assert!(atlas.chunks.is_empty());
+                assert_eq!(atlas.coarse.len(),1);
+                assert!(atlas.coarse[0].fragments.iter().any(|r| r[0] <= 0 && r[1] <= 0 && r[0]+r[2] > 0 && r[1]+r[3] > 0));
+                assert!(cache.backing.as_ref().unwrap().borrow().error.is_some());
+            }
+
+            #[test]
+            fn predictive_coverage_is_bounded_and_never_crosses_sessions() {
+                let v = view(Dimension::Overworld);
+                let mut target = v.clone();
+                target.center = [1e9, -1e9]; target.span = [1e8; 2];
+                let ahead = v.predictive(&target);
+                for axis in 0..2 {
+                    assert!((ahead.center[axis] - v.center[axis]).abs() <= v.span[axis]/8.);
+                    assert!(ahead.span[axis] <= v.span[axis]*1.5);
+                }
+                target.session += 1;
+                assert_eq!(v.predictive(&target), v);
+            }
+
+            #[test]
+            fn slow_sampling_does_not_block_camera_publication() {
+                let service = Service::new();
+                let mut v = view(Dimension::Overworld);
+                v.session = 77;
+                service.reset(77);
+                service.request(v.clone());
+                let first = wait_frame(&service, |_| true);
+                let (entered, started) = std::sync::mpsc::channel();
+                let (release, wait) = std::sync::mpsc::channel();
+                assert!(service.submit(77, v.dimension, v.layer, [0,0], move || {
+                    entered.send(()).unwrap(); wait.recv().unwrap(); saved_tile()
+                }));
+                started.recv_timeout(Duration::from_secs(5)).unwrap();
+                v.center[0] += 4.;
+                service.request(v.clone());
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| wait_frame(&service, |f| f.serial > first.serial && f.view == v)));
+                release.send(()).unwrap();
+                assert!(result.is_ok());
+                service.shutdown();
+            }
+
+            impl Cache {
+                fn update_terrain_atlas(&self, view: &View, previous: Option<&TerrainAtlas>) -> TerrainAtlas {
+                    self.prepare_terrain_atlas(view, previous, None)
+                }
+                fn terrain_atlas(&self, view: &View, _serial: u64) -> TerrainAtlas {
+                    self.update_terrain_atlas(view, None)
+                }
+            }
+            #[test]
+            fn disk_versions_reuse_visuals_after_payload_eviction_and_commit() {
+                let dir = CacheDir::new("visual-versions");
+                let mut cache = Cache::open(&dir.0, "save:visual-versions", 1024*1024).unwrap();
+                save_chunk(&mut cache, Dimension::Overworld, Layer::Surface, [0,0], saved_tile());
+                let v = view(Dimension::Overworld);
+                let first = cache.update_terrain_atlas(&v, None);
+                cache.flush().unwrap();
+                cache.clear_payloads();
+                let before = cache.backing.as_ref().unwrap().borrow().clock;
+                let next = cache.update_terrain_atlas(&v, Some(&first));
+                assert_eq!(next.prepared_tiles, 0);
+                assert_eq!(before, cache.backing.as_ref().unwrap().borrow().clock);
+                assert_eq!(next.pixels, first.pixels);
+                let shading = Shading::new().unwrap();
+                let threaded = cache.prepare_terrain_atlas(&v, None, Some(&shading));
+                assert_eq!(threaded.pixels, first.pixels);
+            }
             fn sample(
                 block: impl FnMut(i32, i32, i32) -> Block,
                 top: impl Fn(i32, i32) -> i32,
@@ -235,7 +401,7 @@ macro_rules! define_tests {
                 v.width = 1024;
                 cache.prepare(&v).unwrap();
                 assert!(cache.paged);
-                assert!(!cache.gpu_atlas_fits(&v));
+                assert!(cache.gpu_atlas_fits(&v));
                 let frame = cache.render(v, 1);
                 assert_eq!(frame.known, 1024 * 16);
                 assert!(frame.pixels[..8 * 4].iter().all(|b| *b == 0));
@@ -1450,7 +1616,10 @@ macro_rules! define_tests {
                 far.span = [150000.0; 2];
                 far.width = 1600;
                 far.height = 1200;
-                assert!(!cache.gpu_atlas_fits(&far));
+                assert!(cache.gpu_atlas_fits(&far));
+                let atlas = cache.terrain_atlas(&far, 2);
+                assert!(atlas.height > 1024);
+                assert!(!atlas.pages.is_empty());
                 let frame = cache.render(far, 2);
                 assert!(frame.view.width <= 1024 && frame.view.height <= 1024);
                 assert_eq!(frame.pixels.len(), frame.view.width * frame.view.height * 4);

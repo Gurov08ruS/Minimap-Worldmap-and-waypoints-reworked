@@ -15,7 +15,12 @@ def main():
     args = parser.parse_args()
     checkout = args.horizon.resolve()
     status = subprocess.check_output(['git', '-C', str(checkout), 'status', '--porcelain'])
-    before = {p: (checkout/p).read_bytes() for p in horizon.COMPAT['source_sha256']}
+    # The source checkout may be sparse. The pinned archive is validated by
+    # horizon.stage; do not materialize missing files in the original checkout.
+    def checkout_bytes(path):
+        file = checkout/path
+        return file.read_bytes() if file.is_file() else None
+    before = {p: checkout_bytes(p) for p in horizon.COMPAT['source_sha256']}
     (horizon.ROOT/'target').mkdir(exist_ok=True)
     with horizon.lock(horizon.ROOT/'target/stage.lock'):
         with tempfile.TemporaryDirectory(prefix='native-stage-test-', dir=horizon.STAGES.parent) as scratch:
@@ -30,7 +35,7 @@ def main():
             assert_plan(plan)
             original = next((root/'original').glob('*/.horizon-mod-template.json')).parent
             audit(original, output, root/'plan.json')
-    assert all((checkout/p).read_bytes() == content for p, content in before.items())
+    assert all(checkout_bytes(p) == content for p, content in before.items())
     assert subprocess.check_output(['git', '-C', str(checkout), 'status', '--porcelain']) == status
     print(json.dumps({'status': 'ok', 'original_checkout_unchanged': True,
                       'only_planned_asts_changed': True, 'deterministic_bytes_and_mtimes': True}, indent=2))

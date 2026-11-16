@@ -23,6 +23,89 @@ pub const WAYPOINTS_KEY: &str = "waypoints";
 pub const WAYPOINTS_DEFAULT: &str = "key.keyboard.n";
 pub const SETTINGS_FILE: &str = "settings.ini";
 
+/// Opt-in bounded CPU timing. The terrain worker emits summaries, never the
+/// render callback. Enable before launching with MWWR_PROFILE=1.
+pub mod profiling {
+    use std::{
+        collections::BTreeMap,
+        sync::{Mutex, OnceLock},
+        time::{Duration, Instant},
+    };
+    struct Samples {
+        micros: [u64; 128],
+        count: usize,
+        items: u64,
+        bytes: u64,
+    }
+    impl Default for Samples {
+        fn default() -> Self {
+            Self {
+                micros: [0; 128],
+                count: 0,
+                items: 0,
+                bytes: 0,
+            }
+        }
+    }
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    static SAMPLES: OnceLock<Mutex<BTreeMap<&'static str, Samples>>> = OnceLock::new();
+    pub fn enabled() -> bool {
+        *ENABLED.get_or_init(|| std::env::var_os("MWWR_PROFILE").is_some_and(|v| v == "1"))
+    }
+    pub struct Timer {
+        name: &'static str,
+        start: Option<Instant>,
+    }
+    pub fn measure(name: &'static str) -> Timer {
+        Timer {
+            name,
+            start: enabled().then(Instant::now),
+        }
+    }
+    impl Drop for Timer {
+        fn drop(&mut self) {
+            if let Some(start) = self.start {
+                record(self.name, start.elapsed(), 0, 0);
+            }
+        }
+    }
+    pub fn record(name: &'static str, elapsed: Duration, items: u64, bytes: u64) {
+        if !enabled() {
+            return;
+        }
+        let mut all = SAMPLES
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let samples = all.entry(name).or_default();
+        samples.micros[samples.count % 128] = elapsed.as_micros().min(u128::from(u64::MAX)) as u64;
+        samples.count += 1;
+        samples.items = samples.items.saturating_add(items);
+        samples.bytes = samples.bytes.saturating_add(bytes);
+    }
+    pub fn report() {
+        let Some(all) = SAMPLES.get() else {
+            return;
+        };
+        let snapshot = std::mem::take(&mut *all.lock().unwrap_or_else(|e| e.into_inner()));
+        for (name, samples) in snapshot {
+            let mut values = samples.micros[..samples.count.min(128)].to_vec();
+            values.sort_unstable();
+            let percentile =
+                |percent: usize| values[(values.len() * percent).div_ceil(100).saturating_sub(1)];
+            eprintln!(
+                "[mwwr-profile] stage={name} count={} p95_us={} p99_us={} max_us={} items={} bytes={}",
+                samples.count,
+                percentile(95),
+                percentile(99),
+                values.last().unwrap(),
+                samples.items,
+                samples.bytes
+            );
+        }
+    }
+}
+
 const SIZES: [u16; 7] = [64, 96, 128, 160, 192, 224, 256];
 const ZOOMS: [f32; 7] = [0.1, 0.25, 0.5, 0.75, 1.0, 2.0, 4.0];
 
@@ -2591,6 +2674,7 @@ pub mod container {
         offset: u64,
         len: u32,
         checksum: u32,
+        version: u64,
     }
     #[derive(Clone, Default)]
     struct Root {
@@ -2605,8 +2689,80 @@ pub mod container {
         current: usize,
         pending: BTreeMap<RecordKey, Vec<u8>>,
         poisoned: bool,
+        spatial: SpatialIndex,
+        pending_versions: BTreeMap<RecordKey, u64>,
+        next_version: u64,
         #[cfg(test)]
         pub(super) write_budget: Option<usize>,
+    }
+    /// Region columns support bounded rectangle lookup without walking history.
+    /// This is derived metadata; schema 2 bytes and recovery remain unchanged.
+    #[derive(Default)]
+    struct SpatialBand {
+        columns: BTreeMap<i32, BTreeMap<i32, std::collections::BTreeSet<[i32; 2]>>>,
+    }
+    #[derive(Default)]
+    struct SpatialIndex {
+        bands: BTreeMap<[i32; 4], SpatialBand>,
+    }
+    impl SpatialIndex {
+        fn insert(&mut self, key: RecordKey) {
+            let band = self
+                .bands
+                .entry([key[0], key[1], key[2], key[5]])
+                .or_default();
+            band.columns
+                .entry(key[3].div_euclid(32))
+                .or_default()
+                .entry(key[4].div_euclid(32))
+                .or_default()
+                .insert([key[3], key[4]]);
+        }
+        fn query(
+            &self,
+            dimension: i32,
+            kind: i32,
+            layer: i32,
+            rect: [i64; 4],
+            limit: usize,
+        ) -> Vec<RecordKey> {
+            let mut found = Vec::new();
+            if rect[2] <= 0 || rect[3] <= 0 || limit == 0 {
+                return found;
+            }
+            for (&[d, k, y, level], band) in self
+                .bands
+                .range([dimension, kind, layer, i32::MIN]..=[dimension, kind, layer, i32::MAX])
+            {
+                let size = 16_i64 << if kind == 2 { level.clamp(0, 22) } else { 0 };
+                let lo = [rect[0].div_euclid(size), rect[1].div_euclid(size)];
+                let hi = [
+                    (rect[0] + rect[2] - 1).div_euclid(size),
+                    (rect[1] + rect[3] - 1).div_euclid(size),
+                ];
+                let clamp = |n: i64| n.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+                for (_, column) in band
+                    .columns
+                    .range(clamp(lo[0].div_euclid(32))..=clamp(hi[0].div_euclid(32)))
+                {
+                    for (_, cells) in
+                        column.range(clamp(lo[1].div_euclid(32))..=clamp(hi[1].div_euclid(32)))
+                    {
+                        for &[x, z] in cells {
+                            if (lo[0]..=hi[0]).contains(&i64::from(x))
+                                && (lo[1]..=hi[1]).contains(&i64::from(z))
+                            {
+                                found.push([d, k, y, x, z, level]);
+                                if found.len() == limit {
+                                    return found;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            found
+        }
     }
     fn invalid(message: &str) -> io::Error {
         io::Error::new(io::ErrorKind::InvalidData, message)
@@ -2810,10 +2966,16 @@ pub mod container {
                 current: 0,
                 pending: BTreeMap::new(),
                 poisoned: false,
+                spatial: SpatialIndex::default(),
+                pending_versions: BTreeMap::new(),
+                next_version: 0,
                 #[cfg(test)]
                 write_budget: None,
             };
             store.load().map_err(LeaseError::Io)?;
+            for key in store.roots[store.current].entries.keys() {
+                store.spatial.insert(*key);
+            }
             Ok(store)
         }
         fn load(&mut self) -> io::Result<()> {
@@ -2908,6 +3070,7 @@ pub mod container {
                         offset: u64_at(&page, at + 24),
                         len: u32_at(&page, at + 32),
                         checksum: u32_at(&page, at + 36),
+                        version: 0,
                     };
                     if value.offset < PREFIX
                         || !value.offset.is_multiple_of(PAGE as u64)
@@ -2949,6 +3112,7 @@ pub mod container {
             )
         }
         pub fn read(&mut self, key: RecordKey) -> io::Result<Option<Vec<u8>>> {
+            let _timing = super::profiling::measure("disk-read");
             if let Some(data) = self.pending.get(&key) {
                 return Ok(Some(data.clone()));
             }
@@ -2969,8 +3133,32 @@ pub mod container {
             if bytes.is_empty() || bytes.len() > MAX_RECORD {
                 return Err(invalid("invalid record length"));
             }
+            self.next_version = self
+                .next_version
+                .checked_add(1)
+                .ok_or_else(|| invalid("record version overflow"))?;
             self.pending.insert(key, bytes);
+            self.pending_versions.insert(key, self.next_version);
+            self.spatial.insert(key);
             Ok(())
+        }
+        pub fn query(
+            &self,
+            dimension: i32,
+            kind: i32,
+            layer: i32,
+            rect: [i64; 4],
+            limit: usize,
+        ) -> Vec<RecordKey> {
+            self.spatial.query(dimension, kind, layer, rect, limit)
+        }
+        pub fn version(&self, key: RecordKey) -> Option<u64> {
+            self.pending_versions.get(&key).copied().or_else(|| {
+                self.roots[self.current]
+                    .entries
+                    .get(&key)
+                    .map(|r| r.version)
+            })
         }
         pub fn pending_bytes(&self) -> usize {
             self.pending.values().map(Vec::len).sum()
@@ -2992,6 +3180,7 @@ pub mod container {
             result
         }
         fn commit_inner(&mut self) -> io::Result<()> {
+            let _timing = super::profiling::measure("commit");
             #[cfg(test)]
             let mut write_budget = self.write_budget.take();
             #[cfg(not(test))]
@@ -3035,6 +3224,7 @@ pub mod container {
                         offset: extent.start,
                         len: bytes.len() as u32,
                         checksum: crc(bytes),
+                        version: self.pending_versions[&key],
                     },
                 );
             }
@@ -3087,6 +3277,7 @@ pub mod container {
             self.roots[slot] = root;
             self.current = slot;
             self.pending.clear();
+            self.pending_versions.clear();
             Ok(())
         }
     }
@@ -3353,6 +3544,25 @@ pub mod maps {
         pub large: bool,
     }
     impl View {
+        /// Bound lookahead so a remote drag/teleport cannot displace the visible
+        /// working set. Padding also retains terrain behind the moving camera.
+        pub fn predictive(&self, target: &Self) -> Self {
+            let mut prepared = self.clone();
+            if (self.session, self.dimension, self.layer, self.large)
+                != (target.session, target.dimension, target.layer, target.large)
+            {
+                return prepared;
+            }
+            for axis in 0..2 {
+                let shift = (target.center[axis] - self.center[axis])
+                    .clamp(-self.span[axis] / 4., self.span[axis] / 4.);
+                prepared.center[axis] += shift / 2.;
+                prepared.span[axis] = self.span[axis]
+                    .max(target.span[axis].clamp(self.span[axis] / 2., self.span[axis] * 1.25))
+                    + shift.abs();
+            }
+            prepared
+        }
         fn atlas_region(&self) -> [i64; 4] {
             let step = 2f64.powf(
                 (self.span[0].max(self.span[1]) / 4.0)
@@ -3751,6 +3961,100 @@ pub mod maps {
         pub coarse: Vec<LodDraw>,
         pub region: [i64; 4],
         pub width: usize,
+        pub slots: Vec<usize>,
+        sources: BTreeMap<VisualKey, [VisualSource; 3]>,
+        locations: BTreeMap<VisualKey, usize>,
+        scope: (u64, Dimension, Layer),
+        pub prepared_tiles: usize,
+        pub pages: Vec<Arc<AtlasPage>>,
+        pub draw_order: Vec<usize>,
+    }
+    pub struct AtlasPage {
+        pub pixels: Vec<u8>,
+        pub width: usize,
+        pub height: usize,
+    }
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    enum VisualKey {
+        Detail([i32; 2]),
+        Lod(LodKey),
+    }
+    enum VisualSource {
+        Stored(Option<u64>),
+        Memory(std::sync::Weak<Tile>),
+    }
+    struct ShadeRequest {
+        tile: Arc<Tile>,
+        north: Option<Arc<Tile>>,
+        west: Option<Arc<Tile>>,
+        reply: mpsc::SyncSender<Vec<u8>>,
+    }
+    /// A bounded CPU stage. Only the terrain worker holds file descriptors;
+    /// immutable neighbouring tiles cross this queue, never the container.
+    struct Shading {
+        sender: Option<mpsc::SyncSender<ShadeRequest>>,
+        worker: Option<JoinHandle<()>>,
+    }
+    impl Shading {
+        fn new() -> Option<Self> {
+            let (sender, jobs) = mpsc::sync_channel::<ShadeRequest>(8);
+            let worker = thread::Builder::new()
+                .name("map-shading".into())
+                .spawn(move || {
+                    while let Ok(job) = jobs.recv() {
+                        let _timing = super::profiling::measure("shade-worker");
+                        let pixels = Cache::shade_pixels(
+                            &job.tile,
+                            job.north.as_deref(),
+                            job.west.as_deref(),
+                        );
+                        let _ = job.reply.send(pixels);
+                    }
+                })
+                .map_err(|e| {
+                    eprintln!("Map shading worker unavailable; using inline preparation: {e}")
+                })
+                .ok()?;
+            Some(Self {
+                sender: Some(sender),
+                worker: Some(worker),
+            })
+        }
+        fn submit(
+            &self,
+            tile: Arc<Tile>,
+            north: Option<Arc<Tile>>,
+            west: Option<Arc<Tile>>,
+        ) -> Option<mpsc::Receiver<Vec<u8>>> {
+            let (reply, result) = mpsc::sync_channel(1);
+            self.sender
+                .as_ref()?
+                .send(ShadeRequest {
+                    tile,
+                    north,
+                    west,
+                    reply,
+                })
+                .ok()?;
+            Some(result)
+        }
+    }
+    impl Drop for Shading {
+        fn drop(&mut self) {
+            self.sender.take();
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
+            }
+        }
+    }
+    impl VisualSource {
+        fn same(&self, other: &Self) -> bool {
+            match (self, other) {
+                (Self::Stored(a), Self::Stored(b)) => a == b,
+                (Self::Memory(a), Self::Memory(b)) => std::sync::Weak::ptr_eq(a, b),
+                _ => false,
+            }
+        }
     }
     impl TerrainAtlas {
         pub fn covers(&self, view: &View) -> bool {
@@ -3801,6 +4105,7 @@ pub mod maps {
             chunk: [i32; 2],
             slot: usize,
         ) -> Option<([f32; 4], [f32; 4])> {
+            let slot = self.slots[slot];
             let mut src = [0.0; 4];
             let mut dst = [0.0; 4];
             for axis in 0..2 {
@@ -4210,9 +4515,13 @@ pub mod maps {
         clock: u64,
         limit: usize,
         error: Option<String>,
+        unreadable: BTreeSet<RecordKey>,
     }
     impl Backing {
         fn get(&mut self, key: RecordKey) -> Option<Arc<Tile>> {
+            if self.unreadable.contains(&key) {
+                return None;
+            }
             self.clock += 1;
             if let Some((stamp, tile)) = self.reads.get_mut(&key) {
                 self.read_order.remove(&(*stamp, key));
@@ -4229,6 +4538,7 @@ pub mod maps {
                 Ok(None) => return None,
                 Err(e) => {
                     self.error = Some(e.to_string());
+                    self.unreadable.insert(key);
                     return None;
                 }
             };
@@ -4283,6 +4593,7 @@ pub mod maps {
                     clock: 0,
                     limit: limit / 4,
                     error: None,
+                    unreadable: BTreeSet::new(),
                 })),
                 limit,
                 ..Self::default()
@@ -4309,6 +4620,7 @@ pub mod maps {
                     backing.read_bytes -= tile_bytes(&old);
                 }
                 backing.store.put(key, tile_encode(&tile)?)?;
+                backing.unreadable.remove(&key);
             }
             Ok(())
         }
@@ -4375,6 +4687,7 @@ pub mod maps {
                 .or_else(|| self.backing.as_ref()?.borrow_mut().get(lod_record(d, key)))
         }
         fn prepare(&mut self, view: &View) -> io::Result<()> {
+            let _timing = super::profiling::measure("residency");
             let Some(backing) = &self.backing else {
                 return Ok(());
             };
@@ -4382,31 +4695,34 @@ pub mod maps {
             // Bound even the temporary list when a zoomed-out view covers an
             // enormous history; raster reads query the remaining keys on demand.
             let candidates = (self.limit / 4096).max(1);
-            let keys: Vec<_> = backing
-                .borrow()
-                .store
-                .keys()
-                .filter(|key| {
-                    record_dimension(*key) == Some(view.dimension)
-                        && (record_layer(*key) == Some(view.layer)
-                            && intersects(
-                                region,
-                                [i64::from(key[3]) * 16, i64::from(key[4]) * 16, 16, 16],
-                            )
-                            || key[1] == 2
-                                && view.layer == Layer::Surface
-                                && intersects(
-                                    region,
-                                    LodKey {
-                                        x: key[3],
-                                        z: key[4],
-                                        level: key[5].clamp(0, 22) as u8,
-                                    }
-                                    .bounds(),
-                                ))
-                })
-                .take(candidates + 1)
-                .collect();
+            let prefix = record_key(view.dimension, view.layer, 0, 0);
+            let mut keys = backing.borrow().store.query(
+                prefix[0],
+                prefix[1],
+                prefix[2],
+                region,
+                candidates + 1,
+            );
+            if view.layer == Layer::Surface && keys.len() <= candidates {
+                keys.extend(backing.borrow().store.query(
+                    prefix[0],
+                    2,
+                    0,
+                    region,
+                    candidates + 1 - keys.len(),
+                ));
+            }
+            // Prioritize the camera within bounded admitted candidates.
+            keys.sort_by_key(|key| {
+                let size = if key[1] == 2 {
+                    16_i64 << key[5].clamp(0, 22)
+                } else {
+                    16
+                };
+                let dx = key[3] as f64 * size as f64 + size as f64 / 2.0 - view.center[0];
+                let dz = key[4] as f64 * size as f64 + size as f64 / 2.0 - view.center[1];
+                (dx * dx + dz * dz) as u64
+            });
             self.paged = keys.len() > candidates;
             {
                 let mut b = backing.borrow_mut();
@@ -4656,11 +4972,16 @@ pub mod maps {
             None
         }
         fn gpu_atlas_fits(&self, view: &View) -> bool {
-            if self.paged {
-                return false;
-            }
+            !self.visual_keys(view).2
+        }
+        fn visual_keys(&self, view: &View) -> (Vec<[i32; 2]>, Vec<LodKey>, bool) {
             let region = view.atlas_region();
-            let fine = self
+            let capacity = if self.limit == 0 {
+                32_768
+            } else {
+                (self.limit / 4096).clamp(4096, 32_768)
+            };
+            let mut fine: BTreeSet<_> = self
                 .tiles
                 .keys()
                 .filter(|key| {
@@ -4671,16 +4992,60 @@ pub mod maps {
                             [i64::from(key.2) * 16, i64::from(key.3) * 16, 16, 16],
                         )
                 })
-                .count();
-            let coarse = if view.layer == Layer::Surface {
+                .map(|key| [key.2, key.3])
+                .collect();
+            let mut coarse: BTreeSet<_> = if view.layer == Layer::Surface {
                 self.lod_tiles
                     .keys()
                     .filter(|(d, key)| *d == view.dimension && intersects(region, key.bounds()))
-                    .count()
+                    .map(|(_, key)| *key)
+                    .collect()
             } else {
-                0
+                BTreeSet::new()
             };
-            fine.div_ceil(64) + coarse.div_ceil(64) <= 64
+            if let Some(backing) = &self.backing {
+                let backing = backing.borrow();
+                let key = record_key(view.dimension, view.layer, 0, 0);
+                fine.extend(
+                    backing
+                        .store
+                        .query(key[0], key[1], key[2], region, capacity + 1)
+                        .into_iter()
+                        .map(|k| [k[3], k[4]]),
+                );
+                if view.layer == Layer::Surface {
+                    coarse.extend(
+                        backing
+                            .store
+                            .query(key[0], 2, 0, region, capacity + 1)
+                            .into_iter()
+                            .map(|k| LodKey {
+                                x: k[3],
+                                z: k[4],
+                                level: k[5] as u8,
+                            }),
+                    );
+                }
+                fine.retain(|c| {
+                    !backing.unreadable.contains(&record_key(
+                        view.dimension,
+                        view.layer,
+                        c[0],
+                        c[1],
+                    ))
+                });
+                coarse.retain(|key| {
+                    !backing
+                        .unreadable
+                        .contains(&lod_record(view.dimension, *key))
+                });
+            }
+            let oversized = fine.len() + coarse.len() > capacity;
+            (
+                fine.into_iter().take(capacity + 1).collect(),
+                coarse.into_iter().take(capacity + 1).collect(),
+                oversized,
+            )
         }
         fn shaded_chunk(&self, dimension: Dimension, layer: Layer, chunk: [i32; 2]) -> Vec<u8> {
             let Some(tile) = self.tile_at((dimension, layer, chunk[0], chunk[1])) else {
@@ -4689,6 +5054,9 @@ pub mod maps {
             // Neighbour handles are resolved once per tile, never once per block.
             let north = self.tile_at((dimension, layer, chunk[0], chunk[1] - 1));
             let west = self.tile_at((dimension, layer, chunk[0] - 1, chunk[1]));
+            Self::shade_pixels(&tile, north.as_deref(), west.as_deref())
+        }
+        fn shade_pixels(tile: &Tile, north: Option<&Tile>, west: Option<&Tile>) -> Vec<u8> {
             let mut pixels = tile.pixels.clone();
             for z in 0..16 {
                 for x in 0..16 {
@@ -4719,59 +5087,214 @@ pub mod maps {
             }
             pixels
         }
-        fn terrain_atlas(&self, view: &View, _serial: u64) -> TerrainAtlas {
+        fn visual_source(&self, key: RecordKey) -> VisualSource {
+            if let Some(backing) = &self.backing {
+                return VisualSource::Stored(backing.borrow().store.version(key));
+            }
+            let tile = record_dimension(key).and_then(|d| {
+                if let Some(layer) = record_layer(key) {
+                    self.tiles.get(&(d, layer, key[3], key[4])).map(|(_, t)| t)
+                } else {
+                    self.lod_tiles
+                        .get(&(
+                            d,
+                            LodKey {
+                                x: key[3],
+                                z: key[4],
+                                level: key[5] as u8,
+                            },
+                        ))
+                        .map(|(_, t)| t)
+                }
+            });
+            VisualSource::Memory(tile.map(Arc::downgrade).unwrap_or_default())
+        }
+        fn prepare_terrain_atlas(
+            &self,
+            view: &View,
+            previous: Option<&TerrainAtlas>,
+            shading: Option<&Shading>,
+        ) -> TerrainAtlas {
+            let _timing = super::profiling::measure("atlas");
+            let previous =
+                previous.filter(|p| p.scope == (view.session, view.dimension, view.layer));
             let region = view.atlas_region();
-            let chunks: Vec<_> = self
-                .tiles
-                .keys()
-                .filter(|key| {
-                    key.0 == view.dimension
-                        && key.1 == view.layer
-                        && intersects(
-                            region,
-                            [i64::from(key.2) * 16, i64::from(key.3) * 16, 16, 16],
-                        )
-                })
-                .map(|key| [key.2, key.3])
-                .collect();
+            let (mut chunks, mut coarse, _) = self.visual_keys(view);
             let detailed: BTreeSet<_> = chunks.iter().copied().collect();
-            let mut coarse: Vec<_> = if view.layer == Layer::Surface {
-                self.lod_tiles
-                    .keys()
-                    .filter(|(d, key)| *d == view.dimension && intersects(region, key.bounds()))
-                    .map(|(_, key)| *key)
+            coarse.sort_by_key(|key| std::cmp::Reverse(key.level));
+            let keys: BTreeSet<_> = chunks
+                .iter()
+                .copied()
+                .map(VisualKey::Detail)
+                .chain(coarse.iter().copied().map(VisualKey::Lod))
+                .collect();
+            let mut locations: BTreeMap<_, _> = previous
+                .map(|p| {
+                    p.locations
+                        .iter()
+                        .filter(|(k, _)| keys.contains(k))
+                        .map(|(k, v)| (*k, *v))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut used: BTreeSet<_> = locations.values().copied().collect();
+            let mut next = 0;
+            for key in chunks
+                .iter()
+                .copied()
+                .map(VisualKey::Detail)
+                .chain(coarse.iter().copied().map(VisualKey::Lod))
+            {
+                if locations.contains_key(&key) {
+                    continue;
+                }
+                while used.contains(&next) {
+                    next += 1;
+                }
+                locations.insert(key, next);
+                used.insert(next);
+            }
+            let mut coarse: Vec<LodDraw> = coarse
+                .into_iter()
+                .map(|key| {
+                    let slot = locations[&VisualKey::Lod(key)];
+                    LodDraw {
+                        key,
+                        uv_origin: [slot % 64 * 16, slot / 64 * 16],
+                        fragments: lod_fragments(key, &detailed),
+                    }
+                })
+                .collect();
+            let height = (used.last().map_or(1, |s| (s + 1).div_ceil(64)) * 16)
+                .max(previous.map_or(0, |p| p.height));
+            let mut pixels = vec![0; 1024 * height * 4];
+            let mut sources = BTreeMap::new();
+            let mut prepared_tiles = 0;
+            let mut pending = Vec::new();
+            for (&key, &slot) in &locations {
+                let signature = match key {
+                    VisualKey::Detail([x, z]) => [
+                        self.visual_source(record_key(view.dimension, view.layer, x, z)),
+                        self.visual_source(record_key(
+                            view.dimension,
+                            view.layer,
+                            x,
+                            z.saturating_sub(1),
+                        )),
+                        self.visual_source(record_key(
+                            view.dimension,
+                            view.layer,
+                            x.saturating_sub(1),
+                            z,
+                        )),
+                    ],
+                    VisualKey::Lod(k) => [
+                        self.visual_source(lod_record(view.dimension, k)),
+                        VisualSource::Stored(None),
+                        VisualSource::Stored(None),
+                    ],
+                };
+                let reusable = previous.filter(|p| {
+                    p.locations.get(&key) == Some(&slot)
+                        && p.sources
+                            .get(&key)
+                            .is_some_and(|old| old.iter().zip(&signature).all(|(a, b)| a.same(b)))
+                });
+                let tile_pixels = if reusable.is_none() {
+                    prepared_tiles += 1;
+                    if let (Some(shading), VisualKey::Detail([x, z])) = (shading, key)
+                        && let Some(tile) = self.tile_at((view.dimension, view.layer, x, z))
+                        && let Some(result) = shading.submit(
+                            tile,
+                            self.tile_at((view.dimension, view.layer, x, z.saturating_sub(1))),
+                            self.tile_at((view.dimension, view.layer, x.saturating_sub(1), z)),
+                        )
+                    {
+                        pending.push((slot, [x, z], result));
+                        sources.insert(key, signature);
+                        continue;
+                    }
+                    Some(match key {
+                        VisualKey::Detail(chunk) => {
+                            self.shaded_chunk(view.dimension, view.layer, chunk)
+                        }
+                        VisualKey::Lod(key) => self
+                            .coarse_at(view.dimension, key)
+                            .map_or_else(|| vec![0; 1024], |t| t.pixels.clone()),
+                    })
+                } else {
+                    None
+                };
+                for row in 0..16 {
+                    let target = ((slot / 64 * 16 + row) * 1024 + slot % 64 * 16) * 4;
+                    let source = if let Some(tile) = &tile_pixels {
+                        &tile[row * 64..row * 64 + 64]
+                    } else {
+                        &reusable.unwrap().pixels[target..target + 64]
+                    };
+                    pixels[target..target + 64].copy_from_slice(source);
+                }
+                sources.insert(key, signature);
+            }
+            for (slot, chunk, result) in pending {
+                let tile = result
+                    .recv()
+                    .unwrap_or_else(|_| self.shaded_chunk(view.dimension, view.layer, chunk));
+                for row in 0..16 {
+                    let at = ((slot / 64 * 16 + row) * 1024 + slot % 64 * 16) * 4;
+                    pixels[at..at + 64].copy_from_slice(&tile[row * 64..row * 64 + 64]);
+                }
+            }
+            super::profiling::record("shaded-tiles", Duration::ZERO, prepared_tiles as u64, 0);
+            if let Some(backing) = &self.backing {
+                let backing = backing.borrow();
+                chunks.retain(|c| {
+                    !backing.unreadable.contains(&record_key(
+                        view.dimension,
+                        view.layer,
+                        c[0],
+                        c[1],
+                    ))
+                });
+                coarse.retain(|c| {
+                    !backing
+                        .unreadable
+                        .contains(&lod_record(view.dimension, c.key))
+                });
+                let detailed = chunks.iter().copied().collect();
+                for draw in &mut coarse {
+                    draw.fragments = lod_fragments(draw.key, &detailed);
+                }
+            }
+            let slots: Vec<_> = chunks
+                .iter()
+                .map(|key| locations[&VisualKey::Detail(*key)])
+                .collect();
+            let mut draw_order: Vec<_> = (0..chunks.len()).collect();
+            draw_order.sort_unstable_by_key(|i| slots[*i] / 256);
+            coarse.sort_by_key(|draw| (std::cmp::Reverse(draw.key.level), draw.uv_origin[1] / 64));
+            let pages = if height > 1024 {
+                pixels
+                    .chunks(1024 * 64 * 4)
+                    .enumerate()
+                    .map(|(i, bytes)| {
+                        if let Some(page) = previous
+                            .and_then(|p| p.pages.get(i))
+                            .filter(|p| p.pixels == bytes)
+                        {
+                            page.clone()
+                        } else {
+                            Arc::new(AtlasPage {
+                                pixels: bytes.to_vec(),
+                                width: 1024,
+                                height: bytes.len() / (1024 * 4),
+                            })
+                        }
+                    })
                     .collect()
             } else {
                 Vec::new()
             };
-            coarse.sort_by_key(|key| std::cmp::Reverse(key.level));
-            let coarse: Vec<LodDraw> = coarse
-                .into_iter()
-                .enumerate()
-                .map(|(i, key)| LodDraw {
-                    key,
-                    uv_origin: [i % 64 * 16, chunks.len().div_ceil(64) * 16 + i / 64 * 16],
-                    fragments: lod_fragments(key, &detailed),
-                })
-                .collect();
-            let height = (chunks.len().div_ceil(64) + coarse.len().div_ceil(64)).max(1) * 16;
-            let mut pixels = vec![0; 1024 * height * 4];
-            for (slot, chunk) in chunks.iter().enumerate() {
-                let tile_pixels = self.shaded_chunk(view.dimension, view.layer, *chunk);
-                for row in 0..16 {
-                    let target = ((slot / 64 * 16 + row) * 1024 + slot % 64 * 16) * 4;
-                    pixels[target..target + 64]
-                        .copy_from_slice(&tile_pixels[row * 64..row * 64 + 64]);
-                }
-            }
-            for draw in &coarse {
-                let tile = &self.lod_tiles[&(view.dimension, draw.key)].1;
-                for y in 0..16 {
-                    let src = y * 64;
-                    let dst = ((draw.uv_origin[1] + y) * 1024 + draw.uv_origin[0]) * 4;
-                    pixels[dst..dst + 64].copy_from_slice(&tile.pixels[src..src + 64]);
-                }
-            }
             TerrainAtlas {
                 pixels,
                 height,
@@ -4779,9 +5302,17 @@ pub mod maps {
                 coarse,
                 region,
                 width: 1024,
+                slots,
+                sources,
+                locations,
+                scope: (view.session, view.dimension, view.layer),
+                prepared_tiles,
+                pages,
+                draw_order,
             }
         }
         pub fn render(&self, mut view: View, serial: u64) -> Frame {
+            let _timing = super::profiling::measure("raster");
             let scale = (view.width.max(view.height) as f64 / 1024.0).max(1.0);
             view.width = ((view.width as f64 / scale).ceil() as usize).clamp(1, 1024);
             view.height = ((view.height as f64 / scale).ceil() as usize).clamp(1, 1024);
@@ -4970,6 +5501,8 @@ pub mod maps {
         tx: Mutex<Option<mpsc::SyncSender<Job>>>,
         worker: Mutex<Option<JoinHandle<()>>>,
         latest: Arc<Mutex<Option<View>>>,
+        sampler: Mutex<Option<JoinHandle<()>>>,
+        lookahead: Arc<Mutex<Option<View>>>,
         output: Arc<Mutex<Option<Arc<Frame>>>>,
         session: Arc<AtomicU64>,
         resident: Arc<Mutex<BTreeSet<Key>>>,
@@ -4986,8 +5519,11 @@ pub mod maps {
             Self::with_directory(None)
         }
         pub fn with_directory(directory: Option<std::path::PathBuf>) -> Self {
-            let (tx, rx) = mpsc::sync_channel(8);
+            let (tx, sampling) = mpsc::sync_channel::<Job>(8);
+            let (prepared, rx) = mpsc::sync_channel(8);
             let latest = Arc::new(Mutex::new(None::<View>));
+            let lookahead = Arc::new(Mutex::new(None::<View>));
+            let prediction = lookahead.clone();
             let output = Arc::new(Mutex::new(None));
             let session = Arc::new(AtomicU64::new(0));
             let resident = Arc::new(Mutex::new(BTreeSet::new()));
@@ -5001,7 +5537,80 @@ pub mod maps {
             let (desired, errors) = (binding.clone(), status.clone());
             let paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let paused_state = paused.clone();
+            let sampling_session = session.clone();
+            let sampling_paused = paused.clone();
+            let sampling_status = status.clone();
+            let sampling_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let cpu_failed = sampling_failed.clone();
+            let sampler = thread::Builder::new()
+                .name("map-sampling".into())
+                .spawn(move || {
+                    while let Ok(job) = sampling.recv() {
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            let _timing = super::profiling::measure("sampling");
+                            match job {
+                                Job::Chunk {
+                                    session,
+                                    dimension,
+                                    layer,
+                                    chunk,
+                                    sample,
+                                } if session == sampling_session.load(Ordering::Acquire)
+                                    && !sampling_paused.load(Ordering::Acquire) =>
+                                {
+                                    let tile = sample();
+                                    Some(Job::Chunk {
+                                        session,
+                                        dimension,
+                                        layer,
+                                        chunk,
+                                        sample: Box::new(move || tile),
+                                    })
+                                }
+                                Job::Lod {
+                                    session,
+                                    dimension,
+                                    key,
+                                    sample,
+                                } if session == sampling_session.load(Ordering::Acquire)
+                                    && !sampling_paused.load(Ordering::Acquire) =>
+                                {
+                                    let tile = sample();
+                                    Some(Job::Lod {
+                                        session,
+                                        dimension,
+                                        key,
+                                        sample: Box::new(move || tile),
+                                    })
+                                }
+                                Job::Wake => Some(Job::Wake),
+                                _ => None,
+                            }
+                        }));
+                        match result {
+                            Ok(Some(job)) => {
+                                if prepared.send(job).is_err() {
+                                    break;
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(_) => {
+                                sampling_failed.store(true, Ordering::Release);
+                                sampling_paused.store(true, Ordering::Release);
+                                *sampling_status.lock().unwrap_or_else(|e| e.into_inner()) =
+                                    Some("Map sampling failed; sampling paused".into());
+                                break;
+                            }
+                        }
+                    }
+                })
+                .map_err(|e| eprintln!("Map sampling worker failed: {e}"))
+                .ok();
+            if sampler.is_none() {
+                cpu_failed.store(true, Ordering::Release);
+            }
             let worker = thread::Builder::new().name("map-terrain".into()).spawn(move || {
+                    let shading = Shading::new();
                     let mut cache = Cache::default();
                     let mut current = 0;
                     let mut configured = None::<Binding>;
@@ -5018,6 +5627,7 @@ pub mod maps {
                                     eprintln!("Map cache flush on exit failed: {e}");
                                     *errors.lock().unwrap_or_else(|e| e.into_inner()) = Some(e.to_string());
                                 }
+                                paused_state.store(paused || cpu_failed.load(Ordering::Acquire), Ordering::Release);
                                 break;
                             }
                         };
@@ -5166,7 +5776,9 @@ pub mod maps {
                                     Some(format!("Cache write failed; sampling paused: {e}"));
                             }
                             last_commit = Instant::now();
+                            super::profiling::report();
                         }
+                        paused |= cpu_failed.load(Ordering::Acquire);
                         paused_state.store(paused, Ordering::Release);
                         let Some(view) = input.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
                             continue;
@@ -5179,14 +5791,16 @@ pub mod maps {
                             .unwrap_or_else(|e| e.into_inner())
                             .as_ref()
                             .is_some_and(|f: &Arc<Frame>| f.view == view);
-                        if same && !changed {
+                        let prepared_view = prediction.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
+                            .map_or_else(|| view.clone(), |target| view.predictive(target));
+                        if same && !changed && atlas.as_ref().is_none_or(|a| a.terrain.covers(&prepared_view)) {
                             continue;
                         }
                         // Camera-only frames reuse immutable GPU data without scanning the
                         // disk index, touching residency or rebuilding coverage snapshots.
                         if !changed && let Some(ready) = &atlas
                             && ready.key == (view.session, view.dimension, view.layer, cache.clock)
-                            && ready.terrain.covers(&view)
+                            && ready.terrain.covers(&prepared_view)
                         {
                             serial += 1;
                             *result.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(Frame {
@@ -5199,19 +5813,19 @@ pub mod maps {
                             }));
                             continue;
                         }
-                        if !paused && let Err(e) = cache.prepare(&view) {
+                        if !paused && let Err(e) = cache.prepare(&prepared_view) {
                             *errors.lock().unwrap_or_else(|e| e.into_inner()) = Some(e.to_string());
                         }
                         serial += 1;
-                        let frame = if cache.gpu_atlas_fits(&view) {
+                        let frame = if cache.gpu_atlas_fits(&prepared_view) {
                             let key = (view.session, view.dimension, view.layer, cache.clock);
                             if atlas
                                 .as_ref()
-                                .is_none_or(|a| a.key != key || !a.terrain.covers(&view))
+                                .is_none_or(|a| a.key != key || !a.terrain.covers(&prepared_view))
                             {
                                 atlas = Some(AtlasCache {
                                     key,
-                                    terrain: Arc::new(cache.terrain_atlas(&view, serial)),
+                                    terrain: Arc::new(cache.prepare_terrain_atlas(&prepared_view, atlas.as_ref().map(|a| a.terrain.as_ref()), shading.as_ref())),
                                 });
                             }
                             let terrain = atlas.as_ref().unwrap().terrain.clone();
@@ -5249,7 +5863,7 @@ pub mod maps {
                         }
                     }
             }).map_err(|e| eprintln!("Map worker failed: {e}")).ok();
-            if worker.is_none() {
+            if worker.is_none() || sampler.is_none() {
                 paused.store(true, Ordering::Release);
                 *status.lock().unwrap_or_else(|e| e.into_inner()) =
                     Some("Map worker unavailable; sampling paused".into());
@@ -5257,6 +5871,8 @@ pub mod maps {
             Self {
                 tx: Mutex::new(Some(tx)),
                 worker: Mutex::new(worker),
+                sampler: Mutex::new(sampler),
+                lookahead,
                 latest,
                 output,
                 session,
@@ -5389,6 +6005,10 @@ pub mod maps {
                 })
         }
         pub fn request(&self, view: View) {
+            self.request_ahead(view.clone(), view);
+        }
+        pub fn request_ahead(&self, view: View, target: View) {
+            *self.lookahead.lock().unwrap_or_else(|e| e.into_inner()) = Some(target);
             let mut latest = self.latest.lock().unwrap_or_else(|e| e.into_inner());
             if latest.as_ref() == Some(&view) {
                 return;
@@ -5407,6 +6027,14 @@ pub mod maps {
         }
         pub fn shutdown(&self) {
             self.tx.lock().unwrap_or_else(|e| e.into_inner()).take();
+            if let Some(sampler) = self
+                .sampler
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+            {
+                let _ = sampler.join();
+            }
             if let Some(worker) = self.worker.lock().unwrap_or_else(|e| e.into_inner()).take() {
                 let _ = worker.join();
             }

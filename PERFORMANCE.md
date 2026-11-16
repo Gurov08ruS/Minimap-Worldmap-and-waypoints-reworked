@@ -1,161 +1,151 @@
-# World-map rendering (updated 2026-11-14)
+# Map rendering performance — 2026-11-16
 
-The old path rasterized a screen-sized image on the terrain worker whenever the
-camera changed. At 1024×1024, that meant up to 1,048,576 coordinate, colour and
-relief calculations, then a 4 MiB RGBA upload (including a copy in
-`native_mod_image`) per update. Sampling chunk data and rasterizing shared one
-worker, adding latency to both zooming and dragging. Optimized compilation does
-not remove that work. This is a code-path diagnosis, not a captured game profile.
+## Current development implementation
 
-The large map now uses Horizon's existing portable GPU HUD pipeline: one clipped
-textured quad per visible cached chunk, in the HUD batch. Terrain colours and
-relief are baked at one texel per block. Pan/zoom updates geometry immediately on
-the client, independently of the sampling worker. Pointer/marker/overlay mapping
-uses the same displayed view. Camera movement inside uploaded coverage needs no
-terrain raster or texture upload. The camera advances while wider coverage is
-prepared. The minimap also uses GPU geometry when its selected coverage fits; oversized
-or paged coverage retains the CPU path.
+Both maps reuse immutable GPU terrain images while the camera moves. Detailed
+chunks retain one texel per block; Horizon LOD retains its original 16×16
+samples. Nearest sampling, detailed known-void priority over LOD, relief across
+chunk edges, marker coordinates and the rotated/circular minimap are preserved.
+No averaged overview levels or distant smoothing are introduced.
 
-Zoom-dependent averaged texture levels and their setting have been removed.
-Detailed chunks always use one texel per block; LOD uses its original samples.
-GPU sampling is nearest. Publication compares immutable texture snapshots and
-uploads the matching pixels before advancing geometry. A failed upload leaves
-the previous complete frame intact. Atlas invalidation clears the displayed
-frame so its texture is uploaded again before drawing.
+### Incremental visual tiles and GPU pages
 
-## Performance changes under development (2026-11-14)
+An atlas keeps stable slots for surviving detailed/LOD tiles. Preparation compares
+source versions, including the north/west neighbours used for relief. A changed
+chunk invalidates itself and its south/east dependants. Disk record versions
+survive commits within the process, so RAM eviction does not invalidate a ready
+image or require re-reading its pixels. These versions are derived metadata and
+do not change schema 2 on disk. Removed slots are cleared before reuse.
 
-- Camera-only GPU frames inside prepared coverage bypass disk-index scanning,
-  residency preparation and reconstruction of coverage/portal snapshots.
-- Both views can use the same GPU terrain atlas. Minimap rotation changes
-  geometry/UV clipping, with a 64-sided circular mask. It does not rerasterize
-  terrain or upload a replacement image simply because yaw changed. Coverage
-  reserves the rotated rectangle's bounding extent.
-- Atlas preparation shades a detailed chunk with three tile lookups (the chunk,
-  north and west), instead of invoking the generic per-pixel renderer for it.
-  Existing CPU/GPU equality and relief tests check the resulting colours.
-- GPU uploads compare final pixel bands. A one-tile change in a stable-size atlas
-  transfers 1,024 bytes; broad changes or image resize use a full transfer. This
-  also handles slot repacking and clearing transparencies. It does not yet give
-  tiles stable atlas slots or eliminate the whole-atlas preparation itself.
-- Raster fallback traverses only LOD levels actually present in the dimension.
-  Per-level cursors remember the current footprint including negative lookups.
-  At most 23 cursor entries are retained, independent of history size. Opening a
-  container initializes its level mask from the index without reading payloads.
-- Disk-read LRU eviction uses an ordered set instead of scanning every cached
-  record for each eviction. Payload limits are unchanged; the ordered set adds
-  bounded metadata proportional to the bounded read cache.
+Views fitting the shared 1024×1024 mod image continue to use changed-band
+uploads. Larger views use separate 1024×64 GUI picture textures through
+Horizon's existing portable HUD renderer. They do not overwrite another atlas
+slot or assume a platform graphics API. Unchanged pages retain their Arc and
+picture identity; an edit replaces only affected pages. Rendering groups detail
+by page and LOD by level/page, avoiding a texture switch for every chunk. The
+padded/predicted page set stays in the batch, so the renderer retains its GPU
+textures for short reverse drags. Resource invalidation clears client handles;
+the renderer owns and releases the actual textures.
 
-A regression renders 65,536 pixels from a reopened LOD container with fewer than
-5,000 backing lookups including missing detailed chunks, and checks exact pixel
-colours. Other tests check rotated UVs/mask boundaries, texture identity across
-minimap rotation, LRU order, and reconstruction after partial texture uploads.
-The existing oversized-view tests exercise more than 4,096 entries and paging
-under a limited RAM budget. These are not a live huge-world FPS measurement.
+Visible source admission is bounded: `clamp(Map RAM bytes / 4096, 4096, 32768)`
+tiles, or 32768 for the unlimited synthetic fixture. The default 64 MiB admits
+up to 16384 visual source tiles. Crossing 4096 tiles alone no longer forces CPU
+rasterization, nor does decoded-payload paging alone. Admission includes disk
+keys and can stream payloads through the bounded read cache.
 
-The manual benchmark now builds a separate atlas for each tested view, reporting
-its actual tile count. In a local optimized run the current implementation used
-256/576/4,096 atlas tiles for spans 32/256/2048, with GPU quad preparation
-0.001/0.004/0.041 ms respectively. CPU raster times were
-39.711/42.584/23.384 ms. The preceding run of HEAD's runtime on the same host
-measured 41.356/42.032/89.154 ms for the CPU raster. Both test binaries were
-compiled with `rustc --edition=2024 --test -O`; background compilation was active.
-The sparse wide-view reduction is consistent with skipping absent LOD levels;
-these are diagnostic observations, not a controlled FPS claim. GPU execution,
-vertex submission, uploads, sampling and disk I/O are outside this benchmark.
+A final image costs 1024 bytes per source tile plus row padding. Large images
+also retain CPU page buffers, the renderer's picture buffers and GPU textures;
+old/new generations can briefly coexist. Shading replies are bounded by the
+admitted visual tile count. These allocations, display/coverage snapshots and
+index metadata are additional to the terrain RAM slider. The slider is not a
+whole-process limit. Extremely wide views beyond the visual admission budget
+still use the bounded raster fallback; this work does not claim unlimited
+full-resolution GPU residency.
 
-Still required for the complete large-history design in RENDERING_REVIEW.md:
-persistent overview levels, a spatial history index, GPU paging beyond the
-shared slot, predictive loading and separation of disk I/O from preparation.
-The fallback can still delay new terrain and show newly exposed areas; this
-change does not claim to eliminate that limitation for an arbitrary cache.
+### Region lookup, lookahead and client work
 
-## Reproduce the CPU comparison
+A derived region-column index selects container keys by dimension, layer,
+resolution and intersecting regions. Moving to new coverage no longer walks the
+entire disk key history. It is rebuilt from checked metadata on open and updated
+for pending writes. The bounded admitted set is prioritized around the camera.
+The index itself remains metadata proportional to history size.
+
+Lookahead includes the eased camera's target and target zoom, with movement and
+zoom expansion clamped to preserve the current view's working set. Existing
+padding also keeps terrain behind the camera. Requests from another session,
+dimension, layer or view type cannot expand the current request.
+
+The client follows Horizon's chunk membership revision/deltas. It rebuilds the
+key set only on an unavailable delta/reset, rather than collecting and sorting
+all loaded chunks every 50 ms. Each sampling pass considers up to 64 recent
+arrivals, 81 nearby positions and 64 positions from an incremental sweep. Only
+these bounded candidates are sorted. At most four snapshots are submitted;
+the snapshot loop yields after approximately 800 microseconds once it has made
+an attempt. A single engine snapshot cannot be preempted, so this is a
+cooperative work budget, not a hard callback deadline.
+
+### Worker pipeline
+
+- `map-sampling` extracts colours/biomes from accepted immutable game snapshots.
+- `map-terrain` owns the container descriptor, residency, commits and publication.
+- `map-shading` prepares dirty tile relief from immutable tile/neighbour handles.
+
+The sampling and prepared-result queues each hold at most eight jobs. The
+shading input queue also holds eight. Disk reads can overlap preparation of
+previous dirty tiles; no descriptor crosses a worker boundary. Failure to start
+the optional shading worker uses inline preparation. Sampling failure pauses
+sampling. Session checks reject stale results, orderly shutdown drains accepted
+work, and the existing write-error/unsaved-data policy remains in effect.
+
+Index lookup, image assembly, coverage publication and raster fallback still
+run on the terrain worker. This is a bounded pipeline, not a claim that all
+background work can progress during an arbitrarily slow fsync.
+
+## Profiling
+
+Set `MWWR_PROFILE=1` in the **client process** environment before launch. On
+Linux/macOS use `MWWR_PROFILE=1 <client command>`; in PowerShell set
+`$env:MWWR_PROFILE = '1'` before launching the client. No profiling files or
+network requests are created by the mod. The terrain worker writes summaries to
+the ordinary client log around each five-second commit interval.
+
+Stages include `client-frame`, `hud-map`, `chunk-collection`,
+`snapshot-collection`, `sampling`, `disk-read`, `commit`, `residency`, `atlas`,
+`shade-worker`, `raster`, `upload`, `page-upload`, `texture-transfer` and
+`shaded-tiles`. Each stage retains the latest 128 timing samples per reporting
+window. Counts, item totals and byte totals cover the window; percentiles and
+`max_us` describe those retained samples. Byte counters describe adapter
+submissions/copies, not hardware GPU execution or renderer-led reuploads.
+Profiling is off by default; no timers or sample locking run while disabled.
+`disk-read` times store read attempts, including pending-record hits and absent
+keys; it is not a count of physical storage reads or OS page-cache misses.
 
 ```sh
+python3 tools/profile_maps.py /path/to/client.log
+python3 tools/profile_maps.py /path/to/client.log --json
+```
+
+The tool reports the worst window p95/p99 rather than averaging percentiles.
+For an actual game profile, capture camera-only movement, terrain edits and
+commit separately, then repeat with a cold cache, slow storage, low RAM and
+more than 4096 visible tiles. Record CPU/GPU frames and visual behaviour in the
+game as well; these counters do not measure total FPS or GPU execution.
+
+## Reproducible CPU checks
+
+```sh
+cargo test --release --locked --offline benchmark_incremental_atlas_pages -- --ignored --nocapture
 cargo test --release --locked --offline benchmark_worldmap_cpu_work -- --ignored --nocapture
 ```
 
-The synthetic fixture holds 4,096 solid tiles and moves a 1024×1024 view for
-60 frames at each span. The historical 2026-11-08 geometry-path run measured:
+The incremental fixture holds 8192 detailed tiles. It checks a cold image,
+unchanged reuse, then one chunk edit: zero shaded tiles on unchanged reuse,
+three shaded tiles for the edit, and at most three replacement pages. Timings
+are diagnostic CPU preparation observations, not an FPS prediction. See
+VALIDATION.md for the final local run.
 
-| Visible span, blocks | Old CPU raster, ms/frame | Quad clipping/UV calculation, ms/frame |
-| --- | ---: | ---: |
-| 32 | 32.932 | 0.025 |
-| 256 | 34.347 | 0.026 |
-| 2048 | 20.015 | 0.050 |
+The historical 2026-11-14 fixture used 256/576/4096 atlas tiles at spans
+32/256/2048. GPU quad preparation took 0.001/0.004/0.041 ms, and CPU raster took
+39.711/42.584/23.384 ms on that host. These older timings exclude GPU execution,
+vertex submission, uploads, sampling and disk I/O, and are not directly
+comparable to the new 8192-tile fixture.
 
-Preparing the base atlas took 37 ms (excluding the then-existing averaged-level
-preparation) on that run. These timings have not been rerun for the current
-LOD/coverage implementation and depend on the host.
-These numbers exclude GPU execution, HUD vertex emission, texture transfer,
-chunk sampling and the rest of the game. They are not an FPS prediction.
+## Remaining work
 
-## Remaining work, in priority order
+- Capture live-game CPU/GPU profiles and visuals, including Linux/macOS/Windows.
+- Persistent overview levels and stronger spatial prioritization for views beyond
+  the visual budget; predictive loading cannot guarantee instant detail from an
+  arbitrarily large cold history. Overview policy requires explicit treatment of
+  coverage, known void and source quality; no fabricated LOD is stored here.
+- Bounded disk-index pages and incremental COW index updates. Schema 2 still
+  materializes both roots and writes a full index on commit. These storage
+  changes belong to the subsequent container work, along with compression,
+  deletion/maintenance and cache-manager features.
+- Further reduction of immutable image copying and coverage/index preparation,
+  guided by the new profiling counters rather than an assumed FPS bottleneck.
 
-1. Stable atlas slots and dirty-region uploads. Currently repository changes
-   rebuild the selected layer's visible atlas and upload its replacement. The
-   adapter now submits changed image bands through Horizon's patch queue;
-   stable slots and incremental preparation are still needed. Invalidate the changed tile and its south/east
-   neighbours because relief depends on north/west heights.
-2. A dedicated paged map texture to retain GPU rendering when visible terrain
-   exceeds the shared slot, preserving original source texels at every zoom.
-   Currently those views use worker raster fallback, sampling the same retained
-   terrain into an image with each side at most 1024 pixels. This can cost more
-   CPU and is limited by that output resolution.
-3. Profile chunk snapshot collection/sorting on the client and the sampler.
-   Camera motion no longer waits for sampling, but preparation can still consume
-   client/worker time. Use budgets and dirty notifications rather than repeatedly
-   sorting all loaded chunks where the engine offers those notifications.
-4. Spatial indexing of retained terrain. Atlas entries already use a padded
-   visible region; selecting them still scans the retained layer. GPU rendering
-   for the rotated/circular minimap is implemented when coverage fits.
-
-The shared 1024×1024 slot holds up to 4,096 full-resolution tiles (detailed and
-LOD rows are packed separately). One atlas generation consumes at most 4 MiB
-of pixels; old/new generations can coexist briefly during publication. Terrain
-payloads and pending writes now use the configurable RAM budget; historical
-tiles remain on disk. Disk-index metadata and current presentation snapshots are
-accounted separately. The current index is loaded as compact key/reference metadata
-for both recoverable roots and rewritten on commit: very large histories still
-need a bounded index-page cache and incremental index updates. Other mods
-using this same global slot still need coordination.
-No native game window or GPU frame capture has been exercised by these checks;
-visual behavior and FPS need an in-game run, including macOS/Windows.
-
-## Persistent-cache work (2026-11-12)
-
-An 8.1 MiB user cache inspected on 2026-11-12 has 1,606 terrain records
-(1,172 detailed and 434 LOD), below the atlas tile limit. Admission now checks
-actual decoded tile size instead of reserving 128 KiB for the next tile. The old
-check did not charge 128 KiB for every resident tile; the earlier explanation
-and inferred 255-tile limit were incorrect. No measured FPS gain is attributed
-to this admission change.
-
-Camera motion now advances beyond uploaded atlas coverage without waiting for
-worker preparation. In raster fallback, the existing texture is clipped and
-reprojected into the current camera on the GPU, sharing its original frame
-without copying pixels or uploading again. Newly exposed areas remain empty
-until the replacement arrives. Regression tests cover pan/zoom clipping,
-texture reuse and camera movement beyond prepared coverage. In-game FPS is
-not measured by these tests.
-
-Implemented optimizations:
-
-- A bounded working set and disk-read LRU replace unlimited terrain retention.
-  Visible-area candidate lists are bounded even for extremely wide views.
-- Pending records replace earlier updates for the same key before commit.
-  A five-second batch or pending-byte pressure triggers persistence.
-- Per-tile biome palettes store each distinct name once and share decoded names
-  through Arc; immutable display snapshots also share tile payloads.
-- A physical dimension change flushes and drops the former payloads, coverage
-  and worker atlas; only an explicitly requested view is loaded again.
-- Read-LRU byte accounting is maintained incrementally rather than rescanning
-  all cached payloads for every disk miss.
-
-Next useful measurements and optimizations are a bounded index-page cache,
-incremental index updates instead of a full index rewrite, and separating disk
-I/O from sampling/raster preparation so a slow disk cannot delay the terrain
-worker's other work. These are not claimed implemented. The render callback
-does not perform disk I/O in the current version. The existing source audit and
-unit tests do not substitute for profiling a live game on a large real cache.
+An 8.1 MiB user cache inspected on 2026-11-12 contained 1606 records, below the
+old shared-slot limit. The old admission check reserved 128 KiB for the *next*
+tile, not for every resident tile; no measured FPS gain is attributed to its
+replacement with actual decoded-size accounting. None of the synthetic or
+source checks establishes the cause of lag in that particular live game.

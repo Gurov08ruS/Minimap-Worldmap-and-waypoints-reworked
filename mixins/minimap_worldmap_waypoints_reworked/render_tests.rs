@@ -6,6 +6,31 @@
 macro_rules! define_tests {
     () => {
         mod render_tests {
+            #[test]
+            fn map_pages_use_ordered_picture_runs_and_share_frame_handles() {
+                use horizon_client::hud::{Blend, minimap_pages};
+                let image = minimap_pages::create(16, 16, vec![255; 1024]);
+                let mut batch = HudBatch::new([800, 600]);
+                let points = [
+                    [0., 0., 0., 0.],
+                    [16., 0., 16., 0.],
+                    [16., 16., 16., 16.],
+                    [0., 16., 0., 16.],
+                ];
+                minimap_pages::paint(&mut batch, &image, &points);
+                minimap_pages::paint(&mut batch, &image, &points);
+                assert_eq!(batch.pictures.len(), 1);
+                assert!(
+                    batch
+                        .blends
+                        .iter()
+                        .any(|(_, b)| matches!(b, Blend::Picture(_)))
+                );
+                assert_eq!(Arc::strong_count(&image), 2);
+                drop(batch);
+                assert_eq!(Arc::strong_count(&image), 1);
+            }
+
             use super::*;
 
             #[test]
@@ -141,8 +166,10 @@ macro_rules! define_tests {
                     ),
                     dimension: "minecraft:overworld".into(),
                 };
-                let hd = project(&camera(1920.0, 1080.0), [5.0, 0.0, 10.0], [1920.0, 1080.0]).unwrap();
-                let uhd = project(&camera(3840.0, 2160.0), [5.0, 0.0, 10.0], [3840.0, 2160.0]).unwrap();
+                let hd =
+                    project(&camera(1920.0, 1080.0), [5.0, 0.0, 10.0], [1920.0, 1080.0]).unwrap();
+                let uhd =
+                    project(&camera(3840.0, 2160.0), [5.0, 0.0, 10.0], [3840.0, 2160.0]).unwrap();
                 // The same world point lands at the same relative screen position.
                 assert!(
                     (hd[0] / 1920.0 - uhd[0] / 3840.0).abs() < 1e-3,

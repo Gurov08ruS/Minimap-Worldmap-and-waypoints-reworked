@@ -9,6 +9,15 @@
 
 ## Unreleased — rendering performance
 
+- Retain visual slots and dirty-tile relief, including dependent neighbours;
+  reuse disk-backed visuals across payload eviction and commits.
+- Add independent GUI texture pages beyond the shared image slot, grouping
+  draws by page and retaining unchanged/predicted pages.
+- Query container keys through a derived region index and prefetch bounded
+  camera/zoom targets.
+- Replace repeated full chunk sorting with membership deltas and incremental
+  scanning; bound snapshot submission and separate sampling, I/O and shading.
+- Add opt-in CPU timing/counters with `MWWR_PROFILE=1` and a log summary tool.
 - Draw the minimap with GPU terrain tiles when coverage fits, including rotated
   UVs and circular clipping; camera-only updates reuse the uploaded terrain.
 - Upload changed atlas bands instead of copying the entire image for small edits.

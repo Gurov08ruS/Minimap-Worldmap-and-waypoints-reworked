@@ -7,6 +7,13 @@ priority = 100
 horizon_revision = "9f42064c11efe7ef3e5ed2baad7ddc2a3b36eea0"
 
 [[module]]
+id = "map-pictures"
+file = "crates/horizon-client-render/src/hud.rs"
+name = "minimap_pages"
+source = "map_pictures.rs"
+visibility = "pub"
+
+[[module]]
 id = "runtime"
 file = "crates/horizon-client/src/game.rs"
 name = "minimap_worldmap_waypoints_reworked"

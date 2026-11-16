@@ -1,5 +1,44 @@
 # Validation
 
+## Incremental map pages and worker pipeline — 2026-11-16
+
+Development validation on Linux, pinned Horizon `9f42064` and Mixins `d9c83d7`:
+
+- Workspace fmt, clippy with warnings denied and locked offline tests: pass
+  (95 runtime tests, one source-audit test; two manual CPU benchmarks ignored).
+  Injected client/page support sources also pass direct rustfmt checks.
+- Template integration and deterministic AST staging/source audit: pass. The
+  original sparse Horizon checkout remains unchanged; new HUD source hashes
+  are checked against the pinned export, without materializing checkout files.
+- Final native client check and runtime tests: pass (95 passed, two manual
+  benchmarks ignored). Separate native filters: all 13 client adapter
+  tests and all nine binding UI tests pass, including ordered picture runs and
+  release of frame references.
+- Coverage includes stable slot positions, dirty relief neighbours, GPU pages
+  beyond 4096 tiles, unchanged page identity, disk versions across commit and
+  RAM eviction, unreadable detail retaining valid LOD, bounded predictive
+  coverage, stale sessions and camera publication during blocked sampling.
+- Official package check: pass for the unsigned development
+  `target/minimap_worldmap_waypoints_reworked-0.6.0.hnmod`, 157,773 bytes; SHA-256
+  `cc515ab1edc1e4110aa879435b10271a4c5b7af22d88d51255bfef1dc0864f5f`.
+  The archive includes the new public GUI page support module and matches the
+  current Rust/TOML sources. The manifest still says 0.6.0; this is not a signed
+  release or a registry update.
+
+The optimized 8192-tile fixture measured 45.250 ms for initial preparation,
+10.230 ms for unchanged reuse and 12.454 ms for one edit (three shaded tiles,
+one replaced page). Concurrent background checks were active. These are CPU
+diagnostics, not controlled GPU/FPS measurements. Reproduce with
+`cargo test --release --locked --offline benchmark_incremental_atlas_pages -- --ignored --nocapture`.
+The profiling log summarizer was exercised with real fixture output and checked
+for additive counts/bytes and worst-window percentiles, without averaging p95.
+
+Native checks use `CARGO_INCREMENTAL=0`. No live-game GPU capture, real cold-disk
+latency profile or macOS/Windows run was performed. Visual admission is bounded;
+oversized views retain raster fallback. Full disk-index metadata/rewrite costs,
+persistent overview and container management remain subsequent work, as listed
+in PERFORMANCE.md. Schema 2 bytes and player resources are unchanged.
+
 ## Test source separation — 2026-11-16
 
 Validated on Linux against pinned Horizon `9f42064` and Mixins `d9c83d7`:
@@ -15,8 +54,8 @@ Validated on Linux against pinned Horizon `9f42064` and Mixins `d9c83d7`:
 - Official package check: pass for the unsigned development package
   `target/minimap_worldmap_waypoints_reworked-0.6.0.hnmod` (147,219 bytes; SHA-256
   `ed932e48f02b69c30d3e5bf53b21bb7378c52ea0c98c95affefe35bd79447864`).
-  All archived Rust and TOML files match the current sources, including the
-  six test support modules. This is not a new signed release.
+  All archived Rust and TOML files match the sources at that validation,
+  including the six test support modules. This is not a new signed release.
 
 Native checks used `CARGO_INCREMENTAL=0`. No live-game or macOS/Windows
 validation was performed for this refactor.

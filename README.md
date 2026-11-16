@@ -279,24 +279,26 @@ the existing image during pan and zoom without waiting for the worker. Pointer c
 and overlays use that same displayed camera. Texture uploads and their matching
 geometry are published together; a failed upload preserves the previous frame.
 
-The worker prepares colours and relief shading once per block when the terrain
-repository changes. Up to 4,096 tiles fit in the existing 1024×1024 RGBA slot
-(4 MiB); the current implementation rebuilds the selected layer's atlas
-when its data or padded visible coverage changes. Uploads compare final pixels
-and transfer changed bands; extensive changes use a full upload. Camera movement inside that
-coverage reuses it. Off-screen data stays in the world container and is read on demand. If visible entries exceed the
-1024×1024 GPU slot, a worker raster fallback presents the retained data without
-truncating the cache; extreme views can therefore cost more CPU. Both maps use
-GPU tile geometry when the selected coverage fits. The minimap rotates that
+The worker retains stable visual slots and prepares only changed terrain and
+neighbours affected by relief. Small images use changed-band uploads into the
+shared 1024×1024 slot. Larger views use independent 1024×64 GUI texture pages
+through Horizon's portable HUD renderer; crossing 4,096 tiles alone no longer
+forces CPU rasterization. Unchanged pages retain their textures. A region index
+selects disk keys without scanning the full history, and bounded lookahead
+includes the camera's target and target zoom. Sampling, storage and dirty-tile
+shading use separate bounded worker stages. Off-screen terrain stays in the
+container and is read on demand. Both maps use GPU tile geometry when the
+selected coverage fits the visual admission budget. The minimap rotates that
 geometry and clips it to a square or a 64-sided circle (under 0.16 GUI pixel
 boundary error at size 256), reusing its texture during player rotation.
-Oversized or paged views retain the CPU fallback. Nearest texture sampling keeps
+Views exceeding the visual budget retain the CPU fallback. Nearest texture sampling keeps
 block boundaries sharp; unknown terrain is transparent. Detailed chunks keep one
 texel per block and LOD textures keep their original sample resolution at every
 zoom. Distant smoothing and its setting have been removed; legacy
-`smooth_worldmap` preferences are ignored. Each presentation atlas uses up to
-4 MiB of pixels, with old and new generations briefly coexisting during upload.
-These presentation limits are separate from the terrain RAM setting. Relief reads neighbouring
+`smooth_worldmap` preferences are ignored. Visual admission ranges from 4,096 to
+32,768 source tiles with the RAM setting (16,384 at its 64 MiB default).
+Presentation images, CPU/GPU pages and old/new publication generations consume
+additional memory beyond the terrain payload budget. Relief reads neighbouring
 chunks to preserve lighting across tile edges. See [PERFORMANCE.md](PERFORMANCE.md)
 for measurements, limitations and further optimization options.
 
