@@ -138,9 +138,12 @@ def focused_bundle(destination):
     assert len(selected)==5
     text='[mod]\n'+''.join(f'{k} = {json.dumps(v)}\n' for k,v in manifest['mod'].items())
     text+='\n[compatibility]\nhorizon_revision = '+json.dumps(horizon.PIN)+'\n'
-    module=next(m for m in manifest['module'] if m['id']=='runtime')
-    text+='\n[[module]]\n'+''.join(f'{k} = {json.dumps(v)}\n' for k,v in module.items())
-    shutil.copyfile(source/module['source'],bundle/module['source'])
+    modules=[m for m in manifest['module'] if m['id'] in {
+        'runtime', 'settings-tests', 'container-tests', 'maps-tests', 'map-regression-tests'}]
+    assert len(modules)==5
+    for module in modules:
+        text+='\n[[module]]\n'+''.join(f'{k} = {json.dumps(v)}\n' for k,v in module.items())
+        shutil.copyfile(source/module['source'],bundle/module['source'])
     for injection in selected:
         text+='\n[[injection]]\n'+''.join(f'{k} = {json.dumps(v)}\n' for k,v in injection.items() if k!='bindings')
         text+='bindings = ['+', '.join('{ '+', '.join(f'{k} = {json.dumps(v)}' for k,v in binding.items())+' }' for binding in injection['bindings'])+']\n'
@@ -166,7 +169,7 @@ def main():
         focused_bundle(scratch/'mods');base=['--workspace',str(original),'--mods',str(scratch/'mods')]
         before=snapshot(original);os.environ['MINIMAP_FIXTURE_DATA']=str(scratch/'player')
         report=json.loads(run([str(cli),'check',*base,'--out',str(stage),'--trust-native-mods']).stdout)
-        assert report['injections']==5 and report['modules']==1
+        assert report['injections']==5 and report['modules']==5
         assert 'game::tests::horizon_contract ... ok' in report['cargo_stdout']
         first=snapshot(stage);os.environ['MINIMAP_FIXTURE_DATA']=str(scratch/'player-2')
         second=json.loads(run([str(cli),'check',*base,'--out',str(stage),'--trust-native-mods']).stdout)

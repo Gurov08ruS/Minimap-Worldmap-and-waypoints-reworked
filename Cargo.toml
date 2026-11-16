@@ -7,8 +7,8 @@ license = "GPL-3.0-only"
 description = "Minimap, Worldmap and waypoints reworked — native Horizon minimap and settings"
 
 [lib]
-# This exact source is also injected as a same-crate module by horizon-mixins.
-path = "mixins/minimap_worldmap_waypoints_reworked/runtime.rs"
+# The wrapper loads the same runtime and test payloads as horizon-mixins.
+path = "src/lib.rs"
 
 [workspace]
 members = ["tools/audit"]

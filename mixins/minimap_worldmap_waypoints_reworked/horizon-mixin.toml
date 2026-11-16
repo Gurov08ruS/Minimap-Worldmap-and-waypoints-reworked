@@ -12,6 +12,44 @@ file = "crates/horizon-client/src/game.rs"
 name = "minimap_worldmap_waypoints_reworked"
 source = "runtime.rs"
 
+# Test macros expand inside the runtime's original private scopes. Their bodies
+# are cfg(test), and remain self-contained under the pinned Mixins schema.
+[[module]]
+id = "settings-tests"
+file = "crates/horizon-client/src/game.rs"
+name = "minimap_settings_tests"
+source = "settings_tests.rs"
+
+[[module]]
+id = "container-tests"
+file = "crates/horizon-client/src/game.rs"
+name = "minimap_container_tests"
+source = "container_tests.rs"
+
+[[module]]
+id = "maps-tests"
+file = "crates/horizon-client/src/game.rs"
+name = "minimap_maps_tests"
+source = "maps_tests.rs"
+
+[[module]]
+id = "map-regression-tests"
+file = "crates/horizon-client/src/game.rs"
+name = "minimap_map_regression_tests"
+source = "map_regression_tests.rs"
+
+[[module]]
+id = "render-tests"
+file = "crates/horizon-client/src/game.rs"
+name = "minimap_render_tests"
+source = "render_tests.rs"
+
+[[module]]
+id = "binding-tests"
+file = "crates/horizon-client-render/src/options_ui.rs"
+name = "minimap_binding_tests"
+source = "binding_tests.rs"
+
 [[injection]]
 id = "register"
 kind = "HEAD"

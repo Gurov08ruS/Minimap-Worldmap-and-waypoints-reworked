@@ -1,5 +1,26 @@
 # Validation
 
+## Test source separation — 2026-11-16
+
+Validated on Linux against pinned Horizon `9f42064` and Mixins `d9c83d7`:
+
+- `cargo fmt --all --check`, workspace clippy with warnings denied, and locked
+  offline workspace tests: pass (88 runtime tests, one source-audit test,
+  one manual benchmark ignored).
+- Template integration and full deterministic AST staging: pass. Repeated
+  staging preserves bytes and mtimes; the original Horizon checkout is unchanged.
+- Native client check and runtime tests: pass (88 passed, one manual benchmark
+  ignored). Separate native test filters exercise all 12 client rendering tests
+  and all nine binding UI tests: pass.
+- Official package check: pass for the unsigned development package
+  `target/minimap_worldmap_waypoints_reworked-0.6.0.hnmod` (147,219 bytes; SHA-256
+  `ed932e48f02b69c30d3e5bf53b21bb7378c52ea0c98c95affefe35bd79447864`).
+  All archived Rust and TOML files match the current sources, including the
+  six test support modules. This is not a new signed release.
+
+Native checks used `CARGO_INCREMENTAL=0`. No live-game or macOS/Windows
+validation was performed for this refactor.
+
 ## Unreleased rendering performance — 2026-11-14
 
 Development changes against pinned Horizon `9f42064` and Mixins `d9c83d7`:
@@ -16,8 +37,8 @@ Development changes against pinned Horizon `9f42064` and Mixins `d9c83d7`:
   `target/minimap_worldmap_waypoints_reworked-0.6.0-performance-dev.hnmod`.
   Size 141,310 bytes; SHA-256
   `6410547ccdfbcdd31f33b1eb3108a310e6bf962aa05ce546dd880b08cf3e7f50`.
-  The archived runtime and adapter match the current sources. It retains the
-  0.6.0 manifest version and is not the signed release documented below.
+  The archived runtime and adapter match the sources at that validation. It
+  retains the 0.6.0 manifest version and is not the signed release documented below.
 
 Full native test compilation initially exhausted local disk space; the final
 successful run disabled incremental compilation. No live-game GPU/FPS or

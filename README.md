@@ -369,6 +369,14 @@ the Horizon launcher. The Python validation tooling takes a platform lock with
 
 ## Build and validate
 
+`src/lib.rs` loads the shared `runtime.rs` for standalone Cargo builds. Tests
+live in six `*_tests.rs` files beside the mixin sources. Their macros expand at
+the original private scopes in the runtime, client adapter and binding UI, so
+the same tests work in the injected code without exposing implementation details.
+The pinned Mixins schema requires self-contained payloads; the manifest registers
+the test macros as support modules instead of using external `mod` or `include!`
+inside injected sources. Keep those modules in the source package.
+
 Use Rust **1.95.0**, Python **3.12+**, Git, and separate Horizon and Horizon Mixins
 checkouts. The runtime and Python tooling use portable APIs (the tooling locks
 with `flock` on Unix and `msvcrt` on Windows). `HORIZON_MIXINS` may point to

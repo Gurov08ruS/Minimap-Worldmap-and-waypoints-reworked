@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — test organization
+
+- Move runtime, container, map, client rendering and binding UI tests into six
+  separate source files, retaining private access through test-only macros.
+- Load the shared runtime through a small Cargo wrapper and register the same
+  test payloads with Mixins for validation inside the pinned Horizon client.
+
 ## Unreleased — rendering performance
 
 - Draw the minimap with GPU terrain tiles when coverage fits, including rotated
