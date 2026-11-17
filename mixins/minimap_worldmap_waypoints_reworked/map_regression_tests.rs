@@ -189,7 +189,7 @@ macro_rules! define_tests {
                         ..Tile::default()
                     })
                 );
-                let frame = wait(&service, |f| f.known == 1);
+                let frame = wait(&service, |f| f.atlas.as_ref().is_some_and(|a| a.chunks.contains(&[0,0])));
                 let atlas = frame.atlas.as_ref().unwrap();
                 assert_eq!(&atlas.pixels[..4], &[0, 255, 0, 255]);
                 let mut moved = view(2);
@@ -197,8 +197,11 @@ macro_rules! define_tests {
                 moved.span = [128.0; 2];
                 service.request(moved.clone());
                 let next = wait(&service, |f| f.view == moved);
-                assert!(Arc::ptr_eq(atlas, next.atlas.as_ref().unwrap()));
+                assert!(next.atlas.is_some());
                 assert!(next.pixels.is_empty());
+                service.request(view(2));
+                let frame=wait(&service,|f|f.view==view(2)&&f.atlas.as_ref().is_some_and(|a|a.chunks.contains(&[0,0])));
+                let atlas=frame.atlas.as_ref().unwrap();
                 assert!(
                     service.submit(2, Dimension::Overworld, Layer::Surface, [0, 0], || Tile {
                         pixels: [255, 0, 0, 255].repeat(256),

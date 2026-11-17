@@ -7,6 +7,152 @@ macro_rules! define_tests {
     () => {
         mod tests {
             #[test]
+            fn prepared_pages_survive_payload_eviction_without_losing_world_coverage() {
+                let mut cache=Cache::default();let d=Dimension::Overworld;let v=view(d);let key=LodKey{x:0,z:0,level:16};
+                cache.insert_lod(d,key,coarse_tile([30,100,80]));cache.save(lod_record(d,key),cache.lod_tiles[&(d,key)].1.clone()).unwrap();finish_overviews(&mut cache,&v);
+                let first=cache.visual_atlas(&v,&v,None);
+                cache.overviews.tiles.clear();cache.overviews.order.clear();cache.clear_payloads();
+                let retained=cache.visual_atlas(&v,&v,Some(&first));
+                assert_eq!(retained.pixels,first.pixels);assert_eq!(retained.prepared_tiles,0);
+                assert!(retained.pages.iter().zip(&first.pages).all(|(a,b)|Arc::ptr_eq(a,b)));
+                assert!(retained.coarse.iter().any(|draw|draw.fragments.iter().any(|r|intersects(*r,[10000,10000,16,16]))));
+                let mut other=v.clone();other.session+=1;
+                assert!(cache.visual_atlas(&other,&other,Some(&first)).coarse.is_empty());
+            }
+            #[test]
+            #[ignore="manual persistent visual-cache latency; warm OS file cache, not GPU FPS"]
+            fn benchmark_persistent_zoom() {
+                let dir=CacheDir::new("zoom-timing");let d=Dimension::Overworld;
+                let mut cache=Cache::open(&dir.0,"save:zoom",64*1024*1024).unwrap();
+                for x in -32..32 {for z in -32..32 {save_chunk(&mut cache,d,Layer::Surface,[x,z],Tile{pixels:[70,120,40,255].repeat(256),heights:[32;256],..Tile::default()});}}
+                for x in -1..=0 {for z in -1..=0 {let k=LodKey{x,z,level:12};cache.insert_lod(d,k,coarse_tile([60,100,90]));cache.save(lod_record(d,k),cache.lod_tiles[&(d,k)].1.clone()).unwrap();}}
+                let mut far=view(d);far.center=[0.;2];far.span=[100000.;2];far.width=1024;far.height=1024;
+                let start=Instant::now();cache.presentation_step(&far,&far,None).unwrap();let preview=cache.visual_atlas(&far,&far,None);let first=start.elapsed();assert!(!preview.pages.is_empty());
+                let start=Instant::now();finish_overviews(&mut cache,&far);cache.flush().unwrap();let build=start.elapsed();drop(cache);
+                let start=Instant::now();let mut cache=Cache::open(&dir.0,"save:zoom",64*1024*1024).unwrap();finish_overviews(&mut cache,&far);let overview=cache.visual_atlas(&far,&far,None);let cold=start.elapsed();cache.overviews.displayed=true;
+                let near=view(d);let start=Instant::now();
+                loop {cache.presentation_step(&far,&near,None).unwrap();if cache.ready_level(&near)==0{break;}assert!(start.elapsed()<Duration::from_secs(10));}
+                let prepared=cache.visual_atlas(&far,&near,Some(&overview));let ready=start.elapsed();assert!(prepared.chunks.contains(&[0,0]));
+                let start=Instant::now();let sharp=cache.visual_atlas(&near,&near,Some(&prepared));let zoom=start.elapsed();assert!(sharp.chunks.contains(&[0,0]));
+                eprintln!("canonical_tiles=4096 first_preview_ms={:.3} initial_backfill_ms={:.3} reopen_visual_ms={:.3} target_prefetch_ms={:.3} zoom_assembly_ms={:.3} pages={}",first.as_secs_f64()*1000.,build.as_secs_f64()*1000.,cold.as_secs_f64()*1000.,ready.as_secs_f64()*1000.,zoom.as_secs_f64()*1000.,sharp.pages.len());
+            }
+            fn finish_overviews(cache:&mut Cache,view:&View) {
+                let start=Instant::now();
+                loop {
+                    cache.presentation_step(view,view,None).unwrap();
+                    if !cache.visual_work() {break;}
+                    assert!(start.elapsed()<Duration::from_secs(10),"visual backfill did not converge");
+                }
+            }
+            #[test]
+            fn derived_damage_is_repaired_and_metadata_probe_keeps_texture_identity() {
+                let dir=CacheDir::new("derived-repair");let d=Dimension::Overworld;let v=view(d);
+                let mut cache=Cache::open(&dir.0,"save:repair",64*1024*1024).unwrap();
+                save_chunk(&mut cache,d,Layer::Surface,[0,0],saved_tile());finish_overviews(&mut cache,&v);cache.flush().unwrap();
+                let key=overview_key(d,Layer::Surface,LodKey{x:0,z:0,level:0});
+                cache.backing.as_ref().unwrap().borrow_mut().store.put(key,vec![0;32]).unwrap();cache.flush().unwrap();drop(cache);
+                let mut cache=Cache::open(&dir.0,"save:repair",64*1024*1024).unwrap();
+                finish_overviews(&mut cache,&v);assert!(cache.overview_get(key).is_some());cache.flush().unwrap();drop(cache);
+                let service=Service::with_directory(Some(dir.0.clone()));service.reset(v.session);service.configure(v.session,"save:repair",d,64);service.request(v.clone());
+                let frame=wait_frame(&service,|f|f.atlas.as_ref().is_some_and(|a|a.chunks.contains(&[0,0])));
+                service.inspect(v.session,d,Layer::Surface,[0,0]);
+                let start=Instant::now();
+                while service.coverage().detailed_biome(d,Layer::Surface,[0,0]).is_none(){assert!(start.elapsed()<Duration::from_secs(5));std::thread::yield_now();}
+                assert_eq!(service.coverage().detailed_biome(d,Layer::Surface,[0,0]).as_deref(),Some("minecraft:forest"));
+                assert!(Arc::ptr_eq(frame.atlas.as_ref().unwrap(),service.frame().unwrap().atlas.as_ref().unwrap()));
+                service.shutdown();
+            }
+            #[test]
+            fn assembling_a_far_atlas_does_not_read_the_container() {
+                let dir=CacheDir::new("visual-no-io");let d=Dimension::Overworld;let mut v=view(d);v.span=[100000.;2];
+                let mut cache=Cache::open(&dir.0,"save:no-io",64*1024*1024).unwrap();let key=LodKey{x:0,z:0,level:16};
+                cache.insert_lod(d,key,coarse_tile([30,100,80]));cache.save(lod_record(d,key),cache.lod_tiles[&(d,key)].1.clone()).unwrap();finish_overviews(&mut cache,&v);cache.flush().unwrap();
+                let before=cache.backing.as_ref().unwrap().borrow().clock;
+                let first=cache.visual_atlas(&v,&v,None);let second=cache.visual_atlas(&v,&v,Some(&first));
+                assert_eq!(before,cache.backing.as_ref().unwrap().borrow().clock);
+                assert_eq!(second.prepared_tiles,0);
+                assert!(first.pages.iter().zip(&second.pages).all(|(a,b)|Arc::ptr_eq(a,b)));
+                assert!(first.coarse.iter().any(|draw|draw.fragments.iter().any(|r|intersects(*r,[10000,10000,16,16]))));
+            }
+            #[test]
+            fn overview_reduction_preserves_colour_coverage_and_known_void() {
+                let mut source=Overview::default();
+                source.pixels[..4].copy_from_slice(&[255,80,20,255]); source.coverage[0]=u16::MAX;
+                let reduced=Overview::reduce(&[Some(Arc::new(source)),None,None,None]);
+                assert_eq!(&reduced.pixels[..4],&[255,80,20,64]);
+                assert_eq!(reduced.coverage[0],16384);
+                let mut source=Overview::default();
+                for i in [0,1,16,17] {source.coverage[i]=u16::MAX;}
+                let mut reduced=Overview::reduce(&[Some(Arc::new(source)),None,None,None]);
+                reduced.fill(0,&[0,0,255,255]);
+                assert_eq!(&reduced.pixels[..4],&[0,0,0,0]);
+                assert_eq!(reduced.coverage[0],u16::MAX);
+                assert_eq!(Overview::decode(&reduced.encode()).unwrap().pixels,reduced.pixels);
+                assert!(Overview::decode(&[0;1544]).is_none());
+            }
+            #[test]
+            fn overview_pages_cut_lod_out_of_known_void_at_negative_coordinates() {
+                let mut cache=Cache::default();
+                let d=Dimension::Overworld; let layer=Layer::Surface;
+                let mut empty=saved_tile();empty.pixels.fill(0);
+                cache.insert(d,layer,[-1,-1],empty);
+                cache.save(record_key(d,layer,-1,-1),cache.tiles[&(d,layer,-1,-1)].1.clone()).unwrap();
+                let lod=LodKey{x:-1,z:-1,level:8}; cache.insert_lod(d,lod,coarse_tile([0,0,255]));
+                cache.save(lod_record(d,lod),cache.lod_tiles[&(d,lod)].1.clone()).unwrap();
+                let mut v=view(d);v.center=[-8.;2];
+                finish_overviews(&mut cache,&v);
+                let atlas=cache.visual_atlas(&v,&v,None);
+                let at=atlas.chunks.iter().position(|c|*c==[-1,-1]).unwrap();let slot=atlas.slots[at];
+                let start=(slot/64*16*1024+slot%64*16)*4;
+                assert_eq!(&atlas.pixels[start..start+4],&[0,0,0,0]);
+                for draw in &atlas.coarse {for fragment in &draw.fragments {assert!(!intersects(*fragment,[-16,-16,16,16]));}}
+                assert!(!atlas.pages.is_empty());
+            }
+            #[test]
+            fn visual_records_reopen_sharp_without_loading_canonical_payloads() {
+                let dir=CacheDir::new("persistent-visual");let d=Dimension::Overworld;
+                let mut cache=Cache::open(&dir.0,"save:visual",64*1024*1024).unwrap();
+                for x in -8..8 {for z in -8..8 {save_chunk(&mut cache,d,Layer::Surface,[x,z],saved_tile());}}
+                let v=view(d);finish_overviews(&mut cache,&v);cache.flush().unwrap();drop(cache);
+                let mut cache=Cache::open(&dir.0,"save:visual",64*1024*1024).unwrap();
+                assert!(!cache.overviews.stale);assert!(cache.overviews.done);
+                finish_overviews(&mut cache,&v);
+                let atlas=cache.visual_atlas(&v,&v,None);
+                assert!(atlas.chunks.contains(&[0,0]));
+                assert_eq!(cache.backing.as_ref().unwrap().borrow().clock,0,"ready visuals must not decode heights/biomes again");
+                assert!(cache.overviews.dirty.is_empty());
+            }
+            #[test]
+            fn dirty_visual_checkpoint_resumes_and_detects_an_older_writer() {
+                let dir=CacheDir::new("visual-checkpoint");let d=Dimension::Overworld;let key=record_key(d,Layer::Surface,0,0);
+                let mut cache=Cache::open(&dir.0,"save:visual",64*1024*1024).unwrap();
+                save_chunk(&mut cache,d,Layer::Surface,[0,0],saved_tile());let v=view(d);
+                finish_overviews(&mut cache,&v);cache.flush().unwrap();
+                let mut changed=saved_tile();changed.pixels=[1,240,10,255].repeat(256);
+                save_chunk(&mut cache,d,Layer::Surface,[0,0],changed.clone());cache.flush().unwrap();drop(cache);
+                let mut cache=Cache::open(&dir.0,"save:visual",64*1024*1024).unwrap();
+                assert!(!cache.overviews.dirty.is_empty());finish_overviews(&mut cache,&v);cache.flush().unwrap();drop(cache);
+                let mut store=Store::open(&dir.0,"save:visual").unwrap();store.put(key,tile_encode(&saved_tile()).unwrap()).unwrap();store.commit().unwrap();drop(store);
+                let mut cache=Cache::open(&dir.0,"save:visual",64*1024*1024).unwrap();assert!(cache.overviews.stale);
+                finish_overviews(&mut cache,&v);
+                assert_eq!(cache.overview_get(overview_key(d,Layer::Surface,LodKey{x:0,z:0,level:0})).unwrap().pixels,cache.shaded_chunk(d,Layer::Surface,[0,0]));
+            }
+            #[test]
+            fn far_view_uses_world_tiles_and_zoom_target_loads_original_texels() {
+                let mut cache=Cache::default();let d=Dimension::Overworld;
+                for x in -16..16 {for z in -16..16 {cache.insert(d,Layer::Surface,[x,z],saved_tile());cache.save(record_key(d,Layer::Surface,x,z),cache.tiles[&(d,Layer::Surface,x,z)].1.clone()).unwrap();}}
+                let mut far=view(d);far.span=[100000.;2];far.width=1024;far.height=1024;
+                finish_overviews(&mut cache,&far);
+                let overview=cache.visual_atlas(&far,&far,None);assert!(!overview.coarse.is_empty());assert!(!overview.pages.is_empty());
+                let near=view(d);
+                cache.presentation_step(&far,&near,None).unwrap();
+                let prefetched=cache.visual_atlas(&far,&near,Some(&overview));assert!(prefetched.chunks.contains(&[0,0]));
+                let sharp=cache.visual_atlas(&near,&near,Some(&prefetched));let i=sharp.chunks.iter().position(|c|*c==[0,0]).unwrap();let slot=sharp.slots[i];let from=(slot/64*16*1024+slot%64*16)*4;
+                assert_eq!(&sharp.pixels[from..from+64],&cache.shaded_chunk(d,Layer::Surface,[0,0])[..64]);
+                assert!(sharp.prepared_tiles<=prefetched.prepared_tiles+32);
+            }
+
+            #[test]
             #[ignore = "manual CPU preparation timing; not GPU execution or game FPS"]
             fn benchmark_incremental_atlas_pages() {
                 let mut cache = Cache::default();
@@ -548,16 +694,8 @@ macro_rules! define_tests {
                     .write_budget = Some(0);
                 assert!(cache.flush().is_err());
                 assert_eq!(cache.bytes(), bytes);
-                assert_eq!(
-                    cache
-                        .backing
-                        .as_ref()
-                        .unwrap()
-                        .borrow()
-                        .store
-                        .pending_bytes(),
-                    pending
-                );
+                assert!(cache.backing.as_ref().unwrap().borrow().store.pending_bytes() >= pending);
+                assert_eq!(cache.backing.as_ref().unwrap().borrow_mut().store.read(record_key(Dimension::Overworld,Layer::Surface,0,0)).unwrap().unwrap(),tile_encode(&saved_tile()).unwrap());
                 drop(cache);
                 let service = Service::with_directory(Some(dir.0.clone()));
                 service.reset(1);

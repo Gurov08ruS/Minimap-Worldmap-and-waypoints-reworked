@@ -1,13 +1,24 @@
 # Changelog
 
-## Unreleased — test organization
+## 0.6.1 — 2026-11-17
+
+- Prioritize visible far LOD and retain snapshot identities across RAM eviction,
+  preventing repeated nearby submissions from starving distant coverage.
+- Persist derived world-space overview tiles inside the existing map container;
+  stream ready images instead of rebuilding a screen raster on wide views.
+- Prefetch zoom targets, retain coarse ready pages until finer coverage is ready,
+  and wake the display worker independently of terrain sampling.
+- Load hover metadata asynchronously and keep atlas assembly free of disk reads.
+- Add a long-distance map screenshot with a 1024-chunk LOD render distance.
+
+### Included test organization
 
 - Move runtime, container, map, client rendering and binding UI tests into six
   separate source files, retaining private access through test-only macros.
 - Load the shared runtime through a small Cargo wrapper and register the same
   test payloads with Mixins for validation inside the pinned Horizon client.
 
-## Unreleased — rendering performance
+### Included rendering performance
 
 - Retain visual slots and dirty-tile relief, including dependent neighbours;
   reuse disk-backed visuals across payload eviction and commits.

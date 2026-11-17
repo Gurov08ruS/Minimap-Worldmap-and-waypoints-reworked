@@ -1,5 +1,51 @@
 # Validation
 
+## 0.6.1 — distant LOD and visual streaming, 2026-11-17
+
+Local Linux validation with Rust 1.95.0, pinned Horizon `9f42064` and Mixins
+`d9c83d7`:
+
+- Workspace fmt, clippy with warnings denied and locked offline tests pass:
+  103 runtime tests and one source-audit test; three manual benchmarks ignored.
+  Direct rustfmt checks pass for the changed injected client/LOD/test sources.
+- Final native client check, template integration and deterministic AST staging
+  pass. The original pinned Horizon checkout remains unchanged; only planned
+  AST changes are present in the ignored export.
+- Official registry review against the previous PR head reports no errors and
+  one new version. Its package/signature check passes. A focused index build
+  validates all four version signatures and all seven gallery images; this is
+  not a full upstream registry build or a newest-Nightly compatibility claim.
+- Runtime tests inside the pinned native client pass (103, three benchmarks
+  ignored). All 15 separate client adapter tests and nine binding UI tests pass.
+- Regressions cover snapshot dedup after off-screen RAM eviction, visible coarse
+  LOD priority, coverage-aware reduction and known void, negative coordinates,
+  persisted-image reopen without canonical payload loading, interrupted dirty
+  checkpoints, older-writer generation mismatch, damaged derived-image repair,
+  target-zoom prefetch, metadata probes without atlas invalidation, atlas
+  assembly without disk reads and ready-page coverage after payload eviction.
+- Packaging twice produces identical bytes. Every archived Rust/TOML source
+  matches the working tree. Official package check reports `ok: true`,
+  `signed: true`; minisign and detached GPG verification pass.
+- Archive: `minimap_worldmap_waypoints_reworked-0.6.1.hnmod`, 168,781 bytes;
+  SHA-256 `bc28471909a02514f81b035871bf6c4b774c361ae26330e57494b3aa6c9d4ed5`.
+  Signatures use the existing minisign key and original GPG key.
+- The supplied long-distance screenshot is 2560×1440, 884,773 bytes, copied
+  unchanged into the registry assets and referenced in README and the gallery.
+  It is an illustration, not evidence of measured frame pacing in this release.
+
+The release-mode persistent-zoom fixture (4096 canonical tiles, four LOD sources)
+measured 8.354 ms first preview, 256.126 ms initial backfill, 8.176 ms reopen,
+4.693 ms target prefetch and 0.850 ms zoom-frame assembly, using two pages.
+Reproduce with
+`cargo test --release --locked --offline benchmark_persistent_zoom -- --ignored --nocapture`.
+These synthetic CPU timings use warm OS file cache and exclude GPU execution,
+real cold-disk latency and FPS. No live-game performance capture or macOS/Windows
+execution was performed. Existing cache migration/backfill is asynchronous;
+unavailable game terrain and slow disk operations can still delay new detail.
+
+Older sections below describe their own source snapshots and limits at the time;
+they are not claims about the current streaming path or release archive.
+
 ## Incremental map pages and worker pipeline — 2026-11-16
 
 Development validation on Linux, pinned Horizon `9f42064` and Mixins `d9c83d7`:
@@ -22,7 +68,7 @@ Development validation on Linux, pinned Horizon `9f42064` and Mixins `d9c83d7`:
   `target/minimap_worldmap_waypoints_reworked-0.6.0.hnmod`, 157,773 bytes; SHA-256
   `cc515ab1edc1e4110aa879435b10271a4c5b7af22d88d51255bfef1dc0864f5f`.
   The archive includes the new public GUI page support module and matches the
-  current Rust/TOML sources. The manifest still says 0.6.0; this is not a signed
+  Rust/TOML sources at that validation. The manifest still says 0.6.0; this is not a signed
   release or a registry update.
 
 The optimized 8192-tile fixture measured 45.250 ms for initial preparation,

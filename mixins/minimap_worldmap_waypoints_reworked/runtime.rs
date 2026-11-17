@@ -2725,16 +2725,22 @@ pub mod container {
             layer: i32,
             rect: [i64; 4],
             limit: usize,
+            level: Option<i32>,
         ) -> Vec<RecordKey> {
             let mut found = Vec::new();
             if rect[2] <= 0 || rect[3] <= 0 || limit == 0 {
                 return found;
             }
-            for (&[d, k, y, level], band) in self
-                .bands
-                .range([dimension, kind, layer, i32::MIN]..=[dimension, kind, layer, i32::MAX])
-            {
-                let size = 16_i64 << if kind == 2 { level.clamp(0, 22) } else { 0 };
+            for (&[d, k, y, level], band) in self.bands.range(
+                [dimension, kind, layer, level.unwrap_or(i32::MIN)]
+                    ..=[dimension, kind, layer, level.unwrap_or(i32::MAX)],
+            ) {
+                let size = 16_i64
+                    << if matches!(kind, 2..=4) {
+                        level.clamp(0, 22)
+                    } else {
+                        0
+                    };
                 let lo = [rect[0].div_euclid(size), rect[1].div_euclid(size)];
                 let hi = [
                     (rect[0] + rect[2] - 1).div_euclid(size),
@@ -3150,7 +3156,53 @@ pub mod container {
             rect: [i64; 4],
             limit: usize,
         ) -> Vec<RecordKey> {
-            self.spatial.query(dimension, kind, layer, rect, limit)
+            self.spatial
+                .query(dimension, kind, layer, rect, limit, None)
+        }
+        pub fn query_level(
+            &self,
+            dimension: i32,
+            kind: i32,
+            layer: i32,
+            level: u8,
+            rect: [i64; 4],
+            limit: usize,
+        ) -> Vec<RecordKey> {
+            self.spatial
+                .query(dimension, kind, layer, rect, limit, Some(i32::from(level)))
+        }
+        pub fn source_keys_after(&self, after: Option<RecordKey>, limit: usize) -> Vec<RecordKey> {
+            use std::ops::Bound::{Excluded, Included};
+            let mut keys = std::collections::BTreeSet::new();
+            for d in 1..=3 {
+                for kind in 0..=2 {
+                    let low = [d, kind, i32::MIN, i32::MIN, i32::MIN, i32::MIN];
+                    let high = [d, kind, i32::MAX, i32::MAX, i32::MAX, i32::MAX];
+                    if after.is_some_and(|last| last >= high) {
+                        continue;
+                    }
+                    let start = after
+                        .filter(|last| *last >= low)
+                        .map_or(Included(low), Excluded);
+                    keys.extend(
+                        self.roots[self.current]
+                            .entries
+                            .range((start, Included(high)))
+                            .map(|(k, _)| *k)
+                            .take(limit),
+                    );
+                    keys.extend(
+                        self.pending
+                            .range((start, Included(high)))
+                            .map(|(k, _)| *k)
+                            .take(limit),
+                    );
+                    if keys.len() >= limit {
+                        return keys.into_iter().take(limit).collect();
+                    }
+                }
+            }
+            keys.into_iter().take(limit).collect()
         }
         pub fn version(&self, key: RecordKey) -> Option<u64> {
             self.pending_versions.get(&key).copied().or_else(|| {
@@ -3165,6 +3217,9 @@ pub mod container {
         }
         pub fn dirty(&self) -> bool {
             !self.pending.is_empty()
+        }
+        pub fn generation(&self) -> u64 {
+            self.roots[self.current].generation
         }
         pub fn commit(&mut self) -> io::Result<()> {
             if self.poisoned {
@@ -3921,6 +3976,7 @@ pub mod maps {
     }
     /// Cut out *whole* detailed chunks, even known void/transparent pixels. LOD
     /// must never shine through them. Subdivide only near detail, not into all chunks.
+    #[cfg(test)]
     fn lod_fragments(key: LodKey, detailed: &BTreeSet<[i32; 2]>) -> Vec<[i64; 4]> {
         let mut stack = vec![key.bounds()];
         let mut out = Vec::new();
@@ -3976,12 +4032,15 @@ pub mod maps {
     }
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
     enum VisualKey {
+        #[cfg(test)]
         Detail([i32; 2]),
         Lod(LodKey),
     }
+    #[derive(Clone)]
     enum VisualSource {
         Stored(Option<u64>),
         Memory(std::sync::Weak<Tile>),
+        Image(std::sync::Weak<Overview>, Vec<(LodKey, VisualSource)>),
     }
     struct ShadeRequest {
         tile: Arc<Tile>,
@@ -4052,6 +4111,14 @@ pub mod maps {
             match (self, other) {
                 (Self::Stored(a), Self::Stored(b)) => a == b,
                 (Self::Memory(a), Self::Memory(b)) => std::sync::Weak::ptr_eq(a, b),
+                (Self::Image(a, sa), Self::Image(b, sb)) => {
+                    std::sync::Weak::ptr_eq(a, b)
+                        && sa.len() == sb.len()
+                        && sa
+                            .iter()
+                            .zip(sb)
+                            .all(|((ka, a), (kb, b))| ka == kb && a.same(b))
+                }
                 _ => false,
             }
         }
@@ -4557,6 +4624,261 @@ pub mod maps {
     }
     type TileCursor = Option<((i32, i32), Option<Arc<Tile>>)>;
     type Key = (Dimension, Layer, i32, i32);
+    const VISUAL_CHECKPOINT: RecordKey = [0, 7, 0, 0, 0, 0];
+    #[derive(Clone, PartialEq, Eq)]
+    struct Overview {
+        pixels: Vec<u8>,
+        coverage: [u16; 256],
+    }
+    impl Default for Overview {
+        fn default() -> Self {
+            Self {
+                pixels: vec![0; 1024],
+                coverage: [0; 256],
+            }
+        }
+    }
+    impl Overview {
+        fn encode(&self) -> Vec<u8> {
+            let mut bytes = b"OVR1\x01\0\0\0".to_vec();
+            bytes.extend_from_slice(&self.pixels);
+            for value in self.coverage {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            bytes
+        }
+        fn decode(bytes: &[u8]) -> Option<Self> {
+            if bytes.len() != 1544 || &bytes[..8] != b"OVR1\x01\0\0\0" {
+                return None;
+            }
+            Some(Self {
+                pixels: bytes[8..1032].to_vec(),
+                coverage: std::array::from_fn(|i| {
+                    u16::from_le_bytes(bytes[1032 + i * 2..1034 + i * 2].try_into().unwrap())
+                }),
+            })
+        }
+        fn reduce(children: &[Option<Arc<Self>>; 4]) -> Self {
+            let mut out = Self::default();
+            for z in 0..16 {
+                for x in 0..16 {
+                    let Some(child) = &children[x / 8 + z / 8 * 2] else {
+                        continue;
+                    };
+                    let mut alpha = 0u32;
+                    let mut rgb = [0u32; 3];
+                    let mut known = 0u32;
+                    for dz in 0..2 {
+                        for dx in 0..2 {
+                            let at = (z % 8 * 2 + dz) * 16 + x % 8 * 2 + dx;
+                            let a = u32::from(child.pixels[at * 4 + 3]);
+                            alpha += a;
+                            known += u32::from(child.coverage[at]);
+                            for (c, value) in rgb.iter_mut().enumerate() {
+                                *value += u32::from(child.pixels[at * 4 + c]) * a;
+                            }
+                        }
+                    }
+                    let at = z * 16 + x;
+                    out.coverage[at] = if known == 0 {
+                        0
+                    } else {
+                        ((known + 2) / 4).max(1) as u16
+                    };
+                    out.pixels[at * 4 + 3] = ((alpha + 2) / 4) as u8;
+                    for (c, value) in rgb.iter().enumerate() {
+                        out.pixels[at * 4 + c] =
+                            (value + alpha / 2).checked_div(alpha).unwrap_or(0) as u8;
+                    }
+                }
+            }
+            out
+        }
+        fn fill(&mut self, at: usize, fallback: &[u8]) {
+            self.fill_partial(at, fallback, if fallback[3] == 0 { 0 } else { u16::MAX });
+        }
+        fn fill_partial(&mut self, at: usize, fallback: &[u8], coverage: u16) {
+            if self.coverage[at] == u16::MAX || coverage == 0 {
+                return;
+            }
+            let missing = u64::from(u16::MAX - self.coverage[at]);
+            let a = u64::from(self.pixels[at * 4 + 3]) * 65535;
+            let b = u64::from(fallback[3]) * missing;
+            let alpha = a + b;
+            for (c, value) in fallback.iter().enumerate().take(3) {
+                self.pixels[at * 4 + c] =
+                    (u64::from(self.pixels[at * 4 + c]) * a + u64::from(*value) * b + alpha / 2)
+                        .checked_div(alpha)
+                        .unwrap_or(0) as u8;
+            }
+            self.pixels[at * 4 + 3] = ((alpha + 32767) / 65535) as u8;
+            self.coverage[at] = (u64::from(self.coverage[at])
+                + (u64::from(coverage) * missing + 32767) / 65535)
+                .min(65535) as u16;
+        }
+    }
+    fn overview_key(d: Dimension, layer: Layer, key: LodKey) -> RecordKey {
+        let mut record = record_key(d, layer, key.x, key.z);
+        record[1] += 3;
+        record[5] = i32::from(key.level);
+        record
+    }
+    fn overview_layer(key: RecordKey) -> Layer {
+        if key[1] == 4 {
+            Layer::Below(key[2])
+        } else {
+            Layer::Surface
+        }
+    }
+    fn footprint(key: RecordKey) -> LodKey {
+        LodKey {
+            x: key[3],
+            z: key[4],
+            level: key[5] as u8,
+        }
+    }
+    type PresentationGoal = (u64, Dimension, Layer, [i64; 4], u8, [i64; 4], u8);
+    #[derive(Default)]
+    struct Overviews {
+        tiles: BTreeMap<RecordKey, (u64, Arc<Overview>)>,
+        order: BTreeSet<(u64, RecordKey)>,
+        clock: u64,
+        dirty: BTreeSet<(u8, RecordKey)>,
+        urgent: BTreeSet<(u8, RecordKey)>,
+        fresh: BTreeSet<RecordKey>,
+        stale: bool,
+        cursor: Option<RecordKey>,
+        done: bool,
+        modified: bool,
+        wanted: BTreeSet<RecordKey>,
+        goal: Option<PresentationGoal>,
+        bad: BTreeSet<RecordKey>,
+        displayed: bool,
+    }
+    impl Overviews {
+        fn load(store: &mut Store) -> Self {
+            let mut out = Self {
+                stale: true,
+                ..Self::default()
+            };
+            let Ok(Some(bytes)) = store.read(VISUAL_CHECKPOINT) else {
+                return out;
+            };
+            if bytes.len() < 48
+                || &bytes[..8] != b"OVC1\x01\0\0\0"
+                || u64::from_le_bytes(bytes[8..16].try_into().unwrap()) != store.generation()
+            {
+                return out;
+            }
+            let count = u32::from_le_bytes(bytes[44..48].try_into().unwrap()) as usize;
+            if count > 32768
+                || bytes.len() != 48 + count * 24
+                || bytes[17] != 0
+                || bytes[16] > 1
+                || bytes[18] > 1
+            {
+                return out;
+            }
+            let read_key = |bytes: &[u8]| {
+                std::array::from_fn(|i| {
+                    i32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap())
+                })
+            };
+            out.stale = false;
+            out.done = bytes[16] != 0;
+            if bytes[18] != 0 {
+                out.cursor = Some(read_key(&bytes[20..44]));
+            }
+            for chunk in bytes[48..].chunks_exact(24) {
+                let key: RecordKey = read_key(chunk);
+                if !matches!(key[1], 3 | 4) || !(0..=22).contains(&key[5]) {
+                    return Self {
+                        stale: true,
+                        ..Self::default()
+                    };
+                }
+                out.dirty.insert((key[5] as u8, key));
+            }
+            out
+        }
+        fn checkpoint(&self, generation: u64) -> Vec<u8> {
+            let restart = self.stale || self.dirty.len() > 32768;
+            let mut bytes = b"OVC1\x01\0\0\0".to_vec();
+            bytes.extend_from_slice(&generation.to_le_bytes());
+            bytes.extend_from_slice(&[
+                u8::from(self.done && !restart),
+                u8::from(restart),
+                u8::from(self.cursor.is_some() && !restart),
+                0,
+            ]);
+            for n in if restart {
+                [0; 6]
+            } else {
+                self.cursor.unwrap_or([0; 6])
+            } {
+                bytes.extend_from_slice(&n.to_le_bytes());
+            }
+            bytes.extend_from_slice(
+                &(if restart { 0 } else { self.dirty.len() as u32 }).to_le_bytes(),
+            );
+            if !restart {
+                for (_, key) in &self.dirty {
+                    for n in key {
+                        bytes.extend_from_slice(&n.to_le_bytes());
+                    }
+                }
+            }
+            bytes
+        }
+        fn mark(&mut self, source: RecordKey, urgent: bool) {
+            if !(0..=2).contains(&source[1]) {
+                return;
+            }
+            let base = if source[1] == 2 {
+                source[5].clamp(0, 22) as u8
+            } else {
+                0
+            };
+            let mut key = source;
+            key[1] = if source[1] == 1 { 4 } else { 3 };
+            key[2] = if source[1] == 1 { source[2] } else { 0 };
+            for level in base..=22 {
+                key[5] = i32::from(level);
+                self.dirty.insert((level, key));
+                if urgent {
+                    self.urgent.insert((level, key));
+                }
+                key[3] = key[3].div_euclid(2);
+                key[4] = key[4].div_euclid(2);
+            }
+            self.modified = true;
+        }
+        fn remember(&mut self, key: RecordKey, tile: Arc<Overview>, capacity: usize) {
+            if let Some((stamp, _)) = self.tiles.remove(&key) {
+                self.order.remove(&(stamp, key));
+            }
+            self.clock += 1;
+            self.tiles.insert(key, (self.clock, tile));
+            if !self.wanted.contains(&key) {
+                self.order.insert((self.clock, key));
+            }
+            let capacity = capacity
+                .max(self.wanted.len().saturating_add(512))
+                .min(65536);
+            let mut attempts = self.tiles.len();
+            while self.tiles.len() > capacity && attempts > 0 {
+                attempts -= 1;
+                let Some((_, old)) = self.order.pop_first() else {
+                    break;
+                };
+                if self.wanted.contains(&old) {
+                    continue;
+                } else {
+                    self.tiles.remove(&old);
+                }
+            }
+        }
+    }
     #[derive(Default)]
     pub struct Cache {
         tiles: BTreeMap<Key, (u64, Arc<Tile>)>,
@@ -4564,8 +4886,10 @@ pub mod maps {
         clock: u64,
         backing: Option<RefCell<Backing>>,
         limit: usize,
+        #[cfg(test)]
         paged: bool,
         lod_levels: BTreeMap<Dimension, u32>,
+        overviews: Overviews,
     }
     impl Cache {
         fn open(
@@ -4573,7 +4897,8 @@ pub mod maps {
             world: &str,
             limit: usize,
         ) -> Result<Self, container::LeaseError> {
-            let store = Store::open(directory, world)?;
+            let mut store = Store::open(directory, world)?;
+            let overviews = Overviews::load(&mut store);
             let mut lod_levels = BTreeMap::new();
             for key in store
                 .keys()
@@ -4585,6 +4910,7 @@ pub mod maps {
             }
             Ok(Self {
                 lod_levels,
+                overviews,
                 backing: Some(RefCell::new(Backing {
                     store,
                     reads: BTreeMap::new(),
@@ -4608,11 +4934,55 @@ pub mod maps {
         }
         fn flush(&mut self) -> io::Result<()> {
             if let Some(backing) = &self.backing {
-                backing.borrow_mut().store.commit()?;
+                let mut backing = backing.borrow_mut();
+                if backing.store.dirty() || self.overviews.modified {
+                    let marker = self.overviews.checkpoint(
+                        backing
+                            .store
+                            .generation()
+                            .checked_add(1)
+                            .ok_or_else(|| io::Error::other("visual generation overflow"))?,
+                    );
+                    backing.store.put(VISUAL_CHECKPOINT, marker)?;
+                    backing.store.commit()?;
+                    self.overviews.modified = false;
+                }
             }
             Ok(())
         }
         fn save(&mut self, key: RecordKey, tile: Arc<Tile>) -> io::Result<()> {
+            if key[1] == 2 {
+                let visual = Overview {
+                    pixels: tile.pixels.clone(),
+                    coverage: std::array::from_fn(|i| {
+                        if tile.pixels.get(i * 4 + 3).is_some_and(|a| *a != 0) {
+                            u16::MAX
+                        } else {
+                            0
+                        }
+                    }),
+                };
+                self.overviews.bad.remove(&key);
+                if let Some((_, d, layer, region, _, future, _)) = self.overviews.goal
+                    && record_dimension(key) == Some(d)
+                    && layer == Layer::Surface
+                    && (intersects(region, footprint(key).bounds())
+                        || intersects(future, footprint(key).bounds()))
+                    && self.overviews.wanted.len() < 32768
+                {
+                    self.overviews.wanted.insert(key);
+                }
+                self.overviews.remember(key, Arc::new(visual), 32768);
+            }
+            self.overviews.mark(key, true);
+            if key[1] != 2 {
+                for (dx, dz) in [(1, 0), (0, 1)] {
+                    let mut neighbour = key;
+                    neighbour[3] = neighbour[3].saturating_add(dx);
+                    neighbour[4] = neighbour[4].saturating_add(dz);
+                    self.overviews.mark(neighbour, true);
+                }
+            }
             if let Some(backing) = &self.backing {
                 let mut backing = backing.borrow_mut();
                 if let Some((stamp, old)) = backing.reads.remove(&key) {
@@ -4672,6 +5042,752 @@ pub mod maps {
             }
             self.clock += 1;
         }
+        fn overview_get(&mut self, key: RecordKey) -> Option<Arc<Overview>> {
+            if self.overviews.bad.contains(&key)
+                || self.overviews.stale && key[1] != 2 && !self.overviews.fresh.contains(&key)
+            {
+                return None;
+            }
+            let capacity =
+                ((self.limit / 2).clamp(32 * 1024 * 1024, 64 * 1024 * 1024) / 1680).max(1);
+            if let Some((_, tile)) = self.overviews.tiles.get(&key) {
+                let tile = tile.clone();
+                self.overviews.remember(key, tile.clone(), capacity);
+                return Some(tile);
+            }
+            let data = self.backing.as_ref()?.borrow_mut().store.read(key);
+            let tile = match data {
+                Ok(None) => return None,
+                Ok(Some(bytes)) => {
+                    if key[1] == 2 {
+                        tile_decode(&bytes).ok().map(|tile| Overview {
+                            coverage: std::array::from_fn(|i| {
+                                if tile.pixels[i * 4 + 3] != 0 {
+                                    u16::MAX
+                                } else {
+                                    0
+                                }
+                            }),
+                            pixels: tile.pixels,
+                        })
+                    } else {
+                        Overview::decode(&bytes)
+                    }
+                }
+                Err(_) => None,
+            };
+            let Some(tile) = tile else {
+                if key[1] == 2 {
+                    self.overviews.bad.insert(key);
+                    return None;
+                }
+                self.overviews.dirty.insert((key[5] as u8, key));
+                self.overviews.urgent.insert((key[5] as u8, key));
+                self.overviews.modified = true;
+                return None;
+            };
+            let tile = Arc::new(tile);
+            self.overviews.remember(key, tile.clone(), capacity);
+            self.clock += 1;
+            Some(tile)
+        }
+        fn rebuild_overview(
+            &mut self,
+            key: RecordKey,
+            shading: Option<&Shading>,
+        ) -> io::Result<()> {
+            let Some(d) = record_dimension(key) else {
+                return Ok(());
+            };
+            let layer = overview_layer(key);
+            let node = footprint(key);
+            let mut image = if node.level == 0 {
+                if let Some(tile) = self.tile_at((d, layer, node.x, node.z)) {
+                    let pixels = shading
+                        .and_then(|s| {
+                            s.submit(
+                                tile.clone(),
+                                self.tile_at((d, layer, node.x, node.z.saturating_sub(1))),
+                                self.tile_at((d, layer, node.x.saturating_sub(1), node.z)),
+                            )
+                        })
+                        .and_then(|r| r.recv().ok())
+                        .unwrap_or_else(|| self.shaded_chunk(d, layer, [node.x, node.z]));
+                    Overview {
+                        pixels,
+                        coverage: [u16::MAX; 256],
+                    }
+                } else {
+                    Overview::default()
+                }
+            } else {
+                let children = std::array::from_fn(|i| {
+                    let x = node.x.checked_mul(2)?.checked_add((i % 2) as i32)?;
+                    let z = node.z.checked_mul(2)?.checked_add((i / 2) as i32)?;
+                    self.overview_get(overview_key(
+                        d,
+                        layer,
+                        LodKey {
+                            x,
+                            z,
+                            level: node.level - 1,
+                        },
+                    ))
+                });
+                Overview::reduce(&children)
+            };
+            if layer == Layer::Surface
+                && let Some(lod) = self.coarse_at(d, node)
+            {
+                for i in 0..256 {
+                    image.fill(i, &lod.pixels[i * 4..i * 4 + 4]);
+                }
+            }
+            let previous = self.overview_get(key);
+            if previous.as_deref() == Some(&image)
+                || previous.is_none()
+                    && image.coverage.iter().all(|v| *v == 0)
+                    && self
+                        .backing
+                        .as_ref()
+                        .is_none_or(|b| b.borrow().store.version(key).is_none())
+            {
+                return Ok(());
+            }
+            if let Some(backing) = &self.backing {
+                backing.borrow_mut().store.put(key, image.encode())?;
+            }
+            if self.overviews.stale {
+                self.overviews.fresh.insert(key);
+            }
+            if let Some((_, d, l, region, level, future, fine)) = self.overviews.goal
+                && d == record_dimension(key).unwrap_or(Dimension::Player)
+                && l == overview_layer(key)
+                && (key[5] >= i32::from(level) && intersects(region, node.bounds())
+                    || key[5] >= i32::from(fine) && intersects(future, node.bounds()))
+                && self.overviews.wanted.len() < 32768
+            {
+                self.overviews.wanted.insert(key);
+            }
+            let capacity = (self.limit / 2).clamp(32 * 1024 * 1024, 64 * 1024 * 1024) / 1680;
+            self.overviews.remember(key, Arc::new(image), capacity);
+            self.clock += 1;
+            self.overviews.modified = true;
+            if node.level < 22 {
+                let parent = overview_key(
+                    d,
+                    layer,
+                    LodKey {
+                        x: node.x.div_euclid(2),
+                        z: node.z.div_euclid(2),
+                        level: node.level + 1,
+                    },
+                );
+                self.overviews.dirty.insert((node.level + 1, parent));
+            }
+            Ok(())
+        }
+        fn overview_level(view: &View) -> u8 {
+            let scale = (view.span[0] / view.width.max(1) as f64)
+                .max(view.span[1] / view.height.max(1) as f64);
+            let mut level = scale.max(1.).log2().floor().clamp(0., 22.) as u8;
+            let region = view.atlas_region();
+            while level < 22 {
+                let size = (16_i64 << level) as f64;
+                if (region[2] as f64 / size + 2.) * (region[3] as f64 / size + 2.) <= 32768. {
+                    break;
+                }
+                level += 1;
+            }
+            level
+        }
+        fn query_visual(
+            &self,
+            view: &View,
+            level: u8,
+            region: [i64; 4],
+            kind: i32,
+            limit: usize,
+        ) -> Vec<RecordKey> {
+            let prefix = record_key(view.dimension, view.layer, 0, 0);
+            self.backing.as_ref().map_or_else(Vec::new, |b| {
+                b.borrow()
+                    .store
+                    .query_level(prefix[0], kind, prefix[2], level, region, limit)
+            })
+        }
+        fn seed_presentation(&mut self, view: &View, target: &View) {
+            let level = Self::overview_level(view);
+            let target_level = Self::overview_level(target);
+            let region = view.atlas_region();
+            let future = target.atlas_region();
+            let goal = (
+                view.session,
+                view.dimension,
+                view.layer,
+                region,
+                level,
+                future,
+                target_level,
+            );
+            if self.overviews.goal == Some(goal) {
+                return;
+            }
+            if self.overviews.goal.is_none_or(|old| {
+                (old.0, old.1, old.2) != (view.session, view.dimension, view.layer)
+            }) {
+                self.overviews.displayed = false;
+            }
+            self.overviews.goal = Some(goal);
+            self.overviews.wanted.clear();
+            self.clock += 1;
+            for (v, l, r) in [(view, level, region), (target, target_level, future)] {
+                let prefix = record_key(v.dimension, v.layer, 0, 0);
+                for level in (l..=22).rev() {
+                    self.overviews.wanted.extend(self.query_visual(
+                        v,
+                        level,
+                        r,
+                        prefix[1] + 3,
+                        32768,
+                    ));
+                }
+                let mut sources = self.backing.as_ref().map_or_else(Vec::new, |b| {
+                    b.borrow()
+                        .store
+                        .query(prefix[0], prefix[1], prefix[2], r, 1024)
+                });
+                sources.extend(
+                    self.tiles
+                        .keys()
+                        .filter(|k| {
+                            k.0 == v.dimension
+                                && k.1 == v.layer
+                                && intersects(r, [i64::from(k.2) * 16, i64::from(k.3) * 16, 16, 16])
+                        })
+                        .map(|k| record_key(k.0, k.1, k.2, k.3)),
+                );
+                sources.sort_unstable();
+                sources.dedup();
+                sources.sort_unstable_by_key(|k| {
+                    let dx = i64::from(k[3]) * 16 - v.center[0] as i64;
+                    let dz = i64::from(k[4]) * 16 - v.center[1] as i64;
+                    i128::from(dx).pow(2) + i128::from(dz).pow(2)
+                });
+                for source in sources.into_iter().take(1024) {
+                    self.seed_visual_source(source);
+                }
+                if v.layer == Layer::Surface {
+                    for level in (0..=22).rev() {
+                        let keys = self.query_visual(v, level, r, 2, 256);
+                        for source in keys {
+                            self.overviews.wanted.insert(source);
+                            self.seed_visual_source(source);
+                        }
+                    }
+                    let sources: Vec<_> = self
+                        .lod_tiles
+                        .keys()
+                        .filter(|(d, k)| *d == v.dimension && intersects(r, k.bounds()))
+                        .map(|(d, k)| lod_record(*d, *k))
+                        .collect();
+                    for source in sources {
+                        self.seed_visual_source(source);
+                    }
+                }
+            }
+        }
+        fn bound_visual_wanted(&mut self, target: &View) {
+            let Some((_, _, _, _, level, future, fine)) = self.overviews.goal else {
+                return;
+            };
+            let mut wanted: Vec<_> = self.overviews.wanted.iter().copied().collect();
+            wanted.sort_unstable_by_key(|key| {
+                (
+                    if key[5] >= i32::from(level.max(fine)) + 4 {
+                        0
+                    } else if key[5] == i32::from(fine)
+                        && intersects(future, footprint(*key).bounds())
+                    {
+                        1
+                    } else if key[5] == i32::from(level) {
+                        2
+                    } else {
+                        3
+                    },
+                    std::cmp::Reverse(key[5]),
+                    i128::from(footprint(*key).bounds()[0] - target.center[0] as i64).pow(2)
+                        + i128::from(footprint(*key).bounds()[1] - target.center[1] as i64).pow(2),
+                )
+            });
+            self.overviews.wanted = wanted.into_iter().take(32768).collect();
+            self.overviews.order = self
+                .overviews
+                .tiles
+                .iter()
+                .filter(|(k, _)| !self.overviews.wanted.contains(*k))
+                .map(|(k, (stamp, _))| (*stamp, *k))
+                .collect();
+        }
+        fn seed_visual_source(&mut self, source: RecordKey) {
+            let mut key = source;
+            key[1] = if source[1] == 1 { 4 } else { 3 };
+            key[5] = if source[1] == 2 { source[5] } else { 0 };
+            let known = if let Some(backing) = &self.backing {
+                backing.borrow().store.version(key).is_some()
+            } else {
+                self.overviews.tiles.contains_key(&key)
+            };
+            if !known || self.overviews.stale || self.overviews.dirty.contains(&(key[5] as u8, key))
+            {
+                self.overviews.mark(source, true);
+            }
+        }
+        fn presentation_step(
+            &mut self,
+            view: &View,
+            target: &View,
+            shading: Option<&Shading>,
+        ) -> io::Result<()> {
+            let _timing = super::profiling::measure("visual-stream");
+            let old_goal = self.overviews.goal;
+            self.seed_presentation(view, target);
+            if old_goal != self.overviews.goal {
+                self.bound_visual_wanted(target);
+            }
+            if !self.overviews.done {
+                let sources = self.backing.as_ref().map_or_else(Vec::new, |b| {
+                    b.borrow()
+                        .store
+                        .source_keys_after(self.overviews.cursor, 32)
+                });
+                if sources.is_empty() {
+                    self.overviews.done = true;
+                } else {
+                    self.overviews.cursor = sources.last().copied();
+                    for source in sources {
+                        self.overviews.mark(source, false);
+                    }
+                }
+                self.overviews.modified = true;
+            }
+            let started = Instant::now();
+            for _ in 0..256 {
+                if started.elapsed() >= Duration::from_millis(6) {
+                    break;
+                }
+                let next = self
+                    .overviews
+                    .urgent
+                    .pop_first()
+                    .or_else(|| self.overviews.dirty.first().copied());
+                let Some((level, key)) = next else {
+                    break;
+                };
+                if !self.overviews.dirty.remove(&(level, key)) {
+                    continue;
+                }
+                if let Err(error) = self.rebuild_overview(key, shading) {
+                    self.overviews.dirty.insert((level, key));
+                    return Err(error);
+                }
+                self.overviews.modified = true;
+            }
+            if self.overviews.done && self.overviews.dirty.is_empty() && self.overviews.stale {
+                self.overviews.stale = false;
+                self.overviews.fresh.clear();
+                self.overviews.modified = true;
+            }
+            let mut wanted: Vec<_> = self
+                .overviews
+                .wanted
+                .iter()
+                .copied()
+                .filter(|k| {
+                    !self.overviews.tiles.contains_key(k) && !self.overviews.bad.contains(k)
+                })
+                .collect();
+            let near = target.atlas_region();
+            let fine = Self::overview_level(target);
+            wanted.sort_unstable_by_key(|k| {
+                (
+                    if !self.overviews.displayed {
+                        if k[1] == 2 {
+                            0
+                        } else if k[5] == i32::from(fine) {
+                            1
+                        } else {
+                            2
+                        }
+                    } else if k[5] == i32::from(fine) && intersects(near, footprint(*k).bounds()) {
+                        0
+                    } else {
+                        1
+                    },
+                    std::cmp::Reverse(k[5]),
+                    (i128::from(footprint(*k).bounds()[0] - target.center[0] as i64)).pow(2)
+                        + (i128::from(footprint(*k).bounds()[1] - target.center[1] as i64)).pow(2),
+                )
+            });
+            for key in wanted {
+                if started.elapsed() >= Duration::from_millis(12) {
+                    break;
+                }
+                self.overview_get(key);
+            }
+            self.trim()?;
+            Ok(())
+        }
+        fn visual_work(&self) -> bool {
+            !self.overviews.done
+                || !self.overviews.dirty.is_empty()
+                || self.overviews.wanted.iter().any(|k| {
+                    !self.overviews.tiles.contains_key(k) && !self.overviews.bad.contains(k)
+                })
+        }
+        fn ready_level(&self, view: &View) -> u8 {
+            let region = view.atlas_region();
+            let mut level = Self::overview_level(view);
+            while level < 22 {
+                let missing = self.overviews.wanted.iter().any(|k| {
+                    record_dimension(*k) == Some(view.dimension)
+                        && overview_layer(*k) == view.layer
+                        && k[5] == i32::from(level)
+                        && intersects(region, footprint(*k).bounds())
+                        && !self.overviews.tiles.contains_key(k)
+                        && !self.overviews.bad.contains(k)
+                });
+                let building = self.overviews.dirty.iter().any(|(l, k)| {
+                    *l == level
+                        && record_dimension(*k) == Some(view.dimension)
+                        && overview_layer(*k) == view.layer
+                        && intersects(region, footprint(*k).bounds())
+                        && !self.overviews.tiles.contains_key(k)
+                });
+                if !missing && !building {
+                    break;
+                }
+                level += 1;
+            }
+            level
+        }
+        fn visual_atlas(
+            &self,
+            view: &View,
+            target: &View,
+            previous: Option<&TerrainAtlas>,
+        ) -> TerrainAtlas {
+            let _timing = super::profiling::measure("visual-atlas");
+            let previous =
+                previous.filter(|p| p.scope == (view.session, view.dimension, view.layer));
+            let region = view.atlas_region();
+            let future = target.atlas_region();
+            let level = self.ready_level(view);
+            let fine = self.ready_level(target);
+            let mut candidates: Vec<_> = self
+                .overviews
+                .tiles
+                .iter()
+                .filter(|(key, (_, tile))| {
+                    record_dimension(**key) == Some(view.dimension)
+                        && overview_layer(**key) == view.layer
+                        && tile.coverage.iter().any(|c| *c != 0)
+                        && ((key[5] >= i32::from(level)
+                            && intersects(region, footprint(**key).bounds()))
+                            || key[5] >= i32::from(fine)
+                                && intersects(future, footprint(**key).bounds())
+                            || key[1] == 2
+                                && (intersects(region, footprint(**key).bounds())
+                                    || intersects(future, footprint(**key).bounds())))
+                })
+                .map(|(key, (_, tile))| (*key, tile.clone()))
+                .collect();
+            candidates.sort_unstable_by_key(|(k, _)| {
+                (
+                    if k[5] >= i32::from(level.max(fine)) + 4 {
+                        0
+                    } else if k[5] == i32::from(fine) && intersects(future, footprint(*k).bounds())
+                    {
+                        1
+                    } else if k[5] == i32::from(level) {
+                        2
+                    } else {
+                        3
+                    },
+                    std::cmp::Reverse(k[5]),
+                    k[1],
+                )
+            });
+            let mut nodes: BTreeMap<LodKey, Option<Arc<Overview>>> = BTreeMap::new();
+            for (record, tile) in candidates.into_iter().take(32512) {
+                let key = footprint(record);
+                if record[1] == 2
+                    && key.level < level.min(fine)
+                    && (key.level + 1..=level.min(fine)).any(|l| {
+                        let shift = l - key.level;
+                        let parent = overview_key(
+                            view.dimension,
+                            view.layer,
+                            LodKey {
+                                x: key.x.div_euclid(1 << shift),
+                                z: key.z.div_euclid(1 << shift),
+                                level: l,
+                            },
+                        );
+                        self.overviews.tiles.contains_key(&parent)
+                            && !self.overviews.dirty.contains(&(l, parent))
+                    })
+                {
+                    continue;
+                }
+                if record[1] == 2 {
+                    nodes.entry(key).or_insert(Some(tile));
+                } else {
+                    nodes.insert(key, Some(tile));
+                }
+            }
+            if let Some(old) = previous {
+                let mut keep: Vec<_> = old
+                    .coarse
+                    .iter()
+                    .map(|d| d.key)
+                    .chain(old.chunks.iter().map(|c| LodKey {
+                        x: c[0],
+                        z: c[1],
+                        level: 0,
+                    }))
+                    .filter(|k| old.sources.contains_key(&VisualKey::Lod(*k)))
+                    .filter(|k| intersects(region, k.bounds()) || intersects(future, k.bounds()))
+                    .collect();
+                keep.sort_unstable_by_key(|k| std::cmp::Reverse(k.level));
+                for key in keep {
+                    if nodes.len() >= 32768 {
+                        break;
+                    }
+                    nodes.entry(key).or_insert(None);
+                }
+            }
+            let selected: BTreeSet<_> = nodes.keys().copied().collect();
+            let mut ancestors = BTreeSet::new();
+            for key in &selected {
+                let mut key = *key;
+                while key.level < 22 {
+                    key = LodKey {
+                        x: key.x.div_euclid(2),
+                        z: key.z.div_euclid(2),
+                        level: key.level + 1,
+                    };
+                    ancestors.insert(key);
+                }
+            }
+            let compact = previous.is_some_and(|p| nodes.len() * 4 < p.locations.len());
+            let mut locations: BTreeMap<_, _> = previous
+                .filter(|_| !compact)
+                .map(|p| {
+                    p.locations
+                        .iter()
+                        .filter(|(k, _)| matches!(k,VisualKey::Lod(key) if selected.contains(key)))
+                        .map(|(k, v)| (*k, *v))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut used: BTreeSet<_> = locations.values().copied().collect();
+            let mut next = 0;
+            for key in &selected {
+                if locations.contains_key(&VisualKey::Lod(*key)) {
+                    continue;
+                }
+                while used.contains(&next) {
+                    next += 1;
+                }
+                locations.insert(VisualKey::Lod(*key), next);
+                used.insert(next);
+            }
+            let height = used.last().map_or(16, |s| (s + 1).div_ceil(64) * 16);
+            let mut pixels = vec![0; 1024 * height * 4];
+            let mut sources = BTreeMap::new();
+            let mut coarse = Vec::new();
+            let mut chunks = Vec::new();
+            let mut slots = Vec::new();
+            let mut prepared_tiles = 0;
+            for (key, image) in nodes {
+                let slot = locations[&VisualKey::Lod(key)];
+                let mut parents = Vec::new();
+                let mut dependencies = Vec::new();
+                if image
+                    .as_ref()
+                    .is_some_and(|i| i.coverage.iter().any(|v| *v != u16::MAX))
+                    && view.layer == Layer::Surface
+                {
+                    for level in key.level + 1..=22 {
+                        let shift = level - key.level;
+                        let parent = LodKey {
+                            x: key.x.div_euclid(1 << shift),
+                            z: key.z.div_euclid(1 << shift),
+                            level,
+                        };
+                        let tile = self
+                            .overviews
+                            .tiles
+                            .get(&lod_record(view.dimension, parent))
+                            .or_else(|| {
+                                self.overviews.tiles.get(&overview_key(
+                                    view.dimension,
+                                    view.layer,
+                                    parent,
+                                ))
+                            })
+                            .map(|(_, t)| t.clone());
+                        if let Some(tile) = tile {
+                            dependencies.push((
+                                parent,
+                                VisualSource::Image(Arc::downgrade(&tile), Vec::new()),
+                            ));
+                            parents.push((parent, tile));
+                        }
+                    }
+                }
+                let signature = if image.is_none()
+                    && previous.is_some_and(|p| p.sources.contains_key(&VisualKey::Lod(key)))
+                {
+                    previous.unwrap().sources[&VisualKey::Lod(key)].clone()
+                } else {
+                    [
+                        if let Some(image) = &image {
+                            VisualSource::Image(Arc::downgrade(image), dependencies)
+                        } else {
+                            self.visual_source(lod_record(view.dimension, key))
+                        },
+                        VisualSource::Stored(None),
+                        VisualSource::Stored(None),
+                    ]
+                };
+                let reusable = previous.and_then(|p| {
+                    p.sources
+                        .get(&VisualKey::Lod(key))
+                        .filter(|old| old.iter().zip(&signature).all(|(a, b)| a.same(b)))
+                        .map(|_| p)
+                });
+                let tile_pixels = if reusable.is_none() {
+                    prepared_tiles += 1;
+                    if let Some(image) = image {
+                        let mut image = (*image).clone();
+                        let bounds = key.bounds();
+                        let stride = bounds[2] / 16;
+                        for (parent, tile) in &parents {
+                            for i in 0..256 {
+                                if image.coverage[i] == u16::MAX {
+                                    continue;
+                                }
+                                let at = [
+                                    (bounds[0] + (i % 16) as i64 * stride + stride / 2) as i32,
+                                    (bounds[1] + (i / 16) as i64 * stride + stride / 2) as i32,
+                                ];
+                                if let Some(cell) = parent.cell(at) {
+                                    image.fill_partial(
+                                        i,
+                                        &tile.pixels[cell * 4..cell * 4 + 4],
+                                        tile.coverage[cell],
+                                    );
+                                }
+                            }
+                        }
+                        Some(image.pixels)
+                    } else {
+                        Some(vec![0; 1024])
+                    }
+                } else {
+                    None
+                };
+                for row in 0..16 {
+                    let at = ((slot / 64 * 16 + row) * 1024 + slot % 64 * 16) * 4;
+                    if let Some(tile) = &tile_pixels {
+                        pixels[at..at + 64].copy_from_slice(&tile[row * 64..row * 64 + 64]);
+                    } else {
+                        let old = reusable.unwrap();
+                        let s = old.locations[&VisualKey::Lod(key)];
+                        let from = ((s / 64 * 16 + row) * 1024 + s % 64 * 16) * 4;
+                        pixels[at..at + 64].copy_from_slice(&old.pixels[from..from + 64]);
+                    }
+                }
+                sources.insert(VisualKey::Lod(key), signature);
+                let mut fragments = Vec::new();
+                let mut stack = vec![key];
+                while let Some(part) = stack.pop() {
+                    if part != key && selected.contains(&part) {
+                        continue;
+                    }
+                    let bounds = part.bounds();
+                    if ancestors.contains(&part) && part.level > 0 {
+                        for z in 0..2 {
+                            for x in 0..2 {
+                                stack.push(LodKey {
+                                    x: part.x * 2 + x,
+                                    z: part.z * 2 + z,
+                                    level: part.level - 1,
+                                });
+                            }
+                        }
+                    } else {
+                        fragments.push(bounds);
+                    }
+                }
+                let detail = record_key(view.dimension, view.layer, key.x, key.z);
+                let is_detail = key.level == 0
+                    && (self
+                        .tiles
+                        .contains_key(&(view.dimension, view.layer, key.x, key.z))
+                        || self.backing.as_ref().is_some_and(|b| {
+                            let b = b.borrow();
+                            b.store.version(detail).is_some() && !b.unreadable.contains(&detail)
+                        }));
+                if is_detail {
+                    chunks.push([key.x, key.z]);
+                    slots.push(slot);
+                } else {
+                    coarse.push(LodDraw {
+                        key,
+                        uv_origin: [slot % 64 * 16, slot / 64 * 16],
+                        fragments,
+                    });
+                }
+            }
+            coarse.sort_by_key(|d| (std::cmp::Reverse(d.key.level), d.uv_origin[1] / 64));
+            let pages = pixels
+                .chunks(1024 * 64 * 4)
+                .enumerate()
+                .map(|(i, bytes)| {
+                    previous
+                        .and_then(|p| p.pages.get(i))
+                        .filter(|p| p.pixels == bytes)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            Arc::new(AtlasPage {
+                                pixels: bytes.to_vec(),
+                                width: 1024,
+                                height: bytes.len() / 4096,
+                            })
+                        })
+                })
+                .collect();
+            let mut draw_order: Vec<_> = (0..chunks.len()).collect();
+            draw_order.sort_unstable_by_key(|i| slots[*i] / 256);
+            TerrainAtlas {
+                pixels,
+                height,
+                chunks,
+                coarse,
+                region,
+                width: 1024,
+                slots,
+                sources,
+                locations,
+                scope: (view.session, view.dimension, view.layer),
+                prepared_tiles,
+                pages,
+                draw_order,
+            }
+        }
         fn tile_at(&self, key: Key) -> Option<Arc<Tile>> {
             self.tiles.get(&key).map(|(_, t)| t.clone()).or_else(|| {
                 self.backing
@@ -4686,6 +5802,7 @@ pub mod maps {
                 .map(|(_, t)| t.clone())
                 .or_else(|| self.backing.as_ref()?.borrow_mut().get(lod_record(d, key)))
         }
+        #[cfg(test)]
         fn prepare(&mut self, view: &View) -> io::Result<()> {
             let _timing = super::profiling::measure("residency");
             let Some(backing) = &self.backing else {
@@ -4971,9 +6088,11 @@ pub mod maps {
             }
             None
         }
+        #[cfg(test)]
         fn gpu_atlas_fits(&self, view: &View) -> bool {
             !self.visual_keys(view).2
         }
+        #[cfg(test)]
         fn visual_keys(&self, view: &View) -> (Vec<[i32; 2]>, Vec<LodKey>, bool) {
             let region = view.atlas_region();
             let capacity = if self.limit == 0 {
@@ -5109,6 +6228,7 @@ pub mod maps {
             });
             VisualSource::Memory(tile.map(Arc::downgrade).unwrap_or_default())
         }
+        #[cfg(test)]
         fn prepare_terrain_atlas(
             &self,
             view: &View,
@@ -5486,6 +6606,7 @@ pub mod maps {
     }
     type PortalKey = (Dimension, i32, i32, Portal);
     type PortalMap = BTreeMap<PortalKey, [i32; 3]>;
+    type MapProbe = (u64, Dimension, Layer, [i32; 2]);
 
     #[derive(Clone, PartialEq, Eq)]
     struct Binding {
@@ -5503,6 +6624,8 @@ pub mod maps {
         latest: Arc<Mutex<Option<View>>>,
         sampler: Mutex<Option<JoinHandle<()>>>,
         lookahead: Arc<Mutex<Option<View>>>,
+        probe: Arc<Mutex<Option<MapProbe>>>,
+        wake: Mutex<Option<mpsc::SyncSender<Job>>>,
         output: Arc<Mutex<Option<Arc<Frame>>>>,
         session: Arc<AtomicU64>,
         resident: Arc<Mutex<BTreeSet<Key>>>,
@@ -5521,8 +6644,11 @@ pub mod maps {
         pub fn with_directory(directory: Option<std::path::PathBuf>) -> Self {
             let (tx, sampling) = mpsc::sync_channel::<Job>(8);
             let (prepared, rx) = mpsc::sync_channel(8);
+            let wake = prepared.clone();
             let latest = Arc::new(Mutex::new(None::<View>));
             let lookahead = Arc::new(Mutex::new(None::<View>));
+            let probe = Arc::new(Mutex::new(None::<MapProbe>));
+            let requested_probe = probe.clone();
             let prediction = lookahead.clone();
             let output = Arc::new(Mutex::new(None));
             let session = Arc::new(AtomicU64::new(0));
@@ -5618,8 +6744,10 @@ pub mod maps {
                     let mut atlas = None::<AtlasCache>;
                     let mut last_commit = Instant::now();
                     let mut paused = false;
+                    let mut last_probe=None;
                     loop {
-                        let first = match rx.recv_timeout(Duration::from_millis(100)) {
+                        let busy=cache.visual_work()&&input.lock().unwrap_or_else(|e|e.into_inner()).is_some();
+                        let first = match rx.recv_timeout(Duration::from_millis(if busy {1} else {100})) {
                             Ok(job) => Some(job),
                             Err(mpsc::RecvTimeoutError::Timeout) => None,
                             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -5786,21 +6914,48 @@ pub mod maps {
                         if view.session != current || view.session != active.load(Ordering::Acquire) {
                             continue;
                         }
+                        let point=*requested_probe.lock().unwrap_or_else(|e|e.into_inner());
+                        if let Some((session,d,layer,at))=point.filter(|(s,d,l,_)|*s==current&&*d==view.dimension&&*l==view.layer) {
+                            let chunk=[at[0].div_euclid(16),at[1].div_euclid(16)];
+                            let tag=(session,d,layer,chunk);
+                            if last_probe!=Some(tag) {
+                                cache.tile_at((d,layer,chunk[0],chunk[1]));
+                                if layer==Layer::Surface {
+                                    for level in 0..=22 {
+                                        let size=16_i64<<level;
+                                        let k=LodKey{x:i64::from(at[0]).div_euclid(size) as i32,z:i64::from(at[1]).div_euclid(size) as i32,level};
+                                        if let Some(tile)=cache.coarse_at(d,k) && k.cell(at).is_some_and(|i|tile.pixels[i*4+3]!=0){break;}
+                                    }
+                                }
+                                let mut summary=cache.coverage();summary.session=current;
+                                let mut points=BTreeMap::new();
+                                for ((d,_,_,_),tile) in &summary.detailed_data {for (at,kind) in &tile.portals {points.insert((*d,at[0],at[2],*kind),*at);}}
+                                *portal_points.lock().unwrap_or_else(|e|e.into_inner())=points;
+                                *residency.lock().unwrap_or_else(|e|e.into_inner())=summary.detailed.clone();
+                                *coverage_state.lock().unwrap_or_else(|e|e.into_inner())=Arc::new(summary);
+                                last_probe=Some(tag);
+                            }
+                        }
+                        let target=prediction.lock().unwrap_or_else(|e|e.into_inner()).clone().filter(|v|v.session==view.session&&v.dimension==view.dimension&&v.layer==view.layer&&v.large==view.large).unwrap_or_else(||view.clone());
+                        let before=cache.clock;
+                        if !paused && let Err(e)=cache.presentation_step(&view,&target,shading.as_ref()) {
+                            paused=true;
+                            *errors.lock().unwrap_or_else(|e|e.into_inner())=Some(format!("Cache write failed; sampling paused: {e}"));
+                        }
+                        changed|=before!=cache.clock;
                         let same = result
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
                             .as_ref()
                             .is_some_and(|f: &Arc<Frame>| f.view == view);
-                        let prepared_view = prediction.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
-                            .map_or_else(|| view.clone(), |target| view.predictive(target));
-                        if same && !changed && atlas.as_ref().is_none_or(|a| a.terrain.covers(&prepared_view)) {
+                        if same && !changed {
                             continue;
                         }
                         // Camera-only frames reuse immutable GPU data without scanning the
                         // disk index, touching residency or rebuilding coverage snapshots.
                         if !changed && let Some(ready) = &atlas
                             && ready.key == (view.session, view.dimension, view.layer, cache.clock)
-                            && ready.terrain.covers(&prepared_view)
+                            && ready.terrain.covers(&view)
                         {
                             serial += 1;
                             *result.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(Frame {
@@ -5813,19 +6968,16 @@ pub mod maps {
                             }));
                             continue;
                         }
-                        if !paused && let Err(e) = cache.prepare(&prepared_view) {
-                            *errors.lock().unwrap_or_else(|e| e.into_inner()) = Some(e.to_string());
-                        }
                         serial += 1;
-                        let frame = if cache.gpu_atlas_fits(&prepared_view) {
+                        let frame = {
                             let key = (view.session, view.dimension, view.layer, cache.clock);
                             if atlas
                                 .as_ref()
-                                .is_none_or(|a| a.key != key || !a.terrain.covers(&prepared_view))
+                                .is_none_or(|a| a.key != key || !a.terrain.covers(&view))
                             {
                                 atlas = Some(AtlasCache {
                                     key,
-                                    terrain: Arc::new(cache.prepare_terrain_atlas(&prepared_view, atlas.as_ref().map(|a| a.terrain.as_ref()), shading.as_ref())),
+                                    terrain: Arc::new(cache.visual_atlas(&view,&target,atlas.as_ref().map(|a| a.terrain.as_ref()))),
                                 });
                             }
                             let terrain = atlas.as_ref().unwrap().terrain.clone();
@@ -5837,9 +6989,6 @@ pub mod maps {
                                 known: terrain.chunks.len() + terrain.coarse.len(),
                                 atlas: Some(terrain),
                             })
-                        } else {
-                            atlas = None;
-                            Arc::new(cache.render(view, serial))
                         };
                         if let Some(backing) = &cache.backing
                             && let Some(error) = backing.borrow_mut().error.take()
@@ -5859,6 +7008,7 @@ pub mod maps {
                             *portal_points.lock().unwrap_or_else(|e| e.into_inner()) = points;
                             *residency.lock().unwrap_or_else(|e| e.into_inner()) = summary.detailed.clone();
                             *coverage_state.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(summary);
+                            cache.overviews.displayed|=frame.known>0;
                             *result.lock().unwrap_or_else(|e| e.into_inner()) = Some(frame);
                         }
                     }
@@ -5873,6 +7023,8 @@ pub mod maps {
                 worker: Mutex::new(worker),
                 sampler: Mutex::new(sampler),
                 lookahead,
+                probe,
+                wake: Mutex::new(Some(wake)),
                 latest,
                 output,
                 session,
@@ -6007,17 +7159,39 @@ pub mod maps {
         pub fn request(&self, view: View) {
             self.request_ahead(view.clone(), view);
         }
+        pub fn inspect(&self, session: u64, dimension: Dimension, layer: Layer, at: [i32; 2]) {
+            let changed = {
+                let mut probe = self.probe.lock().unwrap_or_else(|e| e.into_inner());
+                let chunk = at.map(|v| v.div_euclid(16));
+                let changed = probe.as_ref().is_none_or(|(s, d, l, p)| {
+                    (*s, *d, *l, p.map(|v| v.div_euclid(16))) != (session, dimension, layer, chunk)
+                });
+                *probe = Some((session, dimension, layer, at));
+                changed
+            };
+            if changed {
+                self.wake();
+            }
+        }
+        fn wake(&self) {
+            if let Some(wake) = self.wake.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+                let _ = wake.try_send(Job::Wake);
+            }
+        }
         pub fn request_ahead(&self, view: View, target: View) {
-            *self.lookahead.lock().unwrap_or_else(|e| e.into_inner()) = Some(target);
+            let target_changed = {
+                let mut ahead = self.lookahead.lock().unwrap_or_else(|e| e.into_inner());
+                let changed = ahead.as_ref() != Some(&target);
+                *ahead = Some(target);
+                changed
+            };
             let mut latest = self.latest.lock().unwrap_or_else(|e| e.into_inner());
-            if latest.as_ref() == Some(&view) {
+            if latest.as_ref() == Some(&view) && !target_changed {
                 return;
             }
             *latest = Some(view);
             drop(latest);
-            if let Some(tx) = self.tx.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-                let _ = tx.try_send(Job::Wake);
-            }
+            self.wake();
         }
         pub fn frame(&self) -> Option<Arc<Frame>> {
             self.output
@@ -6035,6 +7209,7 @@ pub mod maps {
             {
                 let _ = sampler.join();
             }
+            self.wake.lock().unwrap_or_else(|e| e.into_inner()).take();
             if let Some(worker) = self.worker.lock().unwrap_or_else(|e| e.into_inner()).take() {
                 let _ = worker.join();
             }

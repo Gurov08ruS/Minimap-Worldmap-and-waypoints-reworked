@@ -123,7 +123,33 @@ not change schema 2 bytes and are metadata outside the terrain RAM budget.
 It does not materialize historical tile payloads, but metadata and commit work
 still grow with file size. A bounded
 index-page cache and incremental COW index updates remain future optimizations.
-GPU pages can stream visible tiles through the bounded read LRU without retaining
-all decoded payloads. Views beyond the separate visual budget still rasterize
-the requested pixels on the worker. This can increase worker I/O
-and latency on slow disks; FPS and huge-world behaviour require game profiling.
+GPU pages stream derived world-space images through a separate bounded visual
+cache; wide views select reduced levels instead of rasterizing screen pixels.
+Atlas assembly performs no file I/O. Canonical hover metadata is fetched
+asynchronously. Memory and cooperative work limits are in PERFORMANCE.md.
+
+## Derived visual records (0.6.1)
+
+Schema remains 2. Keys of kind 3 store surface overviews; kind 4 stores
+`Below(layer_y)` overviews. X/Z and level identify a 16×2^level block footprint,
+with level 0..22. Each rebuildable record is exactly 1544 bytes: eight header
+bytes `OVR1`, version 1 (u32 LE), 1024 RGBA bytes, then 256 u16 LE coverage
+values. Coverage 0 is unknown and 65535 fully known. Known transparent void is
+therefore distinct from missing terrain. Parent images reduce four children;
+unknown coverage never averages as black. Native LOD fills uncovered surface
+samples without overwriting detail. Canonical TIL1 records remain unchanged.
+
+Key `[0, 7, 0, 0, 0, 0]` stores the visual checkpoint. Header `OVC1` plus u32 LE
+version 1 occupies bytes 0..8; the expected committed generation is u64 LE at
+8..16. Bytes 16/17/18 are done/stale/has-cursor flags; byte 19 is reserved. The
+six i32 LE cursor fields occupy 20..44, followed by a u32 LE dirty count at
+44..48 and that many 24-byte record keys. The dirty list is bounded to 32768;
+overflow or stale rebuild checkpoints request a safe full restart of backfill.
+The marker is committed atomically with canonical edits and derived updates.
+
+A missing or generation-mismatched checkpoint invalidates old derived images
+until rebuilt. An older writer can read canonical records and ignores the new
+kinds; if it commits, the generation mismatch prevents the new reader from
+trusting stale visuals. No old-writer support for rendering these records is
+claimed. Corrupt derived payloads are repairable without deleting canonical
+terrain. Backfill and repairs use the same file, with no sidecar or cache reset.

@@ -1,13 +1,10 @@
 # Minimap, Worldmap and waypoints reworked
 
 A native Horizon mod by daniliammo, continued as [Gurov08ruS](https://github.com/Gurov08ruS).
-Version **0.6.0** adds 3D-world waypoint markers with hover labels, death
-waypoints, compass direction letters, and a persistent `.mwwr` map container
-with a Map RAM budget. Earlier releases added 67 individual biome icons at
-16×16, retained biome names after chunk unload, LOD terrain caching, German
-localization, coloured waypoints and Show on map. The full-screen map keeps
-terrain detail at every zoom and skips rendering the 3D world behind it.
-Old unscoped waypoints from 0.3.x are deleted on first load; preferences remain.
+Version **0.6.1** improves distant LOD loading and zoom transitions with persistent
+world-space overview tiles, target prefetch and reusable GPU pages. It retains
+the per-world terrain container, 3D-waypoint markers, death waypoints and biome
+icons from earlier releases. See [CHANGELOG.md](CHANGELOG.md).
 
 <p align="center">
   <img src="assets/icon.png" width="128" alt="Minimap, Worldmap and waypoints reworked mod icon">
@@ -18,6 +15,10 @@ Old unscoped waypoints from 0.3.x are deleted on first load; preferences remain.
 ### World map
 
 ![Full-screen world map with dimension tabs and coordinates](assets/screenshots/world-map.png)
+
+### Long-distance map (1024-chunk LOD distance)
+
+![World map at 1024-chunk LOD distance](assets/screenshots/world-map-long-distance.png)
 
 ### Whole-map overview
 
@@ -215,7 +216,7 @@ defaulting to 64 MiB. It budgets retained terrain, the LRU read cache and pendin
 record bytes; active display/coverage snapshots, queued game snapshots, disk-index
 metadata and GPU textures are additional memory. It is not a cap on the whole
 game process. Off-screen tiles are evicted and reloaded on demand; large views
-use a paged raster fallback rather than loading the entire explored world.
+stream persistent world-space overview tiles rather than loading the entire explored world.
 A write failure pauses sampling and retains accepted unsaved records instead of
 evicting them. The map and mod settings expose the error. A busy container is
 left untouched and uses a bounded temporary RAM map, with a visible warning.
@@ -231,8 +232,10 @@ It neither requests extra terrain nor drives LOD generation. LOD is stored as
 layer. It does not substitute surface terrain for caves or Nether underground
 layers. Detailed cached chunks always win, including known void; newer LOD never
 overwrites them. Unchanged CPU snapshots are ignored; a changed snapshot can fill unknown LOD
-cells, while existing samples and all detailed data keep priority. Up to four
-LOD snapshots are queued every 250 ms, prioritizing the map camera. The disk repository retains off-screen terrain; RAM retention is budgeted by the Map RAM slider.
+cells, while existing samples and all detailed data keep priority. Up to eight
+LOD snapshots are queued every 50 ms, prioritizing visible coarse coverage before
+local detail. Snapshot identity is tracked independently of RAM coverage so
+evicted tiles cannot repeatedly starve distant LOD. The disk repository retains off-screen terrain; RAM retention is budgeted by the Map RAM slider.
 Work queues and snapshot submission rates remain bounded. Approximate surface
 Y and biome names are retained with LOD samples, independently of Horizon’s
 current camera/frustum; approximate heights are marked with `≈`.
@@ -270,37 +273,34 @@ future stages in [PLAN.md](PLAN.md).
 
 The displayed camera is eased: drag and zoom targets are approached over a few
 frames, zoom keeps the world point under the cursor fixed, and markers interpolate
-player positions. The large map draws block-resolution chunk tiles as clipped,
-textured GPU quads through Horizon's existing HUD pipeline. Moving or zooming
-within the uploaded coverage changes only geometry. There are no zoom-dependent
-texture detail levels. When a wider area is needed, the camera continues moving immediately; newly
-exposed areas appear when their terrain is ready. Raster fallback also reprojects
-the existing image during pan and zoom without waiting for the worker. Pointer coordinates
-and overlays use that same displayed camera. Texture uploads and their matching
-geometry are published together; a failed upload preserves the previous frame.
+player positions. Both maps draw world-space tiles through Horizon's portable
+HUD renderer. The worker prefetches the camera's destination and zoom level.
+Ready coarse coverage remains visible until the required finer tiles are ready;
+ready pages also survive terrain-payload eviction. Camera movement changes
+geometry immediately, without waiting for sampling or disk reads. Pointer
+coordinates and overlays use the same displayed camera.
 
-The worker retains stable visual slots and prepares only changed terrain and
-neighbours affected by relief. Small images use changed-band uploads into the
-shared 1024×1024 slot. Larger views use independent 1024×64 GUI texture pages
-through Horizon's portable HUD renderer; crossing 4,096 tiles alone no longer
-forces CPU rasterization. Unchanged pages retain their textures. A region index
-selects disk keys without scanning the full history, and bounded lookahead
-includes the camera's target and target zoom. Sampling, storage and dirty-tile
-shading use separate bounded worker stages. Off-screen terrain stays in the
-container and is read on demand. Both maps use GPU tile geometry when the
-selected coverage fits the visual admission budget. The minimap rotates that
-geometry and clips it to a square or a 64-sided circle (under 0.16 GUI pixel
-boundary error at size 256), reusing its texture during player rotation.
-Views exceeding the visual budget retain the CPU fallback. Nearest texture sampling keeps
-block boundaries sharp; unknown terrain is transparent. Detailed chunks keep one
-texel per block and LOD textures keep their original sample resolution at every
-zoom. Distant smoothing and its setting have been removed; legacy
-`smooth_worldmap` preferences are ignored. Visual admission ranges from 4,096 to
-32,768 source tiles with the RAM setting (16,384 at its 64 MiB default).
-Presentation images, CPU/GPU pages and old/new publication generations consume
-additional memory beyond the terrain payload budget. Relief reads neighbouring
-chunks to preserve lighting across tile edges. See [PERFORMANCE.md](PERFORMANCE.md)
-for measurements, limitations and further optimization options.
+Derived 16×16 overview tiles are reduced from known terrain and persisted in the
+same `.mwwr` container. They distinguish unknown samples from known transparent
+void. Original detailed terrain keeps one texel per block when zoomed in, and
+canonical Horizon LOD samples keep their original extent and resolution. Wide
+views select reduced tiles rather than rasterizing a screen image. Existing
+caches build the visual hierarchy in bounded background steps on first use;
+subsequent opens read ready visual tiles. Pending rebuilds resume after restart.
+No cache clearing is required.
+
+The worker retains stable visual slots and independent 1024×64 GUI texture pages;
+unchanged pages keep their textures. A spatial index selects keys by region and
+resolution. Sampling, storage and dirty-tile shading use separate bounded worker
+stages, and hover metadata is loaded asynchronously. Atlas assembly performs no
+disk reads. Both maps use nearest texture sampling and transparent unknown
+terrain. The minimap rotates the tile geometry and clips it to its configured
+shape. Derived visuals use an additional 32–64 MiB cache target, with bounded
+pins for requested coverage; at most 32,768 visual tiles are admitted. Images,
+CPU/GPU pages, metadata and overlapping publication generations are additional
+to the terrain RAM budget. Slow storage or unavailable game terrain can still
+delay new detail; live-game frame latency has not been measured. See
+[PERFORMANCE.md](PERFORMANCE.md) for budgets, measurements and remaining work.
 
 Waypoints are stored in the same `settings.ini`, keyed by Horizon's stable world
 identity, dimension and X/Z. Single-player saves use the save folder (not the
@@ -402,7 +402,7 @@ python3 tools/package.py
 
 Fetch the pinned Mixins checkout's dependencies with `cargo fetch --locked`
 before the offline checks. The output is
-`target/minimap_worldmap_waypoints_reworked-0.6.0.hnmod`.
+`target/minimap_worldmap_waypoints_reworked-0.6.1.hnmod`.
 Check it with `cargo horizon-mod check <file>` using Horizon's official
 `cargo-horizon-mod` tool. The [validation workflow](.github/workflows/validate.yml)
 runs the standalone tests, source audit, real client check and tests, and official

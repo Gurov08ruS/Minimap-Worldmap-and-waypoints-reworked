@@ -7,6 +7,39 @@ macro_rules! define_tests {
     () => {
         mod render_tests {
             #[test]
+            fn lod_selection_prefers_visible_overview_before_local_detail() {
+                use horizon_client::lod::minimap_lod_adapter::priority;
+                assert!(
+                    priority(0, 0, 12, [0.; 2], [1024.; 2])
+                        < priority(0, 0, 0, [0.; 2], [1024.; 2])
+                );
+                assert!(
+                    priority(0, 0, 0, [0.; 2], [1024.; 2])
+                        < priority(100, 100, 12, [0.; 2], [1024.; 2])
+                );
+            }
+            #[test]
+            fn lod_dedup_retains_offscreen_sources_without_ram_coverage() {
+                let mut state = State::default();
+                let columns = Arc::new(Vec::<horizon_client::lod::Column>::new());
+                let key = maps::LodKey {
+                    x: 2000,
+                    z: -4000,
+                    level: 12,
+                };
+                state.lod_sources.insert(
+                    (Dimension::Overworld, key),
+                    (Arc::downgrade(&columns), Instant::now()),
+                );
+                assert!(
+                    known_lod_sources(&state, Dimension::Overworld)
+                        .contains_key(&(2000, -4000, 12))
+                );
+                assert!(known_lod_sources(&state, Dimension::Nether).is_empty());
+                drop(columns);
+                assert!(known_lod_sources(&state, Dimension::Overworld).is_empty());
+            }
+            #[test]
             fn map_pages_use_ordered_picture_runs_and_share_frame_handles() {
                 use horizon_client::hud::{Blend, minimap_pages};
                 let image = minimap_pages::create(16, 16, vec![255; 1024]);

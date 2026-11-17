@@ -9,7 +9,7 @@ listed by `mods/<id>.toml`.
 Copy this folder's contents into that registry checkout, then merge
 `entry-fragment.toml` into the existing
 `mods/minimap_worldmap_waypoints_reworked.toml` entry. The icon is a 384×384
-PNG under the 256 KiB limit; each screenshot is 1920×1080 and under 1 MiB.
+PNG under the 256 KiB limit; screenshots are 1920×1080 or 2560×1440 and under 1 MiB.
 
-After the registry build and the client's index refresh, the icon and these six
+After the registry build and the client's index refresh, the icon and these seven
 screenshots appear on the mod's page in Horizon.

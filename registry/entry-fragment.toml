@@ -1,5 +1,6 @@
 icon = "icons/minimap_worldmap_waypoints_reworked.png"
 screenshots = [
+  "screenshots/minimap_worldmap_waypoints_reworked/world-map-long-distance.png",
   "screenshots/minimap_worldmap_waypoints_reworked/world-map.png",
   "screenshots/minimap_worldmap_waypoints_reworked/world-map-overview.png",
   "screenshots/minimap_worldmap_waypoints_reworked/nether-portal.png",

@@ -343,6 +343,14 @@ struct State {
     info: Option<Menu>,
     info_scroll: usize,
 }
+fn known_lod_sources(state: &State, dimension: Dimension) -> BTreeMap<(i32, i32, u8), usize> {
+    state
+        .lod_sources
+        .iter()
+        .filter(|((d, _), (source, _))| *d == dimension && source.strong_count() != 0)
+        .map(|((_, key), (source, _))| ((key.x, key.z, key.level), source.as_ptr() as usize))
+        .collect()
+}
 impl Default for State {
     fn default() -> Self {
         Self {
@@ -2804,27 +2812,27 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
     state.camera.advance(dt);
     state.marker = maps::follow_point(state.marker, position, dt);
     state.lod_elapsed += dt;
-    if state.lod_elapsed >= 0.25 {
+    if state.lod_elapsed >= 0.05 {
         state.lod_elapsed = 0.0;
         if let Some(lod) = game.lod.as_ref() {
-            let coverage = controller.maps.coverage();
-            let known = coverage
-                .lod
-                .iter()
-                .filter(|(d, _, _)| *d == dimension)
-                .filter_map(|(_, key, _)| {
-                    state
-                        .lod_sources
-                        .get(&(dimension, *key))
-                        .map(|(source, _)| ((key.x, key.z, key.level), source.as_ptr() as usize))
-                })
-                .collect();
-            for (key, columns) in horizon_client::lod::minimap_lod_adapter::snapshots(
-                lod,
-                &known,
-                state.camera.center,
-                4,
-            ) {
+            let _timing = runtime::profiling::measure("lod-snapshot-pick");
+            state
+                .lod_sources
+                .retain(|_, (source, _)| source.strong_count() != 0);
+            let known = known_lod_sources(&state, dimension);
+            let span = controller
+                .maps
+                .requested()
+                .filter(|v| v.dimension == dimension)
+                .map_or([256.; 2], |v| v.span);
+            let focus = if selected == dimension {
+                state.camera.target
+            } else {
+                [player.x, player.z]
+            };
+            for (key, columns) in
+                horizon_client::lod::minimap_lod_adapter::snapshots(lod, &known, focus, span, 8)
+            {
                 let source = Arc::downgrade(&columns);
                 let biome_palette = game
                     .world_biomes
@@ -3761,6 +3769,20 @@ fn draw(
             && f.view.session == state.session
     });
     if let Some(frame) = valid {
+        if let Some(mouse) = mouse {
+            let at = frame.view.block_at(
+                f64::from((mouse[0] - rect[0]) / rect[2]) * frame.view.width as f64,
+                f64::from((mouse[1] - rect[1]) / rect[3]) * frame.view.height as f64,
+            );
+            runtime::initialize(game.native_data_dir(runtime::MOD_ID))
+                .maps
+                .inspect(
+                    frame.view.session,
+                    frame.view.dimension,
+                    frame.view.layer,
+                    at,
+                );
+        }
         let mut terrain_visible = frame.known > 0;
         if let Some(atlas) = &frame.atlas {
             terrain_visible = false;
