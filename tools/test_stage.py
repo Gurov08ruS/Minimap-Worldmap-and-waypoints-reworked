@@ -1,45 +1,30 @@
 #!/usr/bin/env python3
-"""Audit the real pinned export, deterministic staging and unchanged checkout."""
-import argparse
+"""Audit the actual SDK-compiled patch and its pinned, untouched source export."""
 import json
-from pathlib import Path
 import subprocess
-import tempfile
+import sys
 import horizon
-from test_template import audit, snapshot, assert_plan
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--horizon', type=Path, default=horizon.ROOT.parent/'horizon')
-    args = parser.parse_args()
-    checkout = args.horizon.resolve()
-    status = subprocess.check_output(['git', '-C', str(checkout), 'status', '--porcelain'])
-    # The source checkout may be sparse. The pinned archive is validated by
-    # horizon.stage; do not materialize missing files in the original checkout.
-    def checkout_bytes(path):
-        file = checkout/path
-        return file.read_bytes() if file.is_file() else None
-    before = {p: checkout_bytes(p) for p in horizon.COMPAT['source_sha256']}
-    (horizon.ROOT/'target').mkdir(exist_ok=True)
-    with horizon.lock(horizon.ROOT/'target/stage.lock'):
-        with tempfile.TemporaryDirectory(prefix='native-stage-test-', dir=horizon.STAGES.parent) as scratch:
-            root = Path(scratch)
-            output, changed = horizon.mixin_stage(checkout, root)
-            assert changed
-            first = snapshot(output)
-            second, changed = horizon.mixin_stage(checkout, root)
-            assert second == output and not changed and first == snapshot(output)
-            plan = json.loads((root/'plan.json').read_text())
-            assert plan['schema'] == horizon.COMPAT['mixin_schema']
-            assert_plan(plan)
-            original = next((root/'original').glob('*/.horizon-mod-template.json')).parent
-            audit(original, output, root/'plan.json')
-    assert all(checkout_bytes(p) == content for p, content in before.items())
-    assert subprocess.check_output(['git', '-C', str(checkout), 'status', '--porcelain']) == status
-    print(json.dumps({'status': 'ok', 'original_checkout_unchanged': True,
-                      'only_planned_asts_changed': True, 'deterministic_bytes_and_mtimes': True}, indent=2))
+    args = horizon.parser().parse_args(['check'] + sys.argv[1:])
+    original = horizon.checkout_snapshot(args.horizon)
+    if horizon.REPORT.exists():
+        record = json.loads(horizon.REPORT.read_text())
+        current = horizon.package.package()['sha256']
+        if record['artifact']['sha256'] != current:
+            record = horizon.build(args)
+    else:
+        record = horizon.build(args)
+    report = horizon.audit(record)
+    if original != horizon.checkout_snapshot(args.horizon):
+        raise ValueError('original checkout changed during the SDK audit')
+    report['original_checkout_unchanged'] = True
+    print(json.dumps(report, indent=2))
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except (ValueError, subprocess.CalledProcessError) as error:
+        raise SystemExit(str(error)) from error

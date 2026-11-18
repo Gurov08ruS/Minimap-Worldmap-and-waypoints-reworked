@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.7.0 — 2026-11-18, native SDK migration
+
+- Port to the signed native SDK for Nightly `0b14f8a` / Rust 1.99.1 and the flat
+  `.hmod` format. Compile only the mod and function copies against the prebuilt game.
+- Replace renderer-specific controls/settings patches with SDK registrations;
+  preserve preferences, waypoints, terrain, far samples and GUI-scale semantics.
+- Add configurable two-letter waypoint initials for matching first letters and
+  similar colours, or any colours, consistently on maps and in 3D.
+- Add an asynchronous cache-file catalog with world/server display names, local
+  icons, sizes, compatibility states and non-destructive image rebuilding.
+- Track image revisions and retain update offers across saves/restarts; refuse
+  unknown newer formats. Compression and canonical conversion remain unavailable.
+- Keep LOD biome blending at a fixed world-space radius, preserving mangrove
+  water tint; share detailed-water opacity and retain water without a known floor.
+- Approximate omitted snow layers and cold exposed water from biome climate and
+  elevation; retain explicit snow/ice colours and detailed-terrain priority.
+- Refresh old LOD colours from new samples once per palette revision, retaining
+  fallback coverage through partial upgrades without deleting saved terrain.
+
 ## 0.6.1 — 2026-11-17
 
 - Prioritize visible far LOD and retain snapshot identities across RAM eviction,

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 fn map_scroll(
     game: &crate::game::Game<'_>,
-    screen: &crate::mod_api::NativeScreenView<'_>,
+    screen: &mod_api::ScreenView<'_>,
     scroll: [f64; 2],
     canceled: &mut bool,
 ) {

@@ -3,7 +3,12 @@
 set -Eeuo pipefail
 
 project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-horizon_dir="${XDG_DATA_HOME:-$HOME/.local/share}/horizon"
+case "$(uname -s)" in
+    Darwin) horizon_default="$HOME/Library/Application Support/horizon" ;;
+    MINGW*|MSYS*|CYGWIN*) horizon_default="${APPDATA:-$HOME/AppData/Roaming}/horizon" ;;
+    *) horizon_default="${XDG_DATA_HOME:-$HOME/.local/share}/horizon" ;;
+esac
+horizon_dir="${HORIZON_HOME:-$horizon_default}"
 horizon_explicit=false
 build_game=false
 instance_name=""
@@ -17,7 +22,7 @@ Usage: ./install-horizon.sh [options]
 Packages the current mod, installs it into horizon-native-mods and enables
 only this mod in horizon-mods.txt. Does not compile or launch Horizon by default.
 
-  --horizon-dir DIR  Game directory (default: ~/.local/share/horizon)
+  --horizon-dir DIR  Game directory (default: Horizon platform directory or HORIZON_HOME)
   --build            Also compile the selected instance; requires --instance
   --instance NAME    Horizon launcher instance to build
   --launcher PATH    Path to horizon-launcher (otherwise detected)
@@ -55,7 +60,7 @@ if $build_game; then
     if [[ -z "$launcher_path" ]]; then
         launcher_path="$(command -v horizon-launcher || true)"
         if [[ -z "$launcher_path" ]]; then
-            for candidate in "$HOME/Загрузки/horizon-launcher-linux-x86_64/horizon-launcher" "$HOME/Downloads/horizon-launcher-linux-x86_64/horizon-launcher"; do
+            for candidate in "$HOME/Загрузки/horizon-launcher-linux-x86_64/horizon-launcher" "$HOME/Downloads/horizon-launcher-linux-x86_64/horizon-launcher" "/Applications/Horizon.app/Contents/MacOS/horizon-launcher" "$HOME/Applications/Horizon.app/Contents/MacOS/horizon-launcher"; do
                 if [[ -x "$candidate" ]]; then launcher_path="$candidate"; break; fi
             done
         fi
@@ -73,10 +78,7 @@ fi
 metadata="$(python3 - "$project_dir" <<'PY'
 import pathlib, sys, tomllib
 root = pathlib.Path(sys.argv[1])
-manifests = list((root / 'mixins').glob('*/horizon-mixin.toml'))
-if len(manifests) != 1:
-    raise SystemExit('Expected exactly one mod manifest')
-mod = tomllib.loads(manifests[0].read_text())['mod']
+mod = tomllib.loads((root / 'horizon-mod.toml').read_text())
 print(mod['id'])
 print(mod['version'])
 PY
@@ -89,26 +91,43 @@ mod_version="$(printf '%s\n' "$metadata" | sed -n '2p')"
 
 printf 'Сборка архива %s %s…\n' "$mod_id" "$mod_version"
 python3 "$project_dir/tools/package.py"
-artifact="$project_dir/target/$mod_id-$mod_version.hnmod"
+artifact="$project_dir/target/$mod_id-$mod_version.hmod"
 [[ -f "$artifact" ]] || fail "Архив не создан: $artifact"
 
 destination="$horizon_dir/horizon-native-mods"
 mkdir -p -- "$destination"
-installed="$destination/$mod_id.hnmod"
+installed="$destination/$mod_id.hmod"
 [[ ! -d "$installed" ]] || fail "Вместо файла мода обнаружен каталог: $installed"
 temporary="$(mktemp "$destination/.$mod_id.install.XXXXXX")"
 install -m 0644 -- "$artifact" "$temporary"
 cmp -s -- "$artifact" "$temporary" || fail 'Проверка скопированного архива не прошла'
 python3 - "$temporary" "$mod_id" <<'PY'
-import json, sys, zipfile
+import sys, tomllib, zipfile
 with zipfile.ZipFile(sys.argv[1]) as archive:
     if archive.testzip() is not None:
         raise SystemExit('Archive CRC verification failed')
-    if json.loads(archive.read('horizon-native.json'))['id'] != sys.argv[2]:
+    if tomllib.loads(archive.read('horizon-mod.toml').decode())['id'] != sys.argv[2]:
         raise SystemExit('Unexpected mod ID in archive')
 PY
 mv -f -- "$temporary" "$installed"
 temporary=""
+
+# Retain this mod's retired source archive outside the launcher's file filter.
+python3 - "$destination" "$mod_id" <<'PYOLD'
+import json, pathlib, sys, zipfile
+folder, mod_id = pathlib.Path(sys.argv[1]), sys.argv[2]
+old = folder / (mod_id + '.hnmod')
+if old.is_file() and not old.is_symlink():
+    with zipfile.ZipFile(old) as archive:
+        ours = json.loads(archive.read('horizon-native.json')).get('id') == mod_id
+    if ours:
+        backup = old.with_suffix('.hnmod.legacy')
+        index = 1
+        while backup.exists():
+            backup = old.with_suffix('.hnmod.legacy.' + str(index))
+            index += 1
+        old.rename(backup)
+PYOLD
 
 python3 - "$horizon_dir" "$mod_id" <<'PY'
 import os, pathlib, stat, sys, tempfile

@@ -1,5 +1,84 @@
 # Validation
 
+## 0.7.0 SDK migration — 2026-11-18
+
+Local Linux / Rust 1.99.1, signed SDK `0b14f8a`, Mixins `e59da90`, launcher
+0.2.78. Historical 0.6.1 artifacts remain unchanged.
+
+- Standalone workspace fmt, clippy with warnings denied and tests pass: **118**
+  runtime cases, one source-audit case; three manual benchmarks ignored.
+- The same **118** runtime cases pass inside the SDK mod crate against its fetched
+  API source, with three benchmarks ignored. Regression coverage includes SDK
+  choice persistence, explicit defaults during async loading, labels, cache
+  compatibility and colour revisions.
+- Official `.hmod` check passes. Packaging is deterministic and every payload
+  matches its source. The installer fixture preserves unrelated mods/bindings
+  and retains the retired archive outside the launcher's mod filter.
+- The launcher builds the actual installed archive against the signed prebuilt
+  engine. All **15** declared injections compile. The Mixins plan/apply audit
+  restores the original generated function mirrors, and pinned source hashes
+  and original checkout snapshots remain unchanged. The SDK's generated native
+  entry appended to the mod library is checked separately.
+- A real disposable SDK-test world was opened using the user's installed Nightly
+  and prepared resources. The live map/LOD view and Russian overlays were captured;
+  GUI entry subscriptions were corrected after the initial invisible-overlay run.
+  The user also confirmed that the migrated mod works in this live instance.
+  These are functional checks, not a controlled performance benchmark.
+- Five base SDK language catalogs and their regional aliases ship with the mod.
+  The original shared data directory is retained; testing writes only its owned
+  instance/cache state, not existing player worlds.
+- Rust 1.95 was removed after validation on 1.99.1. Toolchain pins and CI now use
+  1.99.1. The updated GitHub workflows have not been executed remotely yet.
+
+Release archive: `minimap_worldmap_waypoints_reworked-0.7.0.hmod`, **371,179 bytes**,
+SHA-256 `e467da230b56a6a3e04ff284d822a215c2882ca0955f5a62283190e37a4501e0`.
+Both author signatures verify, and the pinned official package checker reports
+`signed: true`. Final template, native build/AST staging and SDK runtime tests
+were repeated on these exact archive bytes before publication.
+
+The old 18 renderer/UI and nine binding-widget fixtures are archived under
+`tests/legacy_adapter/`; they are not modern SDK passes. macOS/Windows execution,
+combinations with other mods and exhaustive visual biome/FPS checks remain
+unverified. The optional upstream catalog-discovery command failed its path
+normalizer; the validated normal build route does not use it. See
+[FORMAT_MIGRATION.md](FORMAT_MIGRATION.md).
+
+## Pre-migration development on the legacy pin — 2026-11-18
+
+Development sources on top of `bb99f45`; the published 0.6.1 artifact below is
+unchanged. Validation uses Linux/Rust 1.95.0 and the same pinned Horizon
+`9f42064` / Mixins `d9c83d7` sources.
+
+- Workspace fmt, clippy with warnings denied and locked offline tests pass:
+  115 runtime tests plus one source-audit test, with three benchmarks ignored.
+  Changed injected sources pass direct rustfmt checks.
+- Final native client check and 115 injected runtime tests pass; all 18 client
+  adapter/UI tests and nine binding UI tests pass. At that stage, module payloads
+  matched the then-current sources.
+- Added regressions verify bounded read-only catalog discovery, recovering the
+  second checked header, asynchronous name resolution, refusing busy/missing/
+  uninitialized/mismatched files, preservation of future formats and canonical
+  terrain, durable upgrade offers, and image rebuild resumption after reopen.
+- Colour regressions cover cold natural surfaces/canopies, preserving supplied
+  ice/snow/artificial colours, shared water opacity, water without a known floor,
+  one-time palette upgrades, partial fallback coverage and later cell updates.
+- Native UI fixtures check small viewport layout, bounded icon input, biome
+  climate at low/high elevation and fixed-world-radius mangrove water blending.
+  The biome test uses generated fixture data, not a live-world visual capture.
+- Waypoint-label regressions cover Cyrillic initials, similar/different colours,
+  world/dimension separation, skull exclusion, colour changes, renames, removal,
+  preference persistence/merging/reset and the 3D popup's expanded-marker gap.
+- Template integration exercises the new settings-button dispatch. Deterministic
+  AST staging audits the original checkout and changes only planned ASTs.
+
+That earlier run had no live-game screenshot/GPU/FPS run, macOS/Windows execution
+or newer-Horizon compatibility validation. Snow/ice inferred from incomplete LOD
+is approximate. Existing historical colours can only be refreshed where new
+Horizon samples are available; canonical detailed terrain remains authoritative.
+Compression, deletion and canonical-format conversion are not implemented.
+These earlier results apply only to the pinned legacy native integration.
+The modern SDK validation is recorded above.
+
 ## 0.6.1 — distant LOD and visual streaming, 2026-11-17
 
 Local Linux validation with Rust 1.95.0, pinned Horizon `9f42064` and Mixins

@@ -1,6 +1,6 @@
 # Map container, version 2
 
-The running mod uses one `cache/<identity-hash>.mwwr` file per save or public
+The running mod uses one `cache/<kind>-<readable-name>-<identity-hash>.mwwr` file per save or public
 server address. All dimensions and sampled layers share it. The identity uses
 the existing `save:` / `server:` namespaces. Two deterministic 64-bit hashes
 make a portable filename; the exact UTF-8 identity is checked inside each root,
@@ -44,8 +44,8 @@ A damaged payload is isolated when requested; unrelated records remain readable.
 Terrain keys are `[dimension, kind, layer_y, x, z, level]`. Dimension codes are
 explicitly 1 = Overworld, 2 = Nether, 3 = End. Kind 0 is a detailed surface;
 kind 1 is a detailed `Below(layer_y)` sample; kind 2 is LOD. Detail X/Z are chunk
-coordinates, LOD X/Z and level retain their original footprint. Surface and LOD
-use layer_y = 0; detail uses level = 0. Existing Horizon custom dimensions are
+coordinates, LOD X/Z and level retain their original footprint. Surface uses layer_y = 0; detail uses level = 0. For LOD, key field 2 now
+identifies the colour-palette revision (legacy 0, current 1), not a height layer. Existing Horizon custom dimensions are
 still mapped by the adapter's existing dimension policy; this format does not
 claim support for identifying arbitrary custom dimensions.
 
@@ -153,3 +153,44 @@ kinds; if it commits, the generation mismatch prevents the new reader from
 trusting stale visuals. No old-writer support for rendering these records is
 claimed. Corrupt derived payloads are repairable without deleting canonical
 terrain. Backfill and repairs use the same file, with no sidecar or cache reset.
+
+
+## Cache catalog and revision offers (development)
+
+The catalog worker performs read-only discovery of up to 4096 regular `.mwwr`
+files, reporting truncation beyond that limit. It reads at most two 4096-byte
+headers per file, validates CRCs and selects the highest checked generation.
+A compatibility label describes the header, not a complete index/payload audit.
+No catalog scan creates, renames or deletes containers. Names and icons come
+from local game metadata on this worker; absent sources fall back to identity
+and a generic icon. No network requests or writes to player resources are made.
+The terrain worker remains the sole writer. A rebuild operation uses its existing
+active lease, or acquires an existing inactive file without creation. Busy,
+missing, uninitialized, incompatible and mismatched files are refused. Rebuilding
+invalidates only derived visual state and checkpoints it in the same container;
+canonical terrain, dimensions and height layers remain intact.
+
+Schema remains 2 and TIL1 payload layout is unchanged. Header bytes 12..16 now
+hold u32 LE flags (bit 0: image-upgrade offer pending); bytes 44..48 hold u32 LE
+visual revision, currently 2. Legacy zero denotes revision 1. Older image
+revisions trigger derived backfill and a persistent rebuild offer, not deletion.
+Ordinary commits retain the offer flag; an explicit rebuild clears it atomically.
+Future unknown schema, image revisions or flags are refused for writing. No
+canonical-format converter or Zstd codec is implemented; the manager says so.
+An older writer that ignores these fields resets the image revision; existing
+checkpoint generation checks still reject its stale derived images on reopen.
+
+For kind 2 records, key field 2 is now the LOD colour-palette revision: legacy 0,
+current 1. It is not a height layer. Queries prefer the current revision and
+fall back to legacy coverage without counting duplicate footprints. Fresh
+Horizon samples are recoloured once into the current key; existing observations
+within that revision keep the normal fill-unknown policy. Partial upgrades keep
+only newly observed cells in the new record, combining old coverage for display
+without marking those old colours as final. Later samples can therefore fill
+remaining cells. Detailed chunk keys and precedence are unchanged. Legacy LOD
+records remain available; they are not deleted or compacted by this upgrade.
+
+The catalog's names/icons are derived metadata, outside Map RAM. RGBA icons are
+limited to 64x64, PNG input to 1 MiB, with at most 4096 catalog entries and 16
+visible GUI pictures. Index/payload migration, deletion and compression remain
+separate work; this is not a full cache maintenance suite.

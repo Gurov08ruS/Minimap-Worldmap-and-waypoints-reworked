@@ -1,0 +1,148 @@
+id = "minimap_worldmap_waypoints_reworked"
+name = "Minimap, Worldmap and waypoints reworked"
+version = "0.7.0"
+description = "Minimap, persistent world map, LOD terrain, waypoints and cache manager."
+authors = ["daniliammo", "Gurov08ruS"]
+license = "GPL-3.0-only"
+homepage = "https://github.com/Gurov08ruS/Minimap-Worldmap-and-waypoints-reworked"
+# A native mod: Rust in src/, compiled by the launcher against the game build [native] pins, beside data/ and assets/.
+api = "0.2"
+side = "client"
+# registries: "May add blocks, items, mob effects and entity types to your worlds".
+capabilities = ["registries"]
+
+[native]
+game = "26.3"
+horizon = "0b14f8acfd97fa2c750e42795249dcc981178ca4"
+mixins = "e59da9094f0c2fdda6c627fe9eff22dec6a906f0"
+
+[[native.module]]
+id="client"
+file="crates/horizon-client/src/game.rs"
+name="reworked_maps"
+source="src/client.rs"
+
+[[native.module]]
+id="pictures"
+file="crates/horizon-client/src/game.rs"
+name="minimap_pages"
+source="src/map_pictures.rs"
+
+[[native.module]]
+id="lod"
+file="crates/horizon-client/src/game.rs"
+name="minimap_lod_adapter"
+source="src/lod_adapter.rs"
+
+[[native.module]]
+id="compat"
+file="crates/horizon-client/src/game.rs"
+name="minimap_compat"
+source="src/compat.rs"
+
+[[native.mixin]]
+id = "map-key"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::input_key::Game::native_input_key"
+helper = "src/key.rs"
+bindings = [{name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self"}, {name = "key", ty = "&str", value = "key"}, {name = "action", ty = "mod_api::KeyAction", value = "action"}, {name = "modifiers", ty = "u32", value = "modifiers"}]
+
+[[native.mixin]]
+id = "map-packet"
+kind = "HEAD"
+target = "horizon_client::game::remote::Game::apply_packet"
+helper = "src/packet.rs"
+bindings = [{name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self"}, {name = "packet", ty = "&horizon_protocol::packets::play::Clientbound", value = "&packet"}]
+
+[[native.mixin]]
+id = "map-frame"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::render_frame_pre::Game::native_render_frame_pre"
+helper = "src/frame.rs"
+bindings = [{name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self"}, {name = "elapsed", ty = "std::time::Duration", value = "elapsed"}]
+
+[[native.mixin]]
+id = "map-hud"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::render_gui_post::Game::native_render_gui_post"
+helper = "src/hud.rs"
+bindings = [{name = "game", ty = "&crate::game::Game<'_>", value = "self"}, {name = "batch", ty = "&mut horizon_client::hud::HudBatch", value = "draw"}, {name = "corners", ty = "&mut horizon_client::extras_hud::Corners", value = "corners"}]
+
+[[native.mixin]]
+id = "map-gui-post"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::gui_render_post::Game::native_gui_render_post"
+helper = "src/gui_post.rs"
+bindings = [{name = "game", ty = "&crate::game::Game<'_>", value = "self"}, {name = "batch", ty = "&mut horizon_client::hud::HudBatch", value = "batch"}, {name = "gui_hidden", ty = "bool", value = "gui_hidden"}, {name = "focused", ty = "bool", value = "focused"}]
+
+[[native.mixin]]
+id = "map-screen"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::base::Game::native_screen_render_post"
+helper = "src/screen.rs"
+bindings = [{name = "game", ty = "&crate::game::Game<'_>", value = "self"}, {name = "batch", ty = "&mut horizon_client::hud::HudBatch", value = "draw"}]
+
+[[native.mixin]]
+id = "map-press"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::base::Game::native_screen_mouse_button_pressed_pre"
+helper = "src/press.rs"
+bindings = [{name = "game", ty = "&crate::game::Game<'_>", value = "self"}, {name = "screen", ty = "&mod_api::ScreenView<'_>", value = "screen"}, {name = "button", ty = "i32", value = "button"}, {name = "canceled", ty = "&mut bool", value = "canceled"}]
+
+[[native.mixin]]
+id = "map-drag"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::base::Game::native_screen_mouse_dragged_pre"
+helper = "src/drag.rs"
+bindings = [{name = "game", ty = "&crate::game::Game<'_>", value = "self"}, {name = "delta", ty = "[f32;2]", value = "delta"}, {name = "button", ty = "i32", value = "button"}, {name = "canceled", ty = "&mut bool", value = "canceled"}]
+
+[[native.mixin]]
+id = "map-scroll"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::base::Game::native_screen_mouse_scrolled_pre"
+helper = "src/scroll.rs"
+bindings = [{name = "game", ty = "&crate::game::Game<'_>", value = "self"}, {name = "screen", ty = "&mod_api::ScreenView<'_>", value = "screen"}, {name = "scroll", ty = "[f64;2]", value = "scroll"}, {name = "canceled", ty = "&mut bool", value = "canceled"}]
+
+[[native.mixin]]
+id = "map-screen-key"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::base::Game::native_screen_key_pressed_pre"
+helper = "src/screen_key.rs"
+bindings = [{name = "game", ty = "&crate::game::Game<'_>", value = "self"}, {name = "screen", ty = "&mod_api::ScreenView<'_>", value = "screen"}, {name = "key", ty = "&str", value = "key"}, {name = "repeat", ty = "bool", value = "repeat"}, {name = "modifiers", ty = "u32", value = "modifiers"}, {name = "canceled", ty = "&mut bool", value = "canceled"}]
+
+[[native.mixin]]
+id = "map-screen-char"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::base::Game::native_screen_char_typed_pre"
+helper = "src/screen_char.rs"
+bindings = [{name = "game", ty = "&crate::game::Game<'_>", value = "self"}, {name = "screen", ty = "&mod_api::ScreenView<'_>", value = "screen"}, {name = "c", ty = "char", value = "c"}, {name = "modifiers", ty = "u32", value = "modifiers"}, {name = "canceled", ty = "&mut bool", value = "canceled"}]
+
+[[native.mixin]]
+id = "map-disconnect"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::client_services::Game::native_client_disconnecting"
+helper = "src/disconnect.rs"
+bindings = [{name = "game", ty = "&crate::game::Game<'_>", value = "self"}]
+
+[[native.mixin]]
+id = "map-resources"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::base::Game::native_client_resources_reloaded"
+helper = "src/atlas.rs"
+bindings = []
+
+[[native.mixin]]
+id = "map-render-only"
+kind = "HEAD"
+cancellable = true
+target = "horizon_client::game::Game::render_frame"
+helper = "src/render.rs"
+bindings = [{name = "game", ty = "&mut crate::game::Game<'_>", value = "self"}]
+
+[[native.mixin]]
+id = "waypoints-no-blur"
+kind = "HEAD"
+cancellable = true
+target = "horizon_client::game::native_hooks::client_services::Game::native_menu_background"
+helper = "src/menu_background.rs"
+bindings = [{name = "game", ty = "&crate::game::Game<'_>", value = "self"}, {name = "radius", ty = "&mut Option<f32>", value = "radius"}]

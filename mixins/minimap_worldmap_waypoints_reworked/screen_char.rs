@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 fn map_screen_char(
     game: &crate::game::Game<'_>,
-    screen: &crate::mod_api::NativeScreenView<'_>,
+    screen: &mod_api::ScreenView<'_>,
     c: char,
     modifiers: u32,
     canceled: &mut bool,

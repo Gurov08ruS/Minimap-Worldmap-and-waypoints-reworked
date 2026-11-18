@@ -39,7 +39,7 @@ fn main() {
     let plan: serde_json::Value = serde_json::from_slice(&fs::read(&args[3]).unwrap()).unwrap();
     let mut trees = BTreeMap::new();
     for section in ["injections", "modules"] {
-        for entry in plan[section].as_array().unwrap() {
+        for entry in plan[section].as_array().into_iter().flatten() {
             let file = entry["file"].as_str().unwrap();
             trees.entry(file).or_insert_with(|| {
                 syn::parse_file(&fs::read_to_string(Path::new(&args[2]).join(file)).unwrap())
@@ -47,7 +47,7 @@ fn main() {
             });
         }
     }
-    for p in plan["injections"].as_array().unwrap() {
+    for p in plan["injections"].as_array().into_iter().flatten() {
         let file = p["file"].as_str().unwrap();
         let tree = trees.entry(file).or_insert_with(|| {
             syn::parse_file(&fs::read_to_string(Path::new(&args[2]).join(file)).unwrap()).unwrap()
@@ -83,7 +83,7 @@ fn main() {
         );
         b.stmts.remove(0);
     }
-    for m in plan["modules"].as_array().unwrap() {
+    for m in plan["modules"].as_array().into_iter().flatten() {
         let file = m["file"].as_str().unwrap();
         let tree = trees.get_mut(file).unwrap();
         let index = tree

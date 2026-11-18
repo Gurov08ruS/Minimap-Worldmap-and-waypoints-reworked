@@ -107,6 +107,28 @@ pub mod profiling {
 }
 
 const SIZES: [u16; 7] = [64, 96, 128, 160, 192, 224, 256];
+
+/// Stable SDK keys and the historical preference field each key controls.
+pub const SDK_SETTING_ROWS: [(&str, usize); 18] = [
+    ("enabled", 0),
+    ("corner", 1),
+    ("size", 2),
+    ("shape", 3),
+    ("zoom", 4),
+    ("rotate", 5),
+    ("mini_dimension", 7),
+    ("world_dimension", 8),
+    ("overworld_coordinates", 9),
+    ("nether_coordinates", 10),
+    ("death_waypoints", 11),
+    ("death_waypoint_auto_remove", 12),
+    ("world_waypoints", 13),
+    ("world_waypoint_style", 14),
+    ("directions", 15),
+    ("direction_style", 16),
+    ("labels_on_hover", 17),
+    ("waypoint_letters", 20),
+];
 const ZOOMS: [f32; 7] = [0.1, 0.25, 0.5, 0.75, 1.0, 2.0, 4.0];
 
 // Updated by the engine adapter; English is the standalone/default language.
@@ -399,8 +421,60 @@ pub mod minimap {
         }
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub enum WaypointLetters {
+        One,
+        #[default]
+        SimilarColors,
+        AnyColors,
+    }
+    impl WaypointLetters {
+        pub const ALL: [Self; 3] = [Self::One, Self::SimilarColors, Self::AnyColors];
+        pub fn name(self) -> &'static str {
+            match self {
+                Self::One => "one",
+                Self::SimilarColors => "similar",
+                Self::AnyColors => "any",
+            }
+        }
+        fn from_name(value: &str) -> Option<Self> {
+            match value {
+                "one" => Some(Self::One),
+                "similar" => Some(Self::SimilarColors),
+                "any" => Some(Self::AnyColors),
+                _ => None,
+            }
+        }
+        pub fn label(self) -> &'static str {
+            match self {
+                Self::One => tr(
+                    "One letter",
+                    "Одна буква",
+                    "Une lettre",
+                    "Una letra",
+                    "Ein Buchstabe",
+                ),
+                Self::SimilarColors => tr(
+                    "Two for similar colours",
+                    "Две при похожих цветах",
+                    "Deux si couleurs proches",
+                    "Dos con colores similares",
+                    "Zwei bei ähnlichen Farben",
+                ),
+                Self::AnyColors => tr(
+                    "Two regardless of colour",
+                    "Две независимо от цвета",
+                    "Deux quelle que soit la couleur",
+                    "Dos sin importar el color",
+                    "Zwei unabhängig von der Farbe",
+                ),
+            }
+        }
+    }
+
     #[derive(Debug, Clone, Copy, PartialEq)]
     pub struct Settings {
+        pub waypoint_letters: WaypointLetters,
         pub cache_ram_mib: u16,
         pub enabled: bool,
         pub corner: Corner,
@@ -426,6 +500,7 @@ pub mod minimap {
     impl Default for Settings {
         fn default() -> Self {
             Self {
+                waypoint_letters: WaypointLetters::default(),
                 cache_ram_mib: 64,
                 enabled: true,
                 corner: Corner::TopRight,
@@ -485,6 +560,11 @@ pub mod minimap {
                     "world_waypoints" => {
                         value.world_waypoints = raw.parse().unwrap_or(value.world_waypoints)
                     }
+                    "waypoint_letters" => {
+                        if let Some(mode) = WaypointLetters::from_name(raw) {
+                            value.waypoint_letters = mode;
+                        }
+                    }
                     "world_waypoint_style" => {
                         if let Some(style) = WorldMarkerStyle::from_name(raw) {
                             value.world_waypoint_style = style;
@@ -542,7 +622,7 @@ pub mod minimap {
 
         pub fn encode(self) -> String {
             format!(
-                "# Minimap Reworked settings\nenabled={}\ncorner={}\nsize={}\nshape={}\nzoom={}\nrotate={}\nmini_dimension={}\nworld_dimension={}\noverworld_coordinates={}\nnether_coordinates={}\ndeath_waypoints={}\ndeath_waypoint_auto_remove={}\nworld_waypoints={}\nworld_waypoint_style={}\ndirections={}\ndirection_style={}\nlabels_on_hover={}\ncache_ram_mib={}\n",
+                "# Minimap Reworked settings\nenabled={}\ncorner={}\nsize={}\nshape={}\nzoom={}\nrotate={}\nmini_dimension={}\nworld_dimension={}\noverworld_coordinates={}\nnether_coordinates={}\ndeath_waypoints={}\ndeath_waypoint_auto_remove={}\nworld_waypoints={}\nworld_waypoint_style={}\ndirections={}\ndirection_style={}\nlabels_on_hover={}\ncache_ram_mib={}\nwaypoint_letters={}\n",
                 self.enabled,
                 self.corner.name(),
                 self.size_px,
@@ -561,7 +641,57 @@ pub mod minimap {
                 self.direction_style.name(),
                 self.labels_on_hover,
                 self.cache_ram_mib,
+                self.waypoint_letters.name(),
             )
+        }
+
+        /// Ordered choices for the SDK settings page, relative to this mod's
+        /// historical defaults. Actions and the RAM slider have no choices.
+        pub fn options(button: usize) -> Vec<Self> {
+            if matches!(button, 6 | 18 | 19) || button > 20 {
+                return Vec::new();
+            }
+            let initial = Self::default();
+            let mut value = initial;
+            let mut choices = Vec::new();
+            loop {
+                choices.push(value);
+                if value.click(button) == 0 || choices.len() > 32 {
+                    return Vec::new();
+                }
+                if value == initial {
+                    return choices;
+                }
+            }
+        }
+
+        pub fn option_index(self, button: usize) -> Option<usize> {
+            if button >= 32 {
+                return None;
+            }
+            let mut selected = Self::default();
+            selected.overlay(self, 1 << button);
+            Self::options(button).iter().position(|v| *v == selected)
+        }
+
+        pub fn select_option(&mut self, button: usize, index: usize) -> bool {
+            let Some(selected) = Self::options(button).get(index).copied() else {
+                return false;
+            };
+            self.overlay(selected, 1 << button);
+            true
+        }
+
+        pub fn option_label(self, button: usize) -> Option<String> {
+            if button == 20 {
+                return Some(self.waypoint_letters.label().into());
+            }
+            self.labels().get(button).map(|label| {
+                label
+                    .split_once(':')
+                    .map_or(label.as_str(), |(_, v)| v.trim())
+                    .to_owned()
+            })
         }
 
         // Returns the changed field mask. Unknown buttons are harmless.
@@ -581,7 +711,7 @@ pub mod minimap {
                 5 => self.rotate_with_player = !self.rotate_with_player,
                 6 => {
                     *self = Self::default();
-                    return 0x7ffbf;
+                    return 0x7ffbf | (1 << 20);
                 }
                 7 => {
                     self.mini_dimension = super::cycle(self.mini_dimension, &super::Dimension::ALL)
@@ -604,13 +734,20 @@ pub mod minimap {
                     self.direction_style = super::cycle(self.direction_style, &DirectionStyle::ALL)
                 }
                 17 => self.labels_on_hover = !self.labels_on_hover,
+                20 => {
+                    self.waypoint_letters =
+                        super::cycle(self.waypoint_letters, &WaypointLetters::ALL)
+                }
                 _ => return 0,
             }
             1 << button
         }
 
         // Only locally edited fields override settings loaded asynchronously.
-        fn overlay(&mut self, edited: Self, mask: u32) {
+        pub(super) fn overlay(&mut self, edited: Self, mask: u32) {
+            if mask & (1 << 20) != 0 {
+                self.waypoint_letters = edited.waypoint_letters;
+            }
             if mask & (1 << 18) != 0 {
                 self.cache_ram_mib = edited.cache_ram_mib;
             }
@@ -1643,6 +1780,63 @@ fn cycle<T: Copy + PartialEq>(current: T, choices: &[T]) -> T {
 pub const MAX_WAYPOINTS: usize = 64;
 const MAX_TOTAL_WAYPOINTS: usize = 4096;
 
+/// A deliberately small RGB neighbourhood, independent of alpha. Labels do
+/// not depend on camera/distance, so they stay consistent on maps and in 3D.
+pub fn similar_waypoint_colors(a: u32, b: u32) -> bool {
+    [16, 8, 0]
+        .into_iter()
+        .map(|shift| {
+            let delta = ((a >> shift) & 255) as i32 - ((b >> shift) & 255) as i32;
+            delta * delta
+        })
+        .sum::<i32>()
+        <= 48 * 48
+}
+pub fn waypoint_labels(points: &[Waypoint], mode: minimap::WaypointLetters) -> Vec<String> {
+    let initials: Vec<_> = points
+        .iter()
+        .map(|point| {
+            let mut chars = point
+                .name
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .map(|c| c.to_uppercase().next().unwrap_or(c));
+            (chars.next().unwrap_or('?'), chars.next())
+        })
+        .collect();
+    let mut second = vec![false; points.len()];
+    if mode != minimap::WaypointLetters::One {
+        for (i, a) in points.iter().enumerate() {
+            if a.icon != WaypointIcon::Letter {
+                continue;
+            }
+            for (j, b) in points.iter().enumerate().skip(i + 1) {
+                if b.icon == WaypointIcon::Letter
+                    && a.world == b.world
+                    && a.dimension == b.dimension
+                    && initials[i].0 == initials[j].0
+                    && (mode == minimap::WaypointLetters::AnyColors
+                        || similar_waypoint_colors(a.color, b.color))
+                {
+                    second[i] = true;
+                    second[j] = true;
+                }
+            }
+        }
+    }
+    initials
+        .into_iter()
+        .zip(second)
+        .map(|((first, next), expand)| {
+            let mut out = first.to_string();
+            if expand && let Some(next) = next {
+                out.push(next);
+            }
+            out
+        })
+        .collect()
+}
+
 /// Stable, namespaced identity supplied by Horizon, never a session counter or
 /// Debug representation. Unknown identities must not read or mutate waypoints.
 pub fn waypoint_world(singleplayer: bool, identity: &str) -> Option<String> {
@@ -2017,6 +2211,7 @@ pub fn death_waypoint_reached(player: [f64; 3], waypoint: &Waypoint) -> bool {
 struct State {
     settings: Settings,
     waypoints: Vec<Waypoint>,
+    loaded: bool,
     touched: u32,
     revision: u64,
     error: Option<String>,
@@ -2028,6 +2223,7 @@ pub struct Controller {
     notify: Mutex<Option<mpsc::SyncSender<()>>>,
     worker: Mutex<Option<JoinHandle<()>>>,
     pub maps: maps::Service,
+    pub caches: cache_manager::Service,
 }
 
 impl Controller {
@@ -2052,7 +2248,8 @@ impl Controller {
             state,
             notify: Mutex::new(notify),
             worker: Mutex::new(worker),
-            maps: maps::Service::with_directory(Some(cache_directory)),
+            maps: maps::Service::with_directory(Some(cache_directory.clone())),
+            caches: cache_manager::Service::new(cache_directory),
         }
     }
 
@@ -2073,6 +2270,24 @@ impl Controller {
             "RAM del mapa: {} MiB…",
             "Karten-RAM: {} MiB…",
             state.settings.cache_ram_mib
+        ));
+        labels.push(
+            tr(
+                "Cache manager… (in world)",
+                "Менеджер кеша… (в мире)",
+                "Gestion du cache… (en jeu)",
+                "Gestor de caché… (en el mundo)",
+                "Cache-Verwaltung… (im Spiel)",
+            )
+            .into(),
+        );
+        labels.push(localized_format!(
+            "Waypoint initials: {}",
+            "Буквы вейпоинтов: {}",
+            "Initiales des repères : {}",
+            "Iniciales de marcadores: {}",
+            "Wegpunktinitialen: {}",
+            state.settings.waypoint_letters.label()
         ));
         if self.maps.status().is_some() {
             labels.push(
@@ -2122,10 +2337,32 @@ impl Controller {
         }
     }
 
+    /// Apply one typed SDK choice without overwriting unrelated preferences
+    /// that the asynchronous loader or a map control changed.
+    pub fn set_option(&self, button: usize, index: usize) -> bool {
+        let Some(selected) = minimap::Settings::options(button).get(index).copied() else {
+            return false;
+        };
+        let notify = self.notify.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(notify) = notify.as_ref() else {
+            return false;
+        };
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = state.settings;
+        state.settings.overlay(selected, 1 << button);
+        state.touched |= 1 << button;
+        if state.settings != previous || !state.loaded {
+            state.revision += 1;
+        }
+        drop(state);
+        let _ = notify.try_send(());
+        true
+    }
+
     pub fn set_cache_ram_mib(&self, value: u16) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let value = value.clamp(16, 512);
-        if state.settings.cache_ram_mib == value {
+        if state.settings.cache_ram_mib == value && state.loaded {
             return;
         }
         state.settings.cache_ram_mib = value;
@@ -2380,6 +2617,7 @@ impl Controller {
 
     // Called on application exit, never during drawing. Drain accepted edits before returning.
     pub fn shutdown(&self) {
+        self.caches.shutdown();
         self.maps.shutdown();
         self.notify.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(worker) = self.worker.lock().unwrap_or_else(|e| e.into_inner()).take()
@@ -2421,6 +2659,7 @@ fn settings_worker(directory: &Path, shared: &Mutex<State>, rx: mpsc::Receiver<(
                 state.error = Some(error.to_string());
             }
         }
+        state.loaded = true;
     }
     let mut saved_revision = 0;
     persist_latest(&path, shared, &mut saved_revision);
@@ -2668,6 +2907,88 @@ pub mod container {
     const PAGE: usize = 4096;
     const PREFIX: u64 = (PAGE * 2) as u64;
     const MAX_RECORD: usize = 1024 * 1024;
+    pub const SCHEMA: u32 = 2;
+    // Bump when derived image semantics change. Zero is the legacy spelling
+    // of revision 1. Revision 2 changes LOD colour semantics, not raw TIL1 bytes.
+    pub const VISUAL_REVISION: u32 = 2;
+    pub const LOD_PALETTE_REVISION: i32 = 1;
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub enum Compatibility {
+        Current,
+        RebuildImages,
+        Older(u32),
+        Newer(u32),
+        Damaged,
+    }
+    pub fn compatibility(schema: u32, visual: u32) -> Compatibility {
+        if schema < SCHEMA {
+            Compatibility::Older(schema)
+        } else if schema > SCHEMA || visual.max(1) > VISUAL_REVISION {
+            Compatibility::Newer(schema)
+        } else if visual.max(1) < VISUAL_REVISION {
+            Compatibility::RebuildImages
+        } else {
+            Compatibility::Current
+        }
+    }
+    pub struct FileInfo {
+        pub world: Option<String>,
+        pub bytes: u64,
+        pub compatibility: Compatibility,
+    }
+    /// Bounded read-only discovery: no index/payload loading, rename or lease.
+    /// A concurrent commit may give a previous valid root, never a torn label.
+    pub fn inspect(path: &Path) -> io::Result<FileInfo> {
+        let mut file = File::open(path)?;
+        let bytes = file.metadata()?.len();
+        let mut best = None;
+        for slot in 0..2 {
+            let mut header = vec![0; PAGE];
+            if read_at(&mut file, (slot * PAGE) as u64, &mut header).is_err()
+                || !checked(&header)
+                || !header.starts_with(b"MWWRC")
+            {
+                continue;
+            }
+            let schema = u32_at(&header, 8);
+            let generation = u64_at(&header, 16);
+            if generation == 0 || best.as_ref().is_some_and(|(g, _, _)| *g >= generation) {
+                continue;
+            }
+            let world = if &header[..8] == b"MWWRC002" && schema == SCHEMA {
+                let len = u32_at(&header, 40) as usize;
+                (len > 0 && len <= 2048)
+                    .then(|| {
+                        std::str::from_utf8(&header[48..48 + len])
+                            .ok()
+                            .map(str::to_owned)
+                    })
+                    .flatten()
+            } else {
+                None
+            };
+            let state = if schema == SCHEMA && &header[..8] != b"MWWRC002" {
+                Compatibility::Newer(schema)
+            } else if schema == SCHEMA && world.is_none() {
+                Compatibility::Damaged
+            } else {
+                compatibility(schema, u32_at(&header, 44))
+            };
+            let state = if state == Compatibility::Current && u32_at(&header, 12) & 1 != 0 {
+                Compatibility::RebuildImages
+            } else {
+                state
+            };
+            best = Some((generation, world, state));
+        }
+        let (_, world, compatibility) = best.unwrap_or((0, None, Compatibility::Damaged));
+        Ok(FileInfo {
+            world,
+            bytes,
+            compatibility,
+        })
+    }
     pub type RecordKey = [i32; 6];
     #[derive(Clone, Copy, Debug)]
     struct RecordRef {
@@ -2692,6 +3013,8 @@ pub mod container {
         spatial: SpatialIndex,
         pending_versions: BTreeMap<RecordKey, u64>,
         next_version: u64,
+        pub(super) visual_revision: u32,
+        pub(super) upgrade_pending: bool,
         #[cfg(test)]
         pub(super) write_budget: Option<usize>,
     }
@@ -2965,8 +3288,32 @@ pub mod container {
                 TryLockError::WouldBlock => LeaseError::Busy,
                 TryLockError::Error(e) => LeaseError::Io(e),
             })?;
+            Self::from_lease(ContainerLease { file }, world)
+        }
+        pub fn open_existing(path: &Path, world: &str) -> Result<Self, LeaseError> {
+            if world.is_empty() || world.len() > 2048 {
+                return Err(LeaseError::Io(invalid("invalid world identity")));
+            }
+            let mut lease = ContainerLease::open_existing(path)?;
+            if lease.file_len().map_err(LeaseError::Io)? < PREFIX {
+                return Err(LeaseError::Io(invalid("truncated container header")));
+            }
+            let mut header = vec![0; PAGE];
+            let mut initialized = false;
+            for slot in 0..2 {
+                read_at(&mut lease.file, (slot * PAGE) as u64, &mut header)
+                    .map_err(LeaseError::Io)?;
+                initialized |=
+                    header.starts_with(b"MWWRC") && checked(&header) && u64_at(&header, 16) != 0;
+            }
+            if !initialized {
+                return Err(LeaseError::Io(invalid("no recoverable container header")));
+            }
+            Self::from_lease(lease, world)
+        }
+        fn from_lease(lease: ContainerLease, world: &str) -> Result<Self, LeaseError> {
             let mut store = Self {
-                lease: ContainerLease { file },
+                lease,
                 world: world.into(),
                 roots: Default::default(),
                 current: 0,
@@ -2975,6 +3322,8 @@ pub mod container {
                 spatial: SpatialIndex::default(),
                 pending_versions: BTreeMap::new(),
                 next_version: 0,
+                visual_revision: VISUAL_REVISION,
+                upgrade_pending: false,
                 #[cfg(test)]
                 write_budget: None,
             };
@@ -2998,7 +3347,13 @@ pub mod container {
             for (slot, validity) in valid.iter_mut().enumerate() {
                 let mut header = vec![0; PAGE];
                 read_at(&mut self.lease.file, (slot * PAGE) as u64, &mut header)?;
-                if &header[..8] == b"MWWRC002" && u32_at(&header, 8) != 2 {
+                if checked(&header)
+                    && header.starts_with(b"MWWRC")
+                    && (&header[..8] != b"MWWRC002"
+                        || u32_at(&header, 8) != SCHEMA
+                        || u32_at(&header, 44).max(1) > VISUAL_REVISION
+                        || u32_at(&header, 12) & !1 != 0)
+                {
                     return Err(invalid("unsupported container version"));
                 }
                 if &header[..8] != b"MWWRC002" || !checked(&header) {
@@ -3028,6 +3383,15 @@ pub mod container {
                 [false, true] => 1,
                 [true, true] => usize::from(self.roots[1].generation > self.roots[0].generation),
             };
+            let mut header = vec![0; PAGE];
+            read_at(
+                &mut self.lease.file,
+                (self.current * PAGE) as u64,
+                &mut header,
+            )?;
+            self.visual_revision = u32_at(&header, 44).max(1);
+            self.upgrade_pending =
+                u32_at(&header, 12) & 1 != 0 || self.visual_revision < VISUAL_REVISION;
             Ok(())
         }
         fn read_root(&mut self, header: &[u8], file_len: u64) -> io::Result<Root> {
@@ -3156,8 +3520,7 @@ pub mod container {
             rect: [i64; 4],
             limit: usize,
         ) -> Vec<RecordKey> {
-            self.spatial
-                .query(dimension, kind, layer, rect, limit, None)
+            self.query_sources(dimension, kind, layer, rect, limit, None)
         }
         pub fn query_level(
             &self,
@@ -3168,8 +3531,38 @@ pub mod container {
             rect: [i64; 4],
             limit: usize,
         ) -> Vec<RecordKey> {
-            self.spatial
-                .query(dimension, kind, layer, rect, limit, Some(i32::from(level)))
+            self.query_sources(dimension, kind, layer, rect, limit, Some(i32::from(level)))
+        }
+        fn query_sources(
+            &self,
+            dimension: i32,
+            kind: i32,
+            layer: i32,
+            rect: [i64; 4],
+            limit: usize,
+            level: Option<i32>,
+        ) -> Vec<RecordKey> {
+            if kind != 2 || layer != 0 {
+                return self
+                    .spatial
+                    .query(dimension, kind, layer, rect, limit, level);
+            }
+            let mut out = Vec::new();
+            let mut seen = std::collections::BTreeSet::new();
+            for revision in (0..=LOD_PALETTE_REVISION).rev() {
+                for key in self
+                    .spatial
+                    .query(dimension, kind, revision, rect, limit, level)
+                {
+                    if seen.insert((key[3], key[4], key[5])) {
+                        out.push(key);
+                    }
+                    if out.len() == limit {
+                        return out;
+                    }
+                }
+            }
+            out
         }
         pub fn source_keys_after(&self, after: Option<RecordKey>, limit: usize) -> Vec<RecordKey> {
             use std::ops::Bound::{Excluded, Included};
@@ -3316,10 +3709,12 @@ pub mod container {
             let mut header = vec![0; PAGE];
             header[..8].copy_from_slice(b"MWWRC002");
             put32(&mut header, 8, 2);
+            put32(&mut header, 12, u32::from(self.upgrade_pending));
             put64(&mut header, 16, generation);
             put64(&mut header, 24, root.pages.first().map_or(0, |e| e.start));
             put64(&mut header, 32, root.entries.len() as u64);
             put32(&mut header, 40, self.world.len() as u32);
+            put32(&mut header, 44, VISUAL_REVISION);
             header[48..48 + self.world.len()].copy_from_slice(self.world.as_bytes());
             seal(&mut header);
             write_with_budget(
@@ -3331,6 +3726,7 @@ pub mod container {
             self.lease.file.sync_all()?;
             self.roots[slot] = root;
             self.current = slot;
+            self.visual_revision = VISUAL_REVISION;
             self.pending.clear();
             self.pending_versions.clear();
             Ok(())
@@ -3338,6 +3734,173 @@ pub mod container {
     }
     #[cfg(test)]
     super::super::minimap_container_tests::define_tests!();
+}
+
+/// The catalog is deliberately independent of the map file owner. It reads only
+/// headers; rebuilding is submitted to the existing terrain worker instead.
+pub mod cache_manager {
+    use super::*;
+    pub const MAX_FILES: usize = 4096;
+    #[derive(Clone)]
+    pub struct Entry {
+        pub file: String,
+        pub world: Option<String>,
+        pub name: String,
+        pub icon: Option<Arc<Vec<u8>>>, // validated 64x64 RGBA, never a source path
+        pub bytes: u64,
+        pub compatibility: container::Compatibility,
+    }
+    #[derive(Clone, Default)]
+    pub struct Snapshot {
+        pub entries: Vec<Entry>,
+        pub loading: bool,
+        pub error: Option<String>,
+        pub truncated: bool,
+        pub revision: u64,
+    }
+    type Resolve = Box<dyn FnOnce(&mut [Entry]) -> io::Result<()> + Send>;
+    pub struct Service {
+        state: Arc<Mutex<Arc<Snapshot>>>,
+        tx: Mutex<Option<mpsc::SyncSender<Resolve>>>,
+        worker: Mutex<Option<JoinHandle<()>>>,
+    }
+    pub fn scan(directory: &Path) -> io::Result<Snapshot> {
+        let files = match fs::read_dir(directory) {
+            Ok(files) => files,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Snapshot::default()),
+            Err(e) => return Err(e),
+        };
+        let mut out = Snapshot::default();
+        for file in files {
+            let file = file?;
+            if !file.file_type()?.is_file() || file.path().extension().is_none_or(|e| e != "mwwr") {
+                continue;
+            }
+            if out.entries.len() == MAX_FILES {
+                out.truncated = true;
+                break;
+            }
+            let path = file.path();
+            let name = file.file_name().to_string_lossy().into_owned();
+            let info = container::inspect(&path).unwrap_or_else(|_| container::FileInfo {
+                world: None,
+                bytes: file.metadata().map_or(0, |m| m.len()),
+                compatibility: container::Compatibility::Damaged,
+            });
+            out.entries.push(Entry {
+                name: info
+                    .world
+                    .as_deref()
+                    .and_then(|w| w.split_once(':'))
+                    .map_or_else(|| name.clone(), |(_, n)| n.to_owned()),
+                file: name,
+                world: info.world,
+                icon: None,
+                bytes: info.bytes,
+                compatibility: info.compatibility,
+            });
+        }
+        out.entries.sort_by(|a, b| {
+            a.name
+                .to_lowercase()
+                .cmp(&b.name.to_lowercase())
+                .then(a.file.cmp(&b.file))
+        });
+        Ok(out)
+    }
+    impl Service {
+        pub fn new(directory: PathBuf) -> Self {
+            let state = Arc::new(Mutex::new(Arc::new(Snapshot::default())));
+            let shared = state.clone();
+            let (tx, rx) = mpsc::sync_channel::<Resolve>(1);
+            let worker = thread::Builder::new()
+                .name("map-catalog".into())
+                .spawn(move || {
+                    while let Ok(resolve) = rx.recv() {
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            let mut out = scan(&directory)?;
+                            resolve(&mut out.entries)?;
+                            out.entries.sort_by(|a, b| {
+                                a.name
+                                    .to_lowercase()
+                                    .cmp(&b.name.to_lowercase())
+                                    .then(a.file.cmp(&b.file))
+                            });
+                            Ok::<_, io::Error>(out)
+                        }));
+                        let mut slot = shared.lock().unwrap_or_else(|e| e.into_inner());
+                        let revision = slot.revision + 1;
+                        let mut out = match result {
+                            Ok(Ok(out)) => out,
+                            other => {
+                                let mut out = (**slot).clone();
+                                out.loading = false;
+                                out.error = Some(match other {
+                                    Ok(Err(e)) => e.to_string(),
+                                    _ => "Cache catalog worker failed".into(),
+                                });
+                                out
+                            }
+                        };
+                        out.revision = revision;
+                        *slot = Arc::new(out);
+                    }
+                });
+            match worker {
+                Ok(worker) => Self {
+                    state,
+                    tx: Mutex::new(Some(tx)),
+                    worker: Mutex::new(Some(worker)),
+                },
+                Err(e) => {
+                    *state.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(Snapshot {
+                        error: Some(e.to_string()),
+                        ..Snapshot::default()
+                    });
+                    Self {
+                        state,
+                        tx: Mutex::new(None),
+                        worker: Mutex::new(None),
+                    }
+                }
+            }
+        }
+        pub fn snapshot(&self) -> Arc<Snapshot> {
+            self.state.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        }
+        pub fn refresh(
+            &self,
+            resolve: impl FnOnce(&mut [Entry]) -> io::Result<()> + Send + 'static,
+        ) -> bool {
+            let tx = self.tx.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(tx) = tx.as_ref() else {
+                return false;
+            };
+            let mut slot = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if slot.loading {
+                return false;
+            }
+            if tx.try_send(Box::new(resolve)).is_err() {
+                return false;
+            }
+            let mut next = (**slot).clone();
+            next.loading = true;
+            next.error = None;
+            *slot = Arc::new(next);
+            true
+        }
+        pub fn shutdown(&self) {
+            self.tx.lock().unwrap_or_else(|e| e.into_inner()).take();
+            if let Some(worker) = self.worker.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                let _ = worker.join();
+            }
+        }
+    }
+    impl Drop for Service {
+        fn drop(&mut self) {
+            self.shutdown();
+        }
+    }
 }
 
 pub mod maps {
@@ -3464,6 +4027,59 @@ pub mod maps {
     /// steps instead of looking one block deep everywhere.
     fn water_alpha(depth: u32) -> u8 {
         (70 + depth.saturating_mul(10)).min(190) as u8
+    }
+    pub fn lod_water_color(
+        base: Option<u32>,
+        water: u32,
+        depth: u32,
+        freezes: bool,
+        ice: u32,
+    ) -> u32 {
+        if freezes {
+            return ice;
+        }
+        base.map_or(water, |base| blend(base, water, water_alpha(depth)))
+    }
+    /// LOD may omit thin weather layers. Only natural exposed surfaces get an
+    /// approximate cover; actual snow/ice, buildings and warm/dry biomes keep
+    /// their supplied block colour. Canopies retain visible foliage beneath it.
+    pub fn lod_snow_color(name: &str, color: u32, snow: u32, snows: bool) -> u32 {
+        if !snows {
+            return color;
+        }
+        if matches!(
+            name,
+            "minecraft:oak_leaves"
+                | "minecraft:spruce_leaves"
+                | "minecraft:birch_leaves"
+                | "minecraft:jungle_leaves"
+                | "minecraft:acacia_leaves"
+                | "minecraft:dark_oak_leaves"
+                | "minecraft:mangrove_leaves"
+                | "minecraft:cherry_leaves"
+                | "minecraft:pale_oak_leaves"
+        ) {
+            blend(color, snow, 96)
+        } else if matches!(
+            name,
+            "minecraft:grass_block"
+                | "minecraft:podzol"
+                | "minecraft:dirt"
+                | "minecraft:coarse_dirt"
+                | "minecraft:rooted_dirt"
+                | "minecraft:mycelium"
+                | "minecraft:moss_block"
+                | "minecraft:stone"
+                | "minecraft:andesite"
+                | "minecraft:diorite"
+                | "minecraft:granite"
+                | "minecraft:gravel"
+                | "minecraft:sand"
+        ) {
+            snow
+        } else {
+            color
+        }
     }
 
     /// Resolve the biome at the visible top of each column, including water,
@@ -4417,11 +5033,23 @@ pub mod maps {
                 Dimension::End => 3,
             },
             2,
-            0,
+            container::LOD_PALETTE_REVISION,
             key.x,
             key.z,
             i32::from(key.level),
         ]
+    }
+    fn fill_lod_unknown(tile: &mut Tile, fallback: &Tile) {
+        for i in 0..256 {
+            if tile.pixels[i * 4 + 3] == 0 && fallback.pixels[i * 4 + 3] != 0 {
+                tile.pixels[i * 4..i * 4 + 4].copy_from_slice(&fallback.pixels[i * 4..i * 4 + 4]);
+                tile.heights[i] = fallback.heights[i];
+                if let Some(biome) = fallback.biomes.get(i).cloned().flatten() {
+                    tile.biomes.resize(256, None);
+                    tile.biomes[i] = Some(biome);
+                }
+            }
+        }
     }
     fn record_dimension(key: RecordKey) -> Option<Dimension> {
         match key[0] {
@@ -4761,6 +5389,9 @@ pub mod maps {
                 stale: true,
                 ..Self::default()
             };
+            if store.visual_revision < container::VISUAL_REVISION {
+                return out;
+            }
             let Ok(Some(bytes)) = store.read(VISUAL_CHECKPOINT) else {
                 return out;
             };
@@ -4789,7 +5420,7 @@ pub mod maps {
             if bytes[18] != 0 {
                 out.cursor = Some(read_key(&bytes[20..44]));
             }
-            for chunk in bytes[48..].chunks_exact(24) {
+            for chunk in bytes[48..].as_chunks::<24>().0 {
                 let key: RecordKey = read_key(chunk);
                 if !matches!(key[1], 3 | 4) || !(0..=22).contains(&key[5]) {
                     return Self {
@@ -4881,6 +5512,7 @@ pub mod maps {
     }
     #[derive(Default)]
     pub struct Cache {
+        lod_current_colors: BTreeSet<(Dimension, LodKey)>,
         tiles: BTreeMap<Key, (u64, Arc<Tile>)>,
         lod_tiles: BTreeMap<(Dimension, LodKey), (u64, Arc<Tile>)>,
         clock: u64,
@@ -4892,12 +5524,27 @@ pub mod maps {
         overviews: Overviews,
     }
     impl Cache {
+        fn schedule_visual_rebuild(&mut self) -> io::Result<()> {
+            self.flush()?;
+            self.overviews = Overviews {
+                stale: true,
+                modified: true,
+                ..Overviews::default()
+            };
+            self.clock += 1;
+            if let Some(backing) = &self.backing {
+                backing.borrow_mut().store.upgrade_pending = false;
+            }
+            self.flush()
+        }
         fn open(
             directory: &Path,
             world: &str,
             limit: usize,
         ) -> Result<Self, container::LeaseError> {
-            let mut store = Store::open(directory, world)?;
+            Self::from_store(Store::open(directory, world)?, limit)
+        }
+        fn from_store(mut store: Store, limit: usize) -> Result<Self, container::LeaseError> {
             let overviews = Overviews::load(&mut store);
             let mut lod_levels = BTreeMap::new();
             for key in store
@@ -5022,6 +5669,7 @@ pub mod maps {
                     }
                     (_, Some((key, _))) => {
                         self.lod_tiles.remove(&key);
+                        self.lod_current_colors.remove(&key);
                     }
                     (Some((key, _)), _) => {
                         self.tiles.remove(&key);
@@ -5032,6 +5680,7 @@ pub mod maps {
             Ok(())
         }
         fn clear_payloads(&mut self) {
+            self.lod_current_colors.clear();
             self.tiles.clear();
             self.lod_tiles.clear();
             if let Some(b) = &self.backing {
@@ -5060,15 +5709,30 @@ pub mod maps {
                 Ok(None) => return None,
                 Ok(Some(bytes)) => {
                     if key[1] == 2 {
-                        tile_decode(&bytes).ok().map(|tile| Overview {
-                            coverage: std::array::from_fn(|i| {
-                                if tile.pixels[i * 4 + 3] != 0 {
-                                    u16::MAX
-                                } else {
-                                    0
+                        tile_decode(&bytes).ok().map(|mut tile| {
+                            if key[2] == container::LOD_PALETTE_REVISION
+                                && tile.pixels.as_chunks::<4>().0.iter().any(|p| p[3] == 0)
+                            {
+                                let mut legacy = key;
+                                legacy[2] = 0;
+                                if let Some(old) = self
+                                    .backing
+                                    .as_ref()
+                                    .and_then(|b| b.borrow_mut().get(legacy))
+                                {
+                                    fill_lod_unknown(&mut tile, &old);
                                 }
-                            }),
-                            pixels: tile.pixels,
+                            }
+                            Overview {
+                                coverage: std::array::from_fn(|i| {
+                                    if tile.pixels[i * 4 + 3] != 0 {
+                                        u16::MAX
+                                    } else {
+                                        0
+                                    }
+                                }),
+                                pixels: tile.pixels,
+                            }
                         })
                     } else {
                         Overview::decode(&bytes)
@@ -5516,6 +6180,7 @@ pub mod maps {
                     },
                     std::cmp::Reverse(k[5]),
                     k[1],
+                    std::cmp::Reverse(k[2]),
                 )
             });
             let mut nodes: BTreeMap<LodKey, Option<Arc<Overview>>> = BTreeMap::new();
@@ -5626,10 +6291,13 @@ pub mod maps {
                             z: key.z.div_euclid(1 << shift),
                             level,
                         };
+                        let mut legacy = lod_record(view.dimension, parent);
+                        legacy[2] = 0;
                         let tile = self
                             .overviews
                             .tiles
                             .get(&lod_record(view.dimension, parent))
+                            .or_else(|| self.overviews.tiles.get(&legacy))
                             .or_else(|| {
                                 self.overviews.tiles.get(&overview_key(
                                     view.dimension,
@@ -5797,10 +6465,33 @@ pub mod maps {
             })
         }
         fn coarse_at(&self, d: Dimension, key: LodKey) -> Option<Arc<Tile>> {
-            self.lod_tiles
+            let tile = self
+                .lod_tiles
                 .get(&(d, key))
                 .map(|(_, t)| t.clone())
-                .or_else(|| self.backing.as_ref()?.borrow_mut().get(lod_record(d, key)))
+                .or_else(|| {
+                    let mut backing = self.backing.as_ref()?.borrow_mut();
+                    let mut record = lod_record(d, key);
+                    backing.get(record).or_else(|| {
+                        record[2] = 0;
+                        backing.get(record)
+                    })
+                });
+            let mut record = lod_record(d, key);
+            record[2] = 0;
+            if let Some(tile) = tile
+                .as_ref()
+                .filter(|t| t.pixels.as_chunks::<4>().0.iter().any(|p| p[3] == 0))
+                && let Some(old) = self
+                    .backing
+                    .as_ref()
+                    .and_then(|b| b.borrow_mut().get(record))
+            {
+                let mut combined = (**tile).clone();
+                fill_lod_unknown(&mut combined, &old);
+                return Some(Arc::new(combined));
+            }
+            tile
         }
         #[cfg(test)]
         fn prepare(&mut self, view: &View) -> io::Result<()> {
@@ -5958,11 +6649,19 @@ pub mod maps {
         pub fn insert_lod(&mut self, dimension: Dimension, key: LodKey, tile: Tile) -> bool {
             if key.level > 22
                 || tile.pixels.len() != 1024
-                || !tile.pixels.chunks_exact(4).any(|p| p[3] != 0)
+                || !tile.pixels.as_chunks::<4>().0.iter().any(|p| p[3] != 0)
             {
                 return false;
             }
             *self.lod_levels.entry(dimension).or_default() |= 1 << key.level;
+            let recolor = !self.lod_current_colors.contains(&(dimension, key))
+                && self.backing.as_ref().is_some_and(|b| {
+                    b.borrow()
+                        .store
+                        .version(lod_record(dimension, key))
+                        .is_none()
+                });
+            self.lod_current_colors.insert((dimension, key));
             if !self.lod_tiles.contains_key(&(dimension, key))
                 && let Some(old) = self.coarse_at(dimension, key)
             {
@@ -5970,9 +6669,15 @@ pub mod maps {
             }
             if let Some((stamp, old)) = self.lod_tiles.get_mut(&(dimension, key)) {
                 let old = Arc::make_mut(old);
-                let mut changed = false;
+                // Old-palette coverage stays in its original record. Persist
+                // only newly observed colours, so a later partial snapshot can
+                // still replace legacy cells instead of treating them as final.
+                if recolor {
+                    old.pixels.fill(0);
+                }
+                let mut changed = recolor;
                 for i in 0..256 {
-                    if old.pixels[i * 4 + 3] == 0 && tile.pixels[i * 4 + 3] != 0 {
+                    if (recolor || old.pixels[i * 4 + 3] == 0) && tile.pixels[i * 4 + 3] != 0 {
                         old.pixels[i * 4..i * 4 + 4]
                             .copy_from_slice(&tile.pixels[i * 4..i * 4 + 4]);
                         old.heights[i] = tile.heights[i];
@@ -6050,7 +6755,7 @@ pub mod maps {
                     .iter()
                     .map(|((d, key), tile)| {
                         let mut mask = [0; 4];
-                        for (i, pixel) in tile.pixels.chunks_exact(4).enumerate() {
+                        for (i, pixel) in tile.pixels.as_chunks::<4>().0.iter().enumerate() {
                             if pixel[3] != 0 {
                                 mask[i / 64] |= 1 << (i % 64);
                             }
@@ -6589,6 +7294,11 @@ pub mod maps {
         }
     }
     enum Job {
+        Rebuild {
+            world: String,
+            file: String,
+            reply: mpsc::SyncSender<Result<(), String>>,
+        },
         Lod {
             session: u64,
             dimension: Dimension,
@@ -6617,6 +7327,7 @@ pub mod maps {
     }
     pub struct Service {
         binding: Arc<Mutex<Option<Binding>>>,
+        upgrade: Arc<Mutex<Option<String>>>,
         status: Arc<Mutex<Option<String>>>,
         paused: Arc<std::sync::atomic::AtomicBool>,
         tx: Mutex<Option<mpsc::SyncSender<Job>>>,
@@ -6642,6 +7353,8 @@ pub mod maps {
             Self::with_directory(None)
         }
         pub fn with_directory(directory: Option<std::path::PathBuf>) -> Self {
+            let upgrade = Arc::new(Mutex::new(None));
+            let upgrade_notice = upgrade.clone();
             let (tx, sampling) = mpsc::sync_channel::<Job>(8);
             let (prepared, rx) = mpsc::sync_channel(8);
             let wake = prepared.clone();
@@ -6744,6 +7457,7 @@ pub mod maps {
                     let mut atlas = None::<AtlasCache>;
                     let mut last_commit = Instant::now();
                     let mut paused = false;
+                    let mut blocked_format=None;
                     let mut last_probe=None;
                     loop {
                         let busy=cache.visual_work()&&input.lock().unwrap_or_else(|e|e.into_inner()).is_some();
@@ -6773,6 +7487,7 @@ pub mod maps {
                             }
                             if !paused {
                                 cache = Cache::default();
+                                blocked_format=None;
                                 *errors.lock().unwrap_or_else(|e| e.into_inner()) = None;
                                 if let (Some(directory), Some(b)) = (&directory, &wanted) {
                                     if b.world.is_empty() {
@@ -6787,6 +7502,7 @@ pub mod maps {
                                             );
                                         }
                                         Err(container::LeaseError::Io(e)) => {
+                                            if e.to_string().contains("unsupported container version") {blocked_format=Some(b.world.clone());}
                                             paused = true;
                                             *errors.lock().unwrap_or_else(|e| e.into_inner()) =
                                                 Some(format!("Cannot open cache; sampling paused: {e}"));
@@ -6843,6 +7559,32 @@ pub mod maps {
                         let mut jobs: Vec<_> = first.into_iter().collect();
                         jobs.extend(rx.try_iter().take(7));
                         for job in jobs {
+                            let job = match job {
+                                Job::Rebuild { world, file, reply } => {
+                                    let is_active = configured.as_ref().is_some_and(|b| b.world == world);
+                                    let correct_file = directory.as_ref().is_some_and(|d| container::world_path(d,&world).file_name().is_some_and(|n| n == file.as_str()));
+                                    let result = if !correct_file {
+                                        Err("Open this cache's world before rebuilding its legacy file".into())
+                                    } else if paused {
+                                        Err("Cache writer is paused; resolve the write error first".into())
+                                    } else if is_active {
+                                        cache.schedule_visual_rebuild().map_err(|e|e.to_string())
+                                    } else if let Some(directory) = &directory {
+                                            match Store::open_existing(&container::world_path(directory,&world), &world).and_then(|store|Cache::from_store(store,16 * 1024 * 1024)) {
+                                                Ok(mut other) => other.schedule_visual_rebuild().map_err(|e|e.to_string()),
+                                                Err(container::LeaseError::Busy) => Err("Cache is in use by another client".into()),
+                                                Err(container::LeaseError::Io(e)) => Err(e.to_string()),
+                                            }
+                                    } else { Err("Persistent cache is unavailable".into()) };
+                                    if is_active && correct_file && result.is_err() && !paused {
+                                        paused = true;
+                                        *errors.lock().unwrap_or_else(|e|e.into_inner()) = result.as_ref().err().cloned();
+                                    }
+                                    let _ = reply.try_send(result);
+                                    continue;
+                                }
+                                other => other,
+                            };
                             if paused {
                                 continue;
                             }
@@ -6908,6 +7650,7 @@ pub mod maps {
                         }
                         paused |= cpu_failed.load(Ordering::Acquire);
                         paused_state.store(paused, Ordering::Release);
+                        *upgrade_notice.lock().unwrap_or_else(|e|e.into_inner())=configured.as_ref().filter(|_|cache.backing.as_ref().is_some_and(|b|b.borrow().store.upgrade_pending)).map(|b|b.world.clone()).or_else(||blocked_format.clone());
                         let Some(view) = input.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
                             continue;
                         };
@@ -7032,6 +7775,7 @@ pub mod maps {
                 coverage,
                 portals,
                 binding,
+                upgrade,
                 status,
                 paused,
             }
@@ -7058,6 +7802,34 @@ pub mod maps {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone()
+        }
+        pub fn needs_upgrade(&self, world: &str) -> bool {
+            self.upgrade
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_deref()
+                == Some(world)
+        }
+        pub fn rebuild_images(
+            &self,
+            world: &str,
+            file: &str,
+        ) -> Result<mpsc::Receiver<Result<(), String>>, String> {
+            if !super::valid_waypoint_world(world) {
+                return Err("Unknown cache identity".into());
+            }
+            let (reply, rx) = mpsc::sync_channel(1);
+            let wake = self.wake.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(tx) = wake.as_ref() else {
+                return Err("Cache worker is unavailable".into());
+            };
+            tx.try_send(Job::Rebuild {
+                world: world.into(),
+                file: file.into(),
+                reply,
+            })
+            .map_err(|_| "Cache worker is busy; try again".to_string())?;
+            Ok(rx)
         }
         pub fn reset(&self, session: u64) {
             *self.binding.lock().unwrap_or_else(|e| e.into_inner()) = None;

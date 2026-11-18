@@ -58,7 +58,7 @@ No claim is made that arbitrary cold storage or missing game LOD becomes instant
 A derived region-column index selects keys by dimension, layer and resolution.
 The index remains proportional to history; both roots are materialized and each
 commit still writes a full disk index. Bounded index pages, incremental COW,
-compression, deletion and cache-manager controls remain subsequent container work.
+compression, deletion and advanced cache maintenance remain subsequent container work.
 
 ## Workers and client callbacks
 
@@ -106,3 +106,22 @@ Remaining performance validation is live-game CPU/GPU capture, cold storage and
 large-world flight/teleport/zoom scenarios, including macOS and Windows. Existing
 portable source and synthetic checks cannot establish seamless frame pacing on
 all hardware. Further copy/index optimizations should follow these measurements.
+
+
+## Development: catalog and LOD palette
+
+Cache discovery runs only on demand on `map-catalog`; it does not run during a
+world join. It inspects two checked headers per file rather than loading every
+container index. Names and icons are resolved off the render thread. Only visible
+icons (at most 16) become GUI pictures; the catalog retains at most 4096 entries.
+Rebuild requests bypass sampling and execute under the terrain worker's lease.
+An inactive file is opened without creation, preserving missing/busy/unknown
+files. These operations add no disk I/O to frame drawing or atlas assembly.
+
+LOD biome blending now uses the same fixed radius in world blocks as detailed
+terrain. Expanding the kernel with LOD stride mixed unrelated distant biomes,
+including blue ocean colours into mangrove water. Water opacity also uses the
+shared depth rule. Cold-cover approximation uses existing biome climate data;
+no terrain generation or network requests are added. A versioned LOD key allows
+fresh samples to correct old colours once while retaining old fallback coverage.
+Historical LOD cannot gain missing source information until Horizon supplies it.

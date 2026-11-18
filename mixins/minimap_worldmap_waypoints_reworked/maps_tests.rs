@@ -1,11 +1,69 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Expand at the original scope to retain private access and test names.
-// Mixins requires self-contained payloads; external mod/include files are unsupported.
+// Shared standalone/SDK tests, expanded in the runtime's private scope.
 
 #[cfg(test)]
 macro_rules! define_tests {
     () => {
         mod tests {
+            #[test]
+            fn partial_palette_upgrade_retains_old_coverage_and_accepts_later_fresh_cells() {
+                let dir=CacheDir::new("lod-partial-upgrade");let world="save:partial-colours";let d=Dimension::Overworld;let key=LodKey{x:0,z:0,level:4};let mut legacy=lod_record(d,key);legacy[2]=0;
+                {let mut s=Store::open(&dir.0,world).unwrap();s.put(legacy,tile_encode(&coarse_tile([20,30,100])).unwrap()).unwrap();s.commit().unwrap();}
+                let mut cache=Cache::open(&dir.0,world,16*1024*1024).unwrap();let mut partial=coarse_tile([30,90,50]);partial.pixels[4..].fill(0);
+                assert!(cache.insert_lod(d,key,partial));let raw=cache.lod_tiles[&(d,key)].1.clone();assert_eq!(raw.pixels[7],0);cache.save(lod_record(d,key),raw).unwrap();cache.flush().unwrap();
+                assert_eq!(&cache.coarse_at(d,key).unwrap().pixels[4..7],&[20,30,100]);
+                assert!(cache.insert_lod(d,key,coarse_tile([30,90,50])));cache.save(lod_record(d,key),cache.lod_tiles[&(d,key)].1.clone()).unwrap();cache.flush().unwrap();drop(cache);
+                let reopened=Cache::open(&dir.0,world,16*1024*1024).unwrap();assert_eq!(&reopened.coarse_at(d,key).unwrap().pixels[4..7],&[30,90,50]);
+            }
+            #[test]
+            fn lod_snow_ice_and_water_follow_detailed_map_policy() {
+                let green=0x315832;
+                assert_ne!(lod_snow_color("minecraft:spruce_leaves",green,0xffffff,true),green);
+                assert_eq!(lod_snow_color("minecraft:spruce_leaves",green,0xffffff,false),green);
+                for name in ["grass_block","podzol","stone","gravel","sand"] {assert_eq!(lod_snow_color(&format!("minecraft:{name}"),green,0xffffff,true),0xffffff);}
+                for name in ["ice","packed_ice","blue_ice","powder_snow","snow","snow_block","oak_planks","lava"] {assert_eq!(lod_snow_color(&format!("minecraft:{name}"),0x456789,0xffffff,true),0x456789);}
+                for depth in [1,2,5,30] {let water=0x3a7a6a;let base=0x604830;assert_eq!(lod_water_color(Some(base),water,depth,false,0xa0a0ff),blend(base,water,water_alpha(depth)));}
+                assert_eq!(lod_water_color(None,0x3a7a6a,80,false,0xa0a0ff),0x3a7a6a);
+                assert_eq!(lod_water_color(Some(green),0x3f76e4,10,true,0xa0a0ff),0xa0a0ff);
+            }
+            #[test]
+            fn lod_palette_upgrade_recolours_once_without_replacing_detailed_terrain() {
+                let dir=CacheDir::new("lod-colour-upgrade");let world="save:colours";let d=Dimension::Overworld;let key=LodKey{x:0,z:0,level:4};
+                let mut old=lod_record(d,key);old[2]=0;
+                {let mut store=Store::open(&dir.0,world).unwrap();store.put(old,tile_encode(&coarse_tile([20,30,100])).unwrap()).unwrap();store.put(record_key(d,Layer::Surface,0,0),tile_encode(&saved_tile()).unwrap()).unwrap();store.commit().unwrap();}
+                let mut cache=Cache::open(&dir.0,world,16*1024*1024).unwrap();
+                assert_eq!(&cache.coarse_at(d,key).unwrap().pixels[..3],&[20,30,100]);assert!(cache.insert_lod(d,key,coarse_tile([30,90,50])));
+                cache.save(lod_record(d,key),cache.lod_tiles[&(d,key)].1.clone()).unwrap();cache.flush().unwrap();assert!(!cache.insert_lod(d,key,coarse_tile([220,0,0])));
+                assert_eq!(&cache.coarse_at(d,key).unwrap().pixels[..3],&[30,90,50]);assert_eq!(cache.tile_at((d,Layer::Surface,0,0)).unwrap().pixels,saved_tile().pixels);drop(cache);
+                let reopened=Cache::open(&dir.0,world,16*1024*1024).unwrap();assert_eq!(&reopened.coarse_at(d,key).unwrap().pixels[..3],&[30,90,50]);
+                let keys=reopened.backing.as_ref().unwrap().borrow().store.query(1,2,0,[0,0,256,256],8);assert_eq!(keys,vec![lod_record(d,key)]);
+            }
+            #[test]
+            fn manager_rebuild_preserves_canonical_records_and_resumes_on_reopen() {
+                let dir=CacheDir::new("manager-rebuild");let world="save:manager";let d=Dimension::Overworld;let v=view(d);
+                {let mut cache=Cache::open(&dir.0,world,16*1024*1024).unwrap();save_chunk(&mut cache,d,Layer::Surface,[0,0],saved_tile());finish_overviews(&mut cache,&v);cache.flush().unwrap();}
+                let path=container::world_path(&dir.0,world);let file=path.file_name().unwrap().to_str().unwrap();
+                let canonical={let mut s=Store::open_existing(&path,world).unwrap();s.read(record_key(d,Layer::Surface,0,0)).unwrap().unwrap()};
+                let service=Service::with_directory(Some(dir.0.clone()));
+                service.rebuild_images(world,file).unwrap().recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+                service.shutdown();
+                let mut reopened=Cache::open(&dir.0,world,16*1024*1024).unwrap();
+                assert!(reopened.overviews.stale);
+                assert_eq!(reopened.backing.as_ref().unwrap().borrow_mut().store.read(record_key(d,Layer::Surface,0,0)).unwrap().unwrap(),canonical);
+                finish_overviews(&mut reopened,&v);let atlas=reopened.visual_atlas(&v,&v,None);assert!(atlas.chunks.contains(&[0,0]));
+            }
+            #[test]
+            fn manager_rebuild_refuses_busy_missing_and_mismatched_files() {
+                let dir=CacheDir::new("manager-busy");let world="save:busy";
+                let held=Store::open(&dir.0,world).unwrap();let path=container::world_path(&dir.0,world);
+                let before=std::fs::read(&path).unwrap();let file=path.file_name().unwrap().to_str().unwrap();
+                let service=Service::with_directory(Some(dir.0.clone()));
+                assert!(service.rebuild_images(world,file).unwrap().recv_timeout(Duration::from_secs(5)).unwrap().is_err());
+                assert!(service.rebuild_images(world,"other.mwwr").unwrap().recv_timeout(Duration::from_secs(5)).unwrap().is_err());
+                let missing=container::world_path(&dir.0,"save:missing");
+                assert!(service.rebuild_images("save:missing",missing.file_name().unwrap().to_str().unwrap()).unwrap().recv_timeout(Duration::from_secs(5)).unwrap().is_err());
+                assert!(!missing.exists());assert_eq!(std::fs::read(&path).unwrap(),before);drop(held);service.shutdown();
+            }
             #[test]
             fn prepared_pages_survive_payload_eviction_without_losing_world_coverage() {
                 let mut cache=Cache::default();let d=Dimension::Overworld;let v=view(d);let key=LodKey{x:0,z:0,level:16};

@@ -7,6 +7,63 @@ macro_rules! define_tests {
     () => {
         mod render_tests {
             #[test]
+            fn waypoint_short_labels_follow_renames_colours_and_settings() {
+                use runtime::minimap::WaypointLetters;
+                let a=Waypoint{world:"save:labels".into(),dimension:Dimension::Overworld,x:1,y:64,z:1,name:"База".into(),color:0x5aa9ff,icon:runtime::WaypointIcon::Letter,biome:None,show_3d:true};
+                let mut b=a.clone();b.x=2;b.name="Бункер".into();
+                let mut state=State{waypoints:vec![a,b],..State::default()};
+                refresh_waypoint_labels(&mut state,WaypointLetters::SimilarColors);
+                assert_eq!(waypoint_text(&state,0,&state.waypoints[0]),"БА");assert_eq!(waypoint_text(&state,1,&state.waypoints[1]),"БУ");
+                state.waypoints[1].color=0xff0000;refresh_waypoint_labels(&mut state,WaypointLetters::SimilarColors);assert_eq!(state.waypoint_labels,vec!["Б","Б"]);
+                refresh_waypoint_labels(&mut state,WaypointLetters::AnyColors);assert_eq!(state.waypoint_labels,vec!["БА","БУ"]);
+                state.waypoints[1].name="Дом".into();refresh_waypoint_labels(&mut state,WaypointLetters::AnyColors);assert_eq!(state.waypoint_labels,vec!["Б","Д"]);
+                state.waypoints.pop();refresh_waypoint_labels(&mut state,WaypointLetters::AnyColors);assert_eq!(state.waypoint_labels,vec!["Б"]);
+                for marker_width in [10.,18.,26.] {for x in [160.,300.] {
+                    let left=waypoint_label_left(x,marker_width,80.,320.);
+                    assert!(left+80.+3. <= x-marker_width/2.-1. || left-3. >= x+marker_width/2.+1.);
+                }}
+            }
+            struct BiomeFixture(std::path::PathBuf);
+            impl BiomeFixture {
+                fn new() -> Self {
+                    let root=std::env::temp_dir().join(format!("mwwr-biome-colours-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+                    let maps=root.join("assets/minecraft/textures/colormap");std::fs::create_dir_all(&maps).unwrap();
+                    let png=horizon_client::skins::base64_decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNoaGgAAAMEAYFL09IQAAAAAElFTkSuQmCC").unwrap();
+                    for name in ["grass","foliage","dry_foliage"] {std::fs::write(maps.join(format!("{name}.png")),&png).unwrap();}
+                    let data=root.join("data/minecraft/worldgen/biome");std::fs::create_dir_all(&data).unwrap();
+                    for (name,temp,rain,water) in [("snowy_taiga",-0.5,true,0x3f76e4),("taiga",0.25,true,0x3f76e4),("dry_cold",-0.5,false,0x3f76e4),("mangrove_swamp",0.8,true,0x3a7a6a),("ocean",0.5,true,0x3f76e4)] {
+                        let json=serde_json::json!({"temperature":temp,"has_precipitation":rain,"effects":{"water_color":water}});
+                        std::fs::write(data.join(format!("{name}.json")),json.to_string()).unwrap();
+                    }
+                    Self(root)
+                }
+            }
+            impl Drop for BiomeFixture {fn drop(&mut self){let _=std::fs::remove_dir_all(&self.0);}}
+            #[test]
+            fn snow_climate_and_mangrove_water_do_not_change_with_lod_footprint() {
+                let fixture=BiomeFixture::new();let palette=horizon_client::biome::Biomes::load(&fixture.0).unwrap();
+                let cold=palette.get(palette.id("minecraft:snowy_taiga"));let warm=palette.get(palette.id("minecraft:taiga"));
+                assert_eq!(cold.snows_at(512,65,512),Some(true));assert_eq!(warm.snows_at(512,65,512),Some(false));
+                assert_eq!(warm.snows_at(512,300,512),Some(true));assert_eq!(palette.get(palette.id("minecraft:dry_cold")).snows_at(512,65,512),None);
+                let mangrove=palette.id("minecraft:mangrove_swamp");let ocean=palette.id("minecraft:ocean");
+                let biome=|x:i32,z:i32|Some(if (256..768).contains(&x)&&(256..768).contains(&z){mangrove}else{ocean});
+                let actual=blend_biome_tints(&palette,[512,512],BIOME_BLEND_RADIUS,BIOME_BLEND_STEP,false,false,true,biome);
+                assert_eq!(actual.water,Some(0x3a7a6a));
+                let old=blend_biome_tints(&palette,[512,512],1024,1024,false,false,true,biome);assert_ne!(old.water,actual.water);
+            }
+            #[test]
+            fn cache_rows_and_actions_fit_small_viewports_and_keep_the_map_uncovered() {
+                for width in [320.,384.,640.] {for height in [180.,240.,480.] {
+                    let count=cache_rows(height);let last=cache_row(width,count-1);let footer=cache_footer(width,height,0);
+                    assert!(last[1]+last[3]<footer[1]);
+                    for i in 0..3 {let r=cache_footer(width,height,i);assert!(r[0]>=0.&&r[0]+r[2]<=width);}
+                    assert!(over_map_controls([width-20.,44.],width,height));
+                }}
+                let state=State{mode:Mode::Caches,..State::default()};assert!(!map_covers_world(&state));
+                assert!(cache_icon(&vec![0;1024*1024+1]).is_none());
+                let mut bomb=vec![0;24];bomb[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");bomb[12..16].copy_from_slice(b"IHDR");bomb[16..20].copy_from_slice(&u32::MAX.to_be_bytes());assert!(cache_icon(&bomb).is_none());
+            }
+            #[test]
             fn lod_selection_prefers_visible_overview_before_local_detail() {
                 use horizon_client::lod::minimap_lod_adapter::priority;
                 assert!(

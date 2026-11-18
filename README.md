@@ -1,14 +1,52 @@
 # Minimap, Worldmap and waypoints reworked
 
 A native Horizon mod by daniliammo, continued as [Gurov08ruS](https://github.com/Gurov08ruS).
-Version **0.6.1** improves distant LOD loading and zoom transitions with persistent
-world-space overview tiles, target prefetch and reusable GPU pages. It retains
-the per-world terrain container, 3D-waypoint markers, death waypoints and biome
-icons from earlier releases. See [CHANGELOG.md](CHANGELOG.md).
+Version **0.7.0** uses Horizon's signed native SDK and the modern
+flat **`.hmod`** format. It includes the cache manager, LOD colour fixes and
+configurable two-letter waypoint markers. Earlier **0.6.1** packages use the legacy `.hnmod` format for the older game.
+Use the new `.hmod` release with the current launcher. See [CHANGELOG.md](CHANGELOG.md).
 
 <p align="center">
   <img src="assets/icon.png" width="128" alt="Minimap, Worldmap and waypoints reworked mod icon">
 </p>
+
+## New in 0.7.0
+
+Version 0.7.0 adds a basic **Map caches** manager, opened from the world map
+or the mod's settings while in a world. It lists cache files with their saved
+world/server identity, display name, available local icon, size and compatibility
+status. Names and icons are read from the local save and saved server list; a
+missing icon or removed list entry uses a fallback. Select a file to rebuild its
+derived map images without clearing canonical terrain. Refresh updates the list.
+Compression and conversion of unsupported container formats remain unavailable.
+
+An **Update cache…** prompt appears when a cache uses an older image revision.
+The offer survives ordinary saves/restarts until rebuilding is confirmed. Unknown
+newer formats remain untouched and require a compatible mod version; an old
+canonical format without a converter cannot be reset or silently converted.
+Catalog discovery reads only two headers per file on a separate worker; only
+visible icons are copied into GUI pictures. The catalog is loaded on request,
+not when joining a world, so discovery does not compete with initial map loading.
+
+LOD colour fixes use a fixed world-space biome blend radius and the same water
+opacity policy as ordinary chunks. Mangrove water retains its biome tint at far
+zoom. Where thin snow/weather layers are absent from LOD, cold exposed natural
+surfaces and canopies receive approximate snow cover, and exposed cold water an
+ice colour, using the biome's precipitation, temperature and elevation. Explicit
+snow, powder snow, packed/blue ice and artificial blocks retain supplied colours;
+ordinary detailed terrain always has priority. Water above an unknown seabed
+remains visible. Older LOD colours are updated once fresh Horizon samples arrive;
+old coverage remains a fallback until those cells have new data. Historical
+terrain unavailable from Horizon cannot be reconstructed by changing the cache.
+
+Waypoint initials can distinguish matching first letters: the default adds the
+second letter when the colours are similar; a setting can apply it regardless
+of colour or keep one letter. The same abbreviations appear on both maps, in
+the waypoint list and in 3D. Colours are considered similar within a fixed RGB
+distance of 48; world/dimension and skull icons are kept separate. Initials are
+recomputed when points or this setting change, rather than for every marker draw.
+
+The full changes since 0.6.0 are listed in [CHANGELOG.md](CHANGELOG.md).
 
 ## Screenshots
 
@@ -46,37 +84,39 @@ icons from earlier releases. See [CHANGELOG.md](CHANGELOG.md).
 
 ## Install
 
-```bash
-./install-horizon.sh
-```
+Requires Horizon Nightly **2026-11-18 · `0b14f8a`**, Minecraft **26.3** and a
+launcher with the signed-SDK native route (tested with **0.2.78**).
 
-The Bash installer packages the current sources, atomically installs the `.hnmod`
-in `~/.local/share/horizon/horizon-native-mods/`, and enables this mod in
-`horizon-mods.txt`. It preserves other mods and key assignments. It does not
-compile or launch the game by default. Use `--horizon-dir /path/to/game` for
-another game folder. It runs on Linux and macOS (Bash 3.2 or newer); on Windows,
-build `python3 tools/package.py` and import the resulting `.hnmod` in the
-launcher, or run the script in Git Bash.
-
-Optional native build through the launcher:
+Download the `.hmod` from [release 0.7.0](https://github.com/Gurov08ruS/Minimap-Worldmap-and-waypoints-reworked/releases/tag/v0.7.0), or build the same source package:
 
 ```bash
-./install-horizon.sh --build --instance NAME
+python3 tools/package.py
 ```
 
-Use the instance's name or ID from `horizon-launcher --json instance list`.
-The installer resolves and validates that instance's game directory and builds
-its installed native mod set. `--launcher /path/to/horizon-launcher` selects a
-launcher executable. A source `.hnmod` needs one game build before it can run.
-The script does not update a published release or registry entry.
+Import `target/minimap_worldmap_waypoints_reworked-0.7.0.hmod` in the launcher,
+enable it for the chosen instance and build that instance's native mods. The
+launcher obtains the matching signed SDK and compiles the mod and its function
+copies; it does not rebuild Horizon. A `.hnmod` cannot be converted by renaming
+its extension. The original data directory, world identities, waypoints and
+terrain cache remain in use.
+
+Alternatively, on Linux/macOS or Windows Git Bash:
+
+```bash
+./install-horizon.sh --horizon-dir /path/to/instance
+./install-horizon.sh --build --instance NAME --launcher /path/to/horizon-launcher
+```
+
+The installer atomically installs this mod's `.hmod`, preserves other mods and
+bindings, and enables only this mod. It retains a recognized old `.hnmod` as a
+`.hnmod.legacy` backup outside the launcher's mod filter. `--instance` uses the
+name or ID from `horizon-launcher --json instance list`.
 
 ## Release signatures
 
-Download the `.hnmod` and its matching `.hnmod.minisig` from this repository's
-[releases](https://github.com/Gurov08ruS/Minimap-Worldmap-and-waypoints-reworked/releases).
-Packages are signed with minisign; release commits and tags use the original
-GPG signing key. See [SIGNING.md](SIGNING.md) for verification commands and the
-GPG-signed minisign public key.
+Release **0.7.0** includes minisign and OpenPGP signatures, signed checksums and
+the public verification keys. It uses the same signing keys as earlier releases;
+see [SIGNING.md](SIGNING.md). Legacy 0.6.1 artifacts remain available unchanged.
 
 ## Language
 
@@ -196,7 +236,7 @@ language in its language settings. Saved waypoint names are preserved as entered
 ## Current map implementation
 
 Both views use one background sampler and a persistent repository. One
-`cache/<world-id-hash>.mwwr` file holds all dimensions and sampled height layers
+`cache/<kind>-<readable-name>-<identity-hash>.mwwr` file holds all dimensions and sampled height layers
 of a single-player save or server address. The directory is inside Horizon's
 mod data folder: `horizon-mods/.horizon-mod-data/minimap_worldmap_waypoints_reworked/`
 under the game directory. The exact world identity is checked inside the file;
@@ -223,7 +263,7 @@ left untouched and uses a bounded temporary RAM map, with a visible warning.
 
 The initial format uses CRC32C, two recoverable roots, checked index pages and
 in-file free-space reuse. It currently stores raw records (codec 0); Zstd,
-transactional deletion, compaction and cache-manager controls remain future work.
+transactional deletion, compaction and cache deletion controls remain future work.
 See [CONTAINER.md](CONTAINER.md) for the format and its current limits.
 
 The map also reads Horizon’s existing CPU LOD columns through an injected adapter.
@@ -346,78 +386,66 @@ external journals, lock files or temporary copies. Waypoints remain in the
 settings file (bounded to 64 per world/server and 4,096 total). No network
 requests are made by the mod.
 
-The two views use Horizon's shared native RGBA atlas slot. Mods that independently
-write that same global slot may require integration to coexist; this release does
-not add a new engine texture allocator.
+Both map views use independent GUI picture pages through Horizon’s portable HUD
+renderer. The legacy small-image path still uses the shared native RGBA slot.
 
 ## Compatibility
 
-- Minecraft Java Edition **26.3**, through Horizon.
-- Horizon Nightly **2026-11-13**, commit
-  `9f42064c11efe7ef3e5ed2baad7ddc2a3b36eea0`.
-- Horizon Mixins `d9c83d7096b7ea5b83678da2efdfd6161f74997e` (schema 6).
+- Minecraft Java Edition **26.3**.
+- Signed Horizon SDK / Nightly **2026-11-18**, commit
+  `0b14f8acfd97fa2c750e42795249dcc981178ca4`.
+- SDK Rust **1.99.1**, package format **6**; Horizon Mixins
+  `e59da9094f0c2fdda6c627fe9eff22dec6a906f0`, plan schema **6**.
 
-These revisions are pinned in [compatibility.json](compatibility.json) and the
-mixin manifest. Other revisions and combinations with other mods are not claimed
-compatible. See [VALIDATION.md](VALIDATION.md) for check results and practical
-limits. The native mod and its injected runtime use only portable Rust standard
-library APIs, with no Linux-specific calls, and are intended to build and run on
-Linux, macOS and Windows. The running game has only been exercised on Linux in
-these checks, so macOS/Windows remain unverified.
-
-The Bash installer targets Linux and macOS; on Windows, install the `.hnmod` with
-the Horizon launcher. The Python validation tooling takes a platform lock with
-`flock` on Unix and `msvcrt.locking` on Windows.
+The pins and source hashes are in [compatibility.json](compatibility.json).
+Other game revisions require a deliberate port. The shared runtime and game
+adapters use portable APIs; the registration path decoder is gated for Unix and
+Windows, preserving non-Unicode paths. Linux was exercised with the installed
+Nightly; macOS/Windows execution and combinations with other mods remain
+unverified. See [VALIDATION.md](VALIDATION.md).
 
 ## Build and validate
 
-`src/lib.rs` loads the shared `runtime.rs` for standalone Cargo builds. Tests
-live in six `*_tests.rs` files beside the mixin sources. Their macros expand at
-the original private scopes in the runtime, client adapter and binding UI, so
-the same tests work in the injected code without exposing implementation details.
-The pinned Mixins schema requires self-contained payloads; the manifest registers
-the test macros as support modules instead of using external `mod` or `include!`
-inside injected sources. Keep those modules in the source package.
+Use Rust **1.99.1**, Python **3.12+**, the current `cargo-horizon-mod` and Horizon
+launcher. The package tool can be built from the pinned Horizon commit in a
+separate checkout; do not edit the original game or Mixins checkout. Set
+`HORIZON_MOD_TOOL` and `HORIZON_LAUNCHER` to current executables if they are not
+on PATH. Local tools also detect the ignored executables used during development.
 
-Use Rust **1.95.0**, Python **3.12+**, Git, and separate Horizon and Horizon Mixins
-checkouts. The runtime and Python tooling use portable APIs (the tooling locks
-with `flock` on Unix and `msvcrt` on Windows). `HORIZON_MIXINS` may point to
-a separate checkout at the exact Mixins revision above. The Horizon checkout must
-contain the pinned commit; staging exports only committed sources into ignored
-`target/` trees and never changes the checkout or player resources.
-
-```sh
-cargo fetch --locked
-cargo fmt --all --check
+```bash
+cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 cargo test --workspace --locked --offline
 python3 tools/test_template.py
-python3 tools/test_stage.py --horizon ../horizon
-python3 tools/horizon.py stage --horizon ../horizon
-cargo fetch --locked --manifest-path target/mixins/modded/Cargo.toml
-python3 tools/horizon.py check --horizon ../horizon
-python3 tools/horizon.py test --horizon ../horizon
+python3 tools/horizon.py check --horizon /path/to/read-only/horizon
+python3 tools/test_stage.py --horizon /path/to/read-only/horizon
+python3 tools/horizon.py test --horizon /path/to/read-only/horizon
 python3 tools/package.py
 ```
 
-Fetch the pinned Mixins checkout's dependencies with `cargo fetch --locked`
-before the offline checks. The output is
-`target/minimap_worldmap_waypoints_reworked-0.6.1.hnmod`.
-Check it with `cargo horizon-mod check <file>` using Horizon's official
-`cargo-horizon-mod` tool. The [validation workflow](.github/workflows/validate.yml)
-runs the standalone tests, source audit, real client check and tests, and official
-package check on the pinned source. It uploads the bundle and check logs.
+`--horizon` is an optional read-only audit of an existing checkout. Native builds
+use the signed SDK's committed pinned export, generated function mirrors and
+Mixins plan/apply. Build state and the disposable **SDK migration** instance stay
+inside ignored `target/`. The tools reuse installed Nightly files through hard
+links when available; `--installed-version-dir` supports another installation.
+Original worlds and prepared resources are not build destinations.
 
-A native mod is injected into `horizon-client`, so after any mod edit the
-launcher recompiles that one large crate; Cargo cannot split a single crate
-across processes, and Rust's parallel frontend is nightly-only while Horizon
-pins stable Rust. The `fast` profile still uses 16 codegen units, so codegen is
-parallel, but the frontend and link are not. For iterative builds select the
-launcher's **Dev** native profile (`horizon-launcher settings native-profile dev`
-or `horizon-launcher native-build --profile dev`), which the launcher documents
-as about six times faster to rebuild at some gameplay cost; keep Performance for
-playing. `python3 tools/horizon.py check` type-checks the real client without
-codegen or linking and is the quickest edit loop.
+`runtime.rs` is shared by the standalone library and the SDK mod crate. Four
+separate test payloads retain private-scope access in both. `test_template.py`
+checks deterministic flat packaging, exact source payloads, localized SDK labels
+and an isolated installer/legacy-backup fixture. The native check builds the
+actual installed `.hmod`; `test_stage.py` audits its real Mixins output. The SDK
+crate tests run against the fetched API source without rebuilding the game.
+Archived private-renderer fixtures are documented in `tests/legacy_adapter/` and
+are not counted as modern SDK passes. Live GUI checks use the disposable instance
+and `examples/sdk_fixture.rs`, not a player's worlds.
+
+To regenerate the SDK label catalog, run `cargo run --example export_settings`
+and export its language/key/value rows to `native/assets/<id>/lang/`. The
+[validation workflow](.github/workflows/validate.yml) builds the pinned tools,
+checks the archive and native adapters, runs both runtime test suites and
+uploads source packages and logs. Its new configuration has not yet been run
+on GitHub during this local migration.
 
 ## License and attribution
 

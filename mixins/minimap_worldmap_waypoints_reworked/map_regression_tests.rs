@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Expand at the original scope to retain private access and test names.
-// Mixins requires self-contained payloads; external mod/include files are unsupported.
+// Shared standalone/SDK tests, expanded in the runtime's private scope.
 
 #[cfg(test)]
 macro_rules! define_tests {

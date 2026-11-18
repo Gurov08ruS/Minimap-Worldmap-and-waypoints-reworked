@@ -1,55 +1,110 @@
 #!/usr/bin/env python3
-"""Package the mod as a source-only `.hnmod`, the file Horizon's registry and launcher take.
-
-The archive holds `horizon-native.json` and `mixins/<id>/` (`.rs`, `.toml` and license/attribution documents), with fixed dates and
-modes, so the same sources always give the same bytes and the same SHA-256. Horizon's
-`horizon_mods::index::native` reads it without running anything; the launcher compiles it on the pinned
-Horizon revision. Based on levzzz5154's packager for Veinminer.
-"""
+"""Assemble the flat, source-only .hmod project for Horizon's signed SDK route."""
+import argparse
 import hashlib
 import json
 from pathlib import Path
+import shutil
 import tomllib
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-GAME = '26.3'
+BUNDLE = ROOT / 'mixins/minimap_worldmap_waypoints_reworked'
+TESTS = {
+    'minimap_settings_tests.rs': 'settings_tests.rs',
+    'minimap_container_tests.rs': 'container_tests.rs',
+    'minimap_maps_tests.rs': 'maps_tests.rs',
+    'minimap_map_regression_tests.rs': 'map_regression_tests.rs',
+}
+
+
+def inputs():
+    manifest = tomllib.loads((ROOT / 'horizon-mod.toml').read_text())
+    cargo = tomllib.loads((ROOT / 'native/Cargo.toml.in').read_text())
+    core = tomllib.loads((ROOT / 'Cargo.toml').read_text())
+    compat = json.loads((ROOT / 'compatibility.json').read_text())
+    if manifest['version'] != cargo['package']['version'] or manifest['version'] != core['package']['version']:
+        raise ValueError('mod, native Cargo and standalone Cargo versions must agree')
+    native = manifest['native']
+    if (native['horizon'], native['mixins']) != (compat['horizon_revision'], compat['horizon_mixins_revision']):
+        raise ValueError('manifest and SDK compatibility pins differ')
+    files = {'horizon-mod.toml': ROOT / 'horizon-mod.toml', 'Cargo.toml': ROOT / 'native/Cargo.toml.in',
+             'src/lib.rs': ROOT / 'native/lib.rs', 'src/runtime.rs': BUNDLE / 'runtime.rs',
+             'icon.png': ROOT / 'assets/icon.png'}
+    for row in native.get('module', []) + native.get('mixin', []):
+        path = row.get('source', row.get('helper'))
+        parts = Path(path).parts
+        if len(parts) != 2 or parts[0] != 'src' or parts[1] in ('.', '..'):
+            raise ValueError(f'expected a flat src/ payload, got {path}')
+        source = ROOT / 'native/compat.rs' if path == 'src/compat.rs' else BUNDLE / parts[1]
+        if path in files and files[path] != source:
+            raise ValueError(f'conflicting payload: {path}')
+        files[path] = source
+    files.update({f'src/{name}': BUNDLE / source for name, source in TESTS.items()})
+    for name in ('LICENSE', 'LICENSE-MIT', 'NOTICE', 'NOTICE-REVIEW-PERMISSION.md'):
+        files[name] = ROOT / name
+    for path in sorted((ROOT / 'native/assets').rglob('*')):
+        if path.is_file():
+            files[path.relative_to(ROOT / 'native').as_posix()] = path
+    # The SDK resolves GUI translation keys through Minecraft's exact locale;
+    # the map's own runtime also accepts these regional language variants.
+    for parent, aliases in {
+        'fr_fr': ('fr_ca',),
+        'es_es': ('es_ar', 'es_cl', 'es_ec', 'es_mx', 'es_uy', 'es_ve'),
+        'de_de': ('de_at', 'de_ch'),
+    }.items():
+        for alias in aliases:
+            files[f"assets/{manifest['id']}/lang/{alias}.json"] = ROOT / 'native/assets' / manifest['id'] / 'lang' / f'{parent}.json'
+    for name, path in files.items():
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(f'payload must be a regular source file: {name}')
+    return manifest, files
+
+
+def prepare(out):
+    """Update our generated project, preserving only its downloaded .horizon SDK."""
+    out = Path(out).resolve()
+    if not out.is_relative_to(ROOT / 'target'):
+        raise ValueError('generated projects must be inside this repository target/')
+    manifest, files = inputs()
+    out.mkdir(parents=True, exist_ok=True)
+    previous = out / '.mwwr-generated.json'
+    if previous.exists():
+        for name in json.loads(previous.read_text()):
+            if name not in files:
+                path = out / name
+                if path.is_file() and not path.is_symlink():
+                    path.unlink()
+    for name, source in files.items():
+        destination = out / name
+        if destination.is_symlink():
+            raise ValueError(f'generated destination is a link: {destination}')
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        data = source.read_bytes()
+        if not destination.exists() or destination.read_bytes() != data:
+            destination.write_bytes(data)
+    previous.write_text(json.dumps(sorted(files)) + '\n')
+    return out
 
 
 def package():
-    compat = json.loads((ROOT / 'compatibility.json').read_text())
-    manifests = sorted((ROOT / 'mixins').glob('*/horizon-mixin.toml'))
-    if len(manifests) != 1:
-        raise SystemExit('a .hnmod holds one bundle: keep one mixins/<id>/horizon-mixin.toml')
-    bundle = manifests[0].parent
-    mixin = tomllib.loads(manifests[0].read_text())
-    mod = mixin['mod']
-    if bundle.name != mod['id']:
-        raise SystemExit(f"rename mixins/{bundle.name}/ to mixins/{mod['id']}/ (the registry finds it by id)")
-    if not mod['id'].replace('_', '').isalnum() or not mod['id'].islower():
-        raise SystemExit('the registry takes ids of lowercase letters, digits and _ only')
-    if mixin.get('compatibility', {}).get('horizon_revision') != compat['horizon_revision']:
-        raise SystemExit('horizon-mixin.toml and compatibility.json pin different Horizon revisions')
-    manifest = dict(schema=1, id=mod['id'], version=mod['version'], game=GAME,
-                    horizon=compat['horizon_revision'], mixins=compat['horizon_mixins_revision'])
-    files = {'horizon-native.json': (json.dumps(manifest, indent=2, sort_keys=True) + '\n').encode()}
-    for path in sorted(bundle.iterdir()):
-        if path.is_file() and path.suffix in ('.rs', '.toml'):
-            files[path.relative_to(ROOT).as_posix()] = path.read_bytes()
-    # Carry both the project license and upstream notices with distributed sources.
-    for name in ('LICENSE', 'LICENSE-MIT', 'NOTICE', 'NOTICE-REVIEW-PERMISSION.md'):
-        files[f"mixins/{mod['id']}/{name}"] = (ROOT / name).read_bytes()
-    out = ROOT / 'target' / f"{mod['id']}-{mod['version']}.hnmod"
+    manifest, files = inputs()
+    out = ROOT / 'target' / f"{manifest['id']}-{manifest['version']}.hmod"
     out.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(out, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
-        for name, content in sorted(files.items()):
+        for name, source in sorted(files.items()):
             info = zipfile.ZipInfo(name, (2026, 1, 1, 0, 0, 0))
             info.compress_type = zipfile.ZIP_DEFLATED
             info.external_attr = 0o100644 << 16
-            archive.writestr(info, content)
-    print(json.dumps(dict(file=str(out), size=out.stat().st_size,
-                          sha256=hashlib.sha256(out.read_bytes()).hexdigest()), indent=2))
+            archive.writestr(info, source.read_bytes())
+    return {'file': str(out), 'size': out.stat().st_size,
+            'sha256': hashlib.sha256(out.read_bytes()).hexdigest()}
 
 
 if __name__ == '__main__':
-    package()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--project', type=Path, help='also assemble a launcher build project inside target/')
+    args = parser.parse_args()
+    if args.project:
+        prepare(args.project)
+    print(json.dumps(package(), indent=2))

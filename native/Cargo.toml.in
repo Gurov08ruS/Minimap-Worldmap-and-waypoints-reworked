@@ -1,0 +1,14 @@
+[package]
+name = "minimap_worldmap_waypoints_reworked"
+version = "0.7.0"
+edition = "2024"
+rust-version = "1.99"
+license = "GPL-3.0-only"
+
+[dependencies]
+# The pinned SDK's API crate, fetched into .horizon/sdk/ by any `cargo horizon-mod` command (the
+# launcher builds against its own copy of the same build). Any other registry dependency must be
+# pinned with `horizon-launcher native-lock .` before building.
+horizon-mod-api = { path = ".horizon/sdk/api/crates/horizon-mod-api" }
+
+[workspace]

@@ -1,44 +1,39 @@
 // SPDX-License-Identifier: GPL-3.0-only
-fn on_map_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool) {
-    use crate::game::minimap_worldmap_waypoints_reworked as runtime;
-    if !pressed
+fn on_map_key(
+    game: &mut crate::game::Game<'_>,
+    key: &str,
+    action: mod_api::KeyAction,
+    modifiers: u32,
+) {
+    use crate::game::minimap_compat::MapAccess;
+    use ::minimap_worldmap_waypoints_reworked::runtime;
+    if action != mod_api::KeyAction::Press
         || !game.native_window()
-        || !game.native_on(runtime::MOD_ID)
+        || !game.map_on(runtime::MOD_ID)
         || runtime::text_input_active()
     {
         return;
     }
-    let map = game.native_mod_key(
-        runtime::MOD_ID,
-        runtime::WORLD_MAP_KEY,
-        runtime::WORLD_MAP_DEFAULT,
-    );
-    let waypoints = game.native_mod_key(
-        runtime::MOD_ID,
-        runtime::WAYPOINTS_KEY,
-        runtime::WAYPOINTS_DEFAULT,
-    );
-    let chosen = if key == map {
-        map.as_str()
-    } else if key == waypoints {
-        waypoints.as_str()
-    } else {
+    let chosen = [
+        (runtime::WORLD_MAP_KEY, runtime::ScreenRequest::Map),
+        (runtime::WAYPOINTS_KEY, runtime::ScreenRequest::Waypoints),
+    ]
+    .into_iter()
+    .find(|(id, _)| {
+        game.mod_key(runtime::MOD_ID, id)
+            .is_some_and(|(bound, mods)| bound == key && mods.bits & 7 == modifiers & 7)
+    });
+    let Some((_, request)) = chosen else {
         return;
     };
-    if chosen == "key.keyboard.unknown" {
+    if game.mod_screen() == Some(runtime::MOD_ID) {
+        game.mod_screen_close(runtime::MOD_ID);
         return;
     }
-    if game.native_mod_screen() == Some(runtime::MOD_ID) {
-        game.native_mod_screen_close(runtime::MOD_ID);
+    if !game.playing() {
         return;
     }
-    if !game.native_playing() {
-        return;
+    if game.mod_screen_open(runtime::MOD_ID) {
+        runtime::request_screen(request);
     }
-    runtime::request_screen(if key == map {
-        runtime::ScreenRequest::Map
-    } else {
-        runtime::ScreenRequest::Waypoints
-    });
-    game.native_mod_screen_open(runtime::MOD_ID);
 }

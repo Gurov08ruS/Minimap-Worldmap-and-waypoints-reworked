@@ -1,11 +1,155 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Expand at the original scope to retain private access and test names.
-// Mixins requires self-contained payloads; external mod/include files are unsupported.
+// Shared standalone/SDK tests, expanded in the runtime's private scope.
 
 #[cfg(test)]
 macro_rules! define_tests {
     () => {
         mod tests {
+            #[test]
+            fn image_upgrade_offer_survives_commits_until_user_rebuilds() {
+                let dir = TestDir::new("upgrade-offer");
+                let world = "save:upgrade";
+                let path = world_path(&dir.0, world);
+                {
+                    let mut s = Store::open(&dir.0, world).unwrap();
+                    s.put([1, 0, 0, 0, 0, 0], vec![9]).unwrap();
+                    s.commit().unwrap();
+                }
+                let mut bytes = std::fs::read(&path).unwrap();
+                for slot in 0..2 {
+                    let h = &mut bytes[slot * PAGE..(slot + 1) * PAGE];
+                    put32(h, 44, 1);
+                    seal(h);
+                }
+                std::fs::write(&path, bytes).unwrap();
+                assert_eq!(
+                    inspect(&path).unwrap().compatibility,
+                    Compatibility::RebuildImages
+                );
+                {
+                    let mut s = Store::open_existing(&path, world).unwrap();
+                    assert!(s.upgrade_pending);
+                    s.put([0, 9, 0, 0, 0, 0], vec![1]).unwrap();
+                    s.commit().unwrap();
+                }
+                assert_eq!(
+                    inspect(&path).unwrap().compatibility,
+                    Compatibility::RebuildImages
+                );
+                let service = super::super::maps::Service::with_directory(Some(dir.0.clone()));
+                service
+                    .rebuild_images(world, path.file_name().unwrap().to_str().unwrap())
+                    .unwrap()
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap()
+                    .unwrap();
+                service.shutdown();
+                assert_eq!(
+                    inspect(&path).unwrap().compatibility,
+                    Compatibility::Current
+                );
+                let mut s = Store::open_existing(&path, world).unwrap();
+                assert_eq!(s.read([1, 0, 0, 0, 0, 0]).unwrap().unwrap(), vec![9]);
+            }
+            #[test]
+            fn catalog_is_read_only_recovers_the_second_header_and_ignores_other_files() {
+                let dir = TestDir::new("catalog");
+                let world = "server:play.example:25565";
+                let path = world_path(&dir.0, world);
+                {
+                    let mut store = Store::open(&dir.0, world).unwrap();
+                    store.put([1, 0, 0, 1, 2, 0], vec![7; 32]).unwrap();
+                    store.commit().unwrap();
+                }
+                let mut bytes = std::fs::read(&path).unwrap();
+                bytes[0] = 0;
+                std::fs::write(&path, &bytes).unwrap();
+                std::fs::write(dir.0.join("not-a-cache.png"), b"x").unwrap();
+                let info = inspect(&path).unwrap();
+                assert_eq!(info.world.as_deref(), Some(world));
+                assert_eq!(info.compatibility, Compatibility::Current);
+                let list = super::super::cache_manager::scan(&dir.0).unwrap();
+                assert_eq!(list.entries.len(), 1);
+                assert_eq!(list.entries[0].bytes, bytes.len() as u64);
+                assert_eq!(list.entries[0].name, "play.example:25565");
+                assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            }
+            #[test]
+            fn future_format_and_visual_revision_are_never_rewritten() {
+                for (schema, visual) in [(SCHEMA + 1, 0), (SCHEMA, VISUAL_REVISION + 1)] {
+                    let dir = TestDir::new("future-manager");
+                    let world = "save:future";
+                    let path = world_path(&dir.0, world);
+                    {
+                        let mut s = Store::open(&dir.0, world).unwrap();
+                        s.put([1, 0, 0, 0, 0, 0], vec![1]).unwrap();
+                        s.commit().unwrap();
+                    }
+                    let mut bytes = std::fs::read(&path).unwrap();
+                    for slot in 0..2 {
+                        let h = &mut bytes[slot * PAGE..(slot + 1) * PAGE];
+                        put32(h, 8, schema);
+                        put32(h, 44, visual);
+                        seal(h);
+                    }
+                    std::fs::write(&path, &bytes).unwrap();
+                    assert!(matches!(
+                        inspect(&path).unwrap().compatibility,
+                        Compatibility::Newer(_)
+                    ));
+                    assert!(Store::open_existing(&path, world).is_err());
+                    assert!(Store::open(&dir.0, world).is_err());
+                    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+                }
+                assert_eq!(compatibility(SCHEMA, 0), Compatibility::RebuildImages);
+                assert!(matches!(
+                    compatibility(SCHEMA - 1, 0),
+                    Compatibility::Older(_)
+                ));
+            }
+            #[test]
+            fn maintenance_never_creates_or_initializes_a_missing_or_empty_cache() {
+                let dir = TestDir::new("maintenance-existing");
+                let path = world_path(&dir.0, "save:missing");
+                assert!(Store::open_existing(&path, "save:missing").is_err());
+                assert!(!path.exists());
+                let bytes = vec![0; PREFIX as usize];
+                std::fs::write(&path, &bytes).unwrap();
+                assert!(Store::open_existing(&path, "save:missing").is_err());
+                assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            }
+            #[test]
+            fn catalog_resolver_is_async_and_refreshes_names_without_touching_containers() {
+                let dir = TestDir::new("catalog-worker");
+                let world = "save:folder";
+                {
+                    let _store = Store::open(&dir.0, world).unwrap();
+                }
+                let before = std::fs::read(world_path(&dir.0, world)).unwrap();
+                let service = super::super::cache_manager::Service::new(dir.0.clone());
+                let (entered, ready) = std::sync::mpsc::sync_channel(1);
+                let (release, wait) = std::sync::mpsc::sync_channel(1);
+                assert!(service.refresh(move |rows| {
+                    entered.send(()).unwrap();
+                    wait.recv().unwrap();
+                    rows[0].name = "Displayed world".into();
+                    Ok(())
+                }));
+                ready
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+                assert!(service.snapshot().loading);
+                assert!(!service.refresh(|_| Ok(())));
+                release.send(()).unwrap();
+                let start = std::time::Instant::now();
+                while service.snapshot().loading {
+                    assert!(start.elapsed() < std::time::Duration::from_secs(5));
+                    std::thread::yield_now();
+                }
+                assert_eq!(service.snapshot().entries[0].name, "Displayed world");
+                service.shutdown();
+                assert_eq!(std::fs::read(world_path(&dir.0, world)).unwrap(), before);
+            }
             #[test]
             fn spatial_queries_match_history_before_and_after_recovery() {
                 let dir = TestDir::new("spatial");

@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Expand at the original scope to retain private access and test names.
-// Mixins requires self-contained payloads; external mod/include files are unsupported.
+// Shared standalone/SDK tests, expanded in the runtime's private scope.
 
 #[cfg(test)]
 macro_rules! define_tests {
@@ -15,6 +14,73 @@ macro_rules! define_tests {
 
             fn read_settings(path: &Path) -> io::Result<Settings> {
                 read_profile(path).map(|profile| profile.0)
+            }
+            #[test]
+            fn sdk_choices_cover_saved_preferences_and_reject_actions_and_bad_indices() {
+                let mut keys=std::collections::BTreeSet::new();
+                for (key,button) in SDK_SETTING_ROWS {
+                    assert!(keys.insert(key));
+                    let options=Settings::options(button);assert!(!options.is_empty()&&options.len()<=32);
+                    for (index,option) in options.iter().enumerate() {
+                        assert_eq!(option.option_index(button),Some(index));
+                        assert_eq!(Settings::decode(&option.encode()),*option);
+                        assert!(!option.option_label(button).unwrap().is_empty());
+                        let mut selected=Settings{cache_ram_mib:173,..Settings::default()};
+                        assert!(selected.select_option(button,index));
+                        assert_eq!(selected.option_index(button),Some(index));assert_eq!(selected.cache_ram_mib,173);
+                        let before=selected;assert!(!selected.select_option(button,options.len()));assert_eq!(selected,before);
+                    }
+                }
+                for action in [6,18,19,21,usize::MAX] {assert!(Settings::options(action).is_empty());assert_eq!(Settings::default().option_index(action),None);}
+            }
+            #[test]
+            fn sdk_choice_during_initial_load_preserves_other_preferences() {
+                let directory=scratch();fs::create_dir_all(&directory).unwrap();
+                fs::write(directory.join(SETTINGS_FILE),"size=256\ncache_ram_mib=173\nwaypoint_letters=one\n").unwrap();
+                let controller=Controller::open(directory.clone());
+                assert!(controller.set_option(20,1));assert!(!controller.set_option(20,3));assert!(!controller.set_option(19,0));
+                controller.shutdown();
+                let saved=read_settings(&directory.join(SETTINGS_FILE)).unwrap();
+                assert_eq!(saved.size_px,256);assert_eq!(saved.cache_ram_mib,173);assert_eq!(saved.waypoint_letters,minimap::WaypointLetters::AnyColors);
+                fs::remove_dir_all(directory).unwrap();
+            }
+            #[test]
+            fn sdk_explicit_defaults_override_nondefault_preferences_during_initial_load() {
+                let directory=scratch();fs::create_dir_all(&directory).unwrap();
+                fs::write(directory.join(SETTINGS_FILE),"size=256\ncache_ram_mib=256\nwaypoint_letters=one\n").unwrap();
+                let controller=Controller::open(directory.clone());
+                controller.set_cache_ram_mib(64);assert!(controller.set_option(20,0));controller.shutdown();
+                let saved=read_settings(&directory.join(SETTINGS_FILE)).unwrap();
+                assert_eq!(saved.size_px,256);assert_eq!(saved.cache_ram_mib,64);assert_eq!(saved.waypoint_letters,minimap::WaypointLetters::SimilarColors);
+                fs::remove_dir_all(directory).unwrap();
+            }
+            #[test]
+            fn waypoint_initials_expand_for_collisions_in_the_selected_colour_scope() {
+                use minimap::WaypointLetters::*;
+                let a=point("save:a","  Ёлка");let mut b=point("save:a","ёжик");b.color=a.color^0x000504;
+                assert_eq!(waypoint_labels(&[a.clone(),b.clone()],SimilarColors),vec!["ЁЛ","ЁЖ"]);
+                assert_eq!(waypoint_labels(&[a.clone(),b.clone()],One),vec!["Ё","Ё"]);
+                b.color=0xff0000;assert_eq!(waypoint_labels(&[a.clone(),b.clone()],SimilarColors),vec!["Ё","Ё"]);
+                assert_eq!(waypoint_labels(&[a.clone(),b.clone()],AnyColors),vec!["ЁЛ","ЁЖ"]);
+                b.world="save:b".into();assert_eq!(waypoint_labels(&[a.clone(),b.clone()],AnyColors),vec!["Ё","Ё"]);
+                b.world=a.world.clone();b.dimension=Dimension::Nether;assert_eq!(waypoint_labels(&[a.clone(),b.clone()],AnyColors),vec!["Ё","Ё"]);
+                b.dimension=a.dimension;b.icon=WaypointIcon::Skull;assert_eq!(waypoint_labels(&[a.clone(),b.clone()],AnyColors),vec!["Ё","Ё"]);
+                b.icon=WaypointIcon::Letter;b.name="Ё".into();assert_eq!(waypoint_labels(&[a,b],AnyColors),vec!["ЁЛ","Ё"]);
+                assert!(similar_waypoint_colors(0xff101020,0x00101020));
+                assert!(similar_waypoint_colors(0,48));assert!(!similar_waypoint_colors(0,49));
+            }
+            #[test]
+            fn waypoint_initials_setting_roundtrips_merges_and_resets() {
+                use minimap::WaypointLetters;
+                for mode in WaypointLetters::ALL {
+                    let settings=Settings{waypoint_letters:mode,..Settings::default()};assert_eq!(Settings::decode(&settings.encode()),settings);
+                }
+                assert_eq!(Settings::decode("waypoint_letters=invalid").waypoint_letters,WaypointLetters::SimilarColors);
+                let mut early=Settings::default();let mask=minimap::apply(&mut early,20);
+                assert_eq!(early.waypoint_letters,WaypointLetters::AnyColors);
+                let mut loaded=Settings::decode("size=256\ncache_ram_mib=128\nwaypoint_letters=one");minimap::merge(&mut loaded,early,mask);
+                assert_eq!(loaded.waypoint_letters,WaypointLetters::AnyColors);assert_eq!(loaded.size_px,256);assert_eq!(loaded.cache_ram_mib,128);
+                let reset=minimap::apply(&mut early,6);minimap::merge(&mut loaded,early,reset);assert_eq!(loaded,Settings::default());
             }
 
             static NEXT: AtomicU64 = AtomicU64::new(0);

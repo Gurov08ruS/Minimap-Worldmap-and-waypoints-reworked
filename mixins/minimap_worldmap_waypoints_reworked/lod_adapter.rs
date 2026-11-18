@@ -22,12 +22,15 @@ pub fn priority(
 }
 
 pub fn snapshots(
-    lod: &super::Lod,
+    lod: &horizon_client::lod::Lod,
     known: &BTreeMap<(i32, i32, u8), usize>,
     focus: [f64; 2],
     span: [f64; 2],
     limit: usize,
-) -> Vec<(super::TileKey, Arc<Vec<super::Column>>)> {
+) -> Vec<(
+    horizon_client::lod::TileKey,
+    Arc<Vec<horizon_client::lod::Column>>,
+)> {
     let limit = limit.min(8);
     if limit == 0 {
         return Vec::new();

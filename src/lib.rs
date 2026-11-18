@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Match the sibling-module layout injected into Horizon's game module.
+// Match the sibling test-module layout of the native SDK crate.
 #[path = "../mixins/minimap_worldmap_waypoints_reworked/runtime.rs"]
 mod minimap_worldmap_waypoints_reworked;
 

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Child of hud: use Horizon's portable, per-renderer GUI picture
 // texture ownership rather than reserving or overwriting shared atlas slots.
-use super::pictures::Picture;
+use horizon_client::hud::pictures::Picture;
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
@@ -18,14 +18,18 @@ pub fn create(width: u32, height: u32, pixels: Vec<u8>) -> Arc<Picture> {
         width,
         height,
         pixels,
-        flags: super::TextureFlags {
+        flags: horizon_client::hud::TextureFlags {
             blur: false,
             clamp: true,
         },
     })
 }
 
-pub fn paint(batch: &mut super::HudBatch, picture: &Arc<Picture>, points: &[[f64; 4]]) {
+pub fn paint(
+    batch: &mut horizon_client::hud::HudBatch,
+    picture: &Arc<Picture>,
+    points: &[[f64; 4]],
+) {
     if points.len() < 3 {
         return;
     }
@@ -43,7 +47,7 @@ pub fn paint(batch: &mut super::HudBatch, picture: &Arc<Picture>, points: &[[f64
             u32::MAX,
         );
     }
-    batch.blend_since(start, super::Blend::Picture(picture.id));
+    batch.blend_since(start, horizon_client::hud::Blend::Picture(picture.id));
     if !batch.pictures.iter().any(|p| p.id == picture.id) {
         batch.pictures.push(picture.clone());
     }
