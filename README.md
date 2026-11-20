@@ -1,7 +1,7 @@
 # Minimap, Worldmap and waypoints reworked
 
 A native Horizon mod by daniliammo, continued as [Gurov08ruS](https://github.com/Gurov08ruS).
-Version **0.7.5** uses Horizon's signed native SDK and the modern
+Version **0.7.9** uses Horizon's signed native SDK and the modern
 flat **`.hmod`** format. It includes the cache manager, LOD colour fixes and
 configurable two-letter waypoint markers. Earlier **0.6.1** packages use the legacy `.hnmod` format for the older game.
 Use the current `.hmod` source package with the current launcher. See [CHANGELOG.md](CHANGELOG.md).
@@ -9,6 +9,48 @@ Use the current `.hmod` source package with the current launcher. See [CHANGELOG
 <p align="center">
   <img src="assets/icon.png" width="128" alt="Minimap, Worldmap and waypoints reworked mod icon">
 </p>
+
+## New in 0.7.9
+
+Buttons and context actions use original colour pixel icons. The in-game map
+and cache preview show ready terrain progressively, prioritizing the visible
+area before prefetch. The cache preview scans for portal markers in short
+batches, and the catalog reads each cache header through a single descriptor.
+
+## New in 0.7.8
+
+Opening, migrating and deleting cache files share a namespace lock. Delete
+confirmation verifies the directory and file selected in the list. A live map
+retries an occupied cache and saves the samples still in memory after a preview
+closes. Leaving the world releases its lease even after a write failure.
+
+Preview starts on a stored terrain layer. In the Nether it prefers a saved
+underground layer near the last position. Use the layer button to cycle through
+layers in the selected dimension. The cache manager opens from title Options
+and offers its own gamepad focus and Back actions.
+
+## New in 0.7.7
+
+The offline map shows biome pictograms and Nether coordinates under the cursor.
+It also restores nearby portal markers from saved detailed terrain. Use
+**Move view to…** to enter X and Z in the selected dimension. Right-click the
+map to create a waypoint, or right-click its marker to edit or delete it.
+Offline waypoint changes apply to the selected world or server and persist
+separately from the terrain cache.
+
+The in-game world map's waypoint menu includes **Teleport to waypoint** when
+allowed. It uses the waypoint's saved dimension, exact Y and the center of
+its X/Z block, even if the click lands over a neighbouring block. Custom
+buttons and context actions now have drawn icons.
+
+## New in 0.7.6
+
+The offline preview and the in-game world map share the map renderer, eased
+camera and paged terrain pipeline. The preview streams saved detail and LOD
+read-only, with cached coordinates, biome labels and saved waypoints. Both maps
+zoom out to 512 blocks per GUI pixel. If the player is outside the visible map
+area, a small arrow points toward their position. The offline marker is grey
+and uses the saved heading when available.
 
 ## New in 0.7.5
 
@@ -144,7 +186,7 @@ Build the current `.hmod` source package:
 python3 tools/package.py
 ```
 
-Import `target/minimap_worldmap_waypoints_reworked-0.7.5.hmod` in the launcher,
+Import `target/minimap_worldmap_waypoints_reworked-0.7.9.hmod` in the launcher,
 enable it for the chosen instance and build that instance's native mods. The
 launcher obtains the matching signed SDK and compiles the mod and its function
 copies; it does not rebuild Horizon. A `.hnmod` cannot be converted by renaming

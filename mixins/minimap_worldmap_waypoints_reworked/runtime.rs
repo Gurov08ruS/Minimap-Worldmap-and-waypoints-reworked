@@ -389,6 +389,24 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
         ],
     ),
     (
+        "Cache selection changed; refresh the list",
+        [
+            "Выбранный кеш изменился; обновите список",
+            "Le cache sélectionné a changé ; actualisez la liste",
+            "La caché seleccionada ha cambiado; actualiza la lista",
+            "Ausgewählter Cache hat sich geändert; Liste aktualisieren",
+        ],
+    ),
+    (
+        "Cache directory changed; refresh the list",
+        [
+            "Папка кешей изменилась; обновите список",
+            "Le dossier des caches a changé ; actualisez la liste",
+            "La carpeta de cachés ha cambiado; actualiza la lista",
+            "Cache-Ordner hat sich geändert; Liste aktualisieren",
+        ],
+    ),
+    (
         "Cache is in use by another client",
         [
             "Кеш занят другим клиентом",
@@ -3444,6 +3462,234 @@ pub mod container {
         }
     }
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct FileId {
+        volume: u64,
+        index: u64,
+        created: Option<std::time::SystemTime>,
+    }
+
+    #[cfg(unix)]
+    fn file_id(file: &File) -> io::Result<FileId> {
+        use std::os::unix::fs::MetadataExt;
+        let meta = file.metadata()?;
+        Ok(FileId {
+            volume: meta.dev(),
+            index: meta.ino(),
+            created: meta.created().ok(),
+        })
+    }
+
+    #[cfg(windows)]
+    fn file_id(file: &File) -> io::Result<FileId> {
+        use std::os::windows::io::AsRawHandle;
+        #[repr(C)]
+        struct FileInformation {
+            attributes: u32,
+            created: [u32; 2],
+            accessed: [u32; 2],
+            written: [u32; 2],
+            volume: u32,
+            size_hi: u32,
+            size_lo: u32,
+            links: u32,
+            index_hi: u32,
+            index_lo: u32,
+        }
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetFileInformationByHandle(
+                file: std::os::windows::io::RawHandle,
+                info: *mut FileInformation,
+            ) -> i32;
+        }
+        let mut info = std::mem::MaybeUninit::uninit();
+        // The borrowed File owns a valid handle. The API initializes the
+        // entire repr(C) output on success.
+        let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle(), info.as_mut_ptr()) };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let info = unsafe { info.assume_init() };
+        Ok(FileId {
+            volume: info.volume.into(),
+            index: (u64::from(info.index_hi) << 32) | u64::from(info.index_lo),
+            created: file.metadata()?.created().ok(),
+        })
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn file_id(_file: &File) -> io::Result<FileId> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Cache identity is unavailable",
+        ))
+    }
+
+    pub(super) fn directory_handle(path: &Path) -> io::Result<File> {
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.custom_flags(0x0200_0000); // FILE_FLAG_BACKUP_SEMANTICS
+        }
+        let file = options.open(path)?;
+        if !file.metadata()?.is_dir() {
+            return Err(invalid("Cache directory changed; refresh the list"));
+        }
+        Ok(file)
+    }
+
+    fn lock_result(error: TryLockError) -> LeaseError {
+        match error {
+            TryLockError::WouldBlock => LeaseError::Busy,
+            TryLockError::Error(error) => LeaseError::Io(error),
+        }
+    }
+
+    /// Stored beside the cache directory so renaming/replacing that directory
+    /// doesn't produce a second lock inode. Never remove or rename this file.
+    struct NamespaceGate {
+        lock: File,
+    }
+
+    fn namespace_parent(directory: &Path) -> &Path {
+        directory
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."))
+    }
+
+    impl NamespaceGate {
+        fn acquire(directory: &Path) -> Result<Self, LeaseError> {
+            let name = directory
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_lowercase();
+            let (hash, _) = cache_hash_pair(&name);
+            let path =
+                namespace_parent(directory).join(format!(".mwwr-namespace-{hash:016x}.lock"));
+            let lock = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(path)
+                .map_err(LeaseError::Io)?;
+            lock.try_lock().map_err(lock_result)?;
+            Ok(Self { lock })
+        }
+    }
+
+    impl Drop for NamespaceGate {
+        fn drop(&mut self) {
+            // Release before an inherited descriptor from a concurrent
+            // subprocess can prolong this short namespace operation.
+            let _ = self.lock.unlock();
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct DeleteSelection {
+        pub(super) file: String,
+        directory_id: FileId,
+        file_id: FileId,
+        len: u64,
+        modified: Option<std::time::SystemTime>,
+    }
+
+    impl DeleteSelection {
+        #[cfg(test)]
+        pub(super) fn read(directory: &Path, name: &str) -> io::Result<Self> {
+            let parent = directory_handle(directory)?;
+            let path = super::cache_manager::selected_path(directory, name)?;
+            let file = File::open(path)?;
+            let selection = Self::from_handles(name, &parent, &file)?;
+            if file_id(&directory_handle(directory)?)? != selection.directory_id {
+                return Err(invalid("Cache directory changed; refresh the list"));
+            }
+            Ok(selection)
+        }
+
+        pub(super) fn from_handles(name: &str, directory: &File, file: &File) -> io::Result<Self> {
+            let metadata = file.metadata()?;
+            Ok(Self {
+                file: name.to_owned(),
+                directory_id: file_id(directory)?,
+                file_id: file_id(file)?,
+                len: metadata.len(),
+                modified: metadata.modified().ok(),
+            })
+        }
+    }
+
+    /// Detach the verified file under the namespace gate, then remove only the
+    /// detached object. If an external rename races our checks, never unlink
+    /// the replacement. An unrestorable detached object is kept for recovery.
+    pub(super) fn delete_selected(
+        directory: &Path,
+        selection: &DeleteSelection,
+    ) -> Result<(), LeaseError> {
+        let _gate = NamespaceGate::acquire(directory)?;
+        delete_in_namespace(directory, selection).map_err(LeaseError::Io)
+    }
+
+    fn delete_in_namespace(directory: &Path, selection: &DeleteSelection) -> io::Result<()> {
+        let parent = directory_handle(directory)?;
+        let changed = || invalid("Cache selection changed; refresh the list");
+        if file_id(&parent)? != selection.directory_id {
+            return Err(changed());
+        }
+        let path = super::cache_manager::selected_path(directory, &selection.file)?;
+        let lease = ContainerLease::lock_existing(&path, false).map_err(|error| match error {
+            LeaseError::Busy => io::Error::new(io::ErrorKind::WouldBlock, error.to_string()),
+            LeaseError::Io(error) => error,
+        })?;
+        if DeleteSelection::from_handles(&selection.file, &parent, &lease.file)? != *selection
+            || file_id(&directory_handle(directory)?)? != selection.directory_id
+        {
+            return Err(changed());
+        }
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let stage = loop {
+            let index = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let stage = namespace_parent(directory)
+                .join(format!(".mwwr-delete-{}-{index}", std::process::id()));
+            match std::fs::create_dir(&stage) {
+                Ok(()) => break stage,
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        };
+        let detached = stage.join("cache.mwwr");
+        let result = (|| {
+            std::fs::rename(&path, &detached)?;
+            if File::open(&detached).and_then(|f| file_id(&f)).ok() != Some(selection.file_id)
+                || directory_handle(directory).and_then(|d| file_id(&d)).ok()
+                    != Some(selection.directory_id)
+            {
+                return Err(changed());
+            }
+            std::fs::remove_file(&detached)
+        })();
+        if result.is_err()
+            && detached.exists()
+            && directory_handle(directory)
+                .and_then(|dir| file_id(&dir))
+                .ok()
+                == Some(selection.directory_id)
+        {
+            // Restore without overwriting a file created at the old name.
+            if std::fs::hard_link(&detached, &path).is_ok() {
+                let _ = std::fs::remove_file(&detached);
+            }
+        }
+        let _ = std::fs::remove_dir(&stage);
+        result
+    }
+
     /// Owns exactly one locked descriptor.
     #[derive(Debug)]
     pub struct ContainerLease {
@@ -3454,15 +3700,31 @@ pub mod container {
         /// Call on an I/O worker. No bytes are read or changed before ownership.
         /// Unsupported locking is an error, never permission to continue unlocked.
         pub fn open_existing(path: &Path) -> Result<Self, LeaseError> {
+            let directory = path
+                .parent()
+                .ok_or_else(|| LeaseError::Io(invalid("Invalid cache file")))?;
+            let _gate = NamespaceGate::acquire(directory)?;
+            Self::lock_existing(path, false)
+        }
+
+        fn lock_existing(path: &Path, shared: bool) -> Result<Self, LeaseError> {
+            if !std::fs::symlink_metadata(path)
+                .map_err(LeaseError::Io)?
+                .is_file()
+            {
+                return Err(LeaseError::Io(invalid("Invalid cache file")));
+            }
             let file = OpenOptions::new()
                 .read(true)
-                .write(true)
+                .write(!shared)
                 .open(path)
                 .map_err(LeaseError::Io)?;
-            file.try_lock().map_err(|error| match error {
-                TryLockError::WouldBlock => LeaseError::Busy,
-                TryLockError::Error(error) => LeaseError::Io(error),
-            })?;
+            if shared {
+                file.try_lock_shared()
+            } else {
+                file.try_lock()
+            }
+            .map_err(lock_result)?;
             Ok(Self { file })
         }
 
@@ -3603,12 +3865,15 @@ pub mod container {
     /// Bounded read-only discovery: no index/payload loading, rename or lease.
     /// A concurrent commit may give a previous valid root, never a torn label.
     pub fn inspect(path: &Path) -> io::Result<FileInfo> {
-        let mut file = File::open(path)?;
+        inspect_file(&mut File::open(path)?)
+    }
+
+    pub(super) fn inspect_file(file: &mut File) -> io::Result<FileInfo> {
         let bytes = file.metadata()?.len();
         let mut best = None;
         for slot in 0..2 {
             let mut header = vec![0; PAGE];
-            if read_at(&mut file, (slot * PAGE) as u64, &mut header).is_err()
+            if read_at(file, (slot * PAGE) as u64, &mut header).is_err()
                 || !checked(&header)
                 || !header.starts_with(b"MWWRC")
             {
@@ -3872,21 +4137,28 @@ pub mod container {
     /// Before files were named after their world, a cache was
     /// `<128-bit-hash>.mwwr`. Rename such a file to the readable name so
     /// existing terrain is kept; a failed rename just starts a fresh cache.
-    fn migrate_legacy_cache(directory: &Path, world: &str, target: &Path) {
+    fn migrate_legacy_cache(
+        directory: &Path,
+        world: &str,
+        target: &Path,
+    ) -> Result<(), LeaseError> {
         if target.exists() {
-            return;
+            return Ok(());
         }
         let (a, b) = cache_hash_pair(world);
         let legacy = directory.join(format!("{a:016x}{b:016x}.mwwr"));
-        if legacy.exists() {
-            let _ = std::fs::rename(legacy, target);
+        match ContainerLease::lock_existing(&legacy, false) {
+            Ok(_lease) => std::fs::rename(&legacy, target).map_err(LeaseError::Io),
+            Err(LeaseError::Io(e)) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
         }
     }
-    /// Rename every legacy hash-named cache in `directory` to the readable name
-    /// its stored world identity gives, without waiting for that world to be
-    /// opened. A file another process holds open, or whose readable name already
-    /// exists, is left as it is.
+    /// Best-effort migration of closed legacy containers. All name changes
+    /// share the same gate as open/create and deletion.
     pub fn migrate_cache_names(directory: &Path) {
+        let Ok(_gate) = NamespaceGate::acquire(directory) else {
+            return;
+        };
         let Ok(entries) = std::fs::read_dir(directory) else {
             return;
         };
@@ -3898,26 +4170,28 @@ pub mod container {
             let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
                 continue;
             };
-            // Legacy names are exactly 32 lowercase hex digits.
             if stem.len() != 32 || !stem.bytes().all(|b| b.is_ascii_hexdigit()) {
                 continue;
             }
-            let Some(world) = read_world_identity(&path) else {
+            let Ok(mut lease) = ContainerLease::lock_existing(&path, false) else {
+                continue;
+            };
+            let Some(world) =
+                read_world_identity(&mut lease.file).filter(|w| super::valid_waypoint_world(w))
+            else {
                 continue;
             };
             let target = world_path(directory, &world);
-            if target == path || target.exists() {
-                continue;
+            if target != path && !target.exists() {
+                let _ = std::fs::rename(&path, &target);
             }
-            let _ = std::fs::rename(&path, &target);
         }
     }
     /// The world identity stored in a cache's first header, when it is a valid
     /// container header.
-    fn read_world_identity(path: &Path) -> Option<String> {
-        let mut file = File::open(path).ok()?;
+    fn read_world_identity(file: &mut File) -> Option<String> {
         let mut header = vec![0; PAGE];
-        read_at(&mut file, 0, &mut header).ok()?;
+        read_at(file, 0, &mut header).ok()?;
         if &header[..8] != b"MWWRC002" || !checked(&header) {
             return None;
         }
@@ -3935,23 +4209,25 @@ pub mod container {
                 return Err(LeaseError::Io(invalid("invalid world identity")));
             }
             std::fs::create_dir_all(directory).map_err(LeaseError::Io)?;
-            // Keep terrain from caches named after a hash before this change.
+            let gate = NamespaceGate::acquire(directory)?;
             let path = world_path(directory, world);
-            migrate_legacy_cache(directory, world, &path);
-            // No participant renames/unlinks these files. A create race converges
-            // on one inode; initialization happens only after try_lock succeeds.
-            let file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(&path)
-                .map_err(LeaseError::Io)?;
-            file.try_lock().map_err(|e| match e {
-                TryLockError::WouldBlock => LeaseError::Busy,
-                TryLockError::Error(e) => LeaseError::Io(e),
-            })?;
-            Self::from_lease(ContainerLease { file }, world)
+            migrate_legacy_cache(directory, world, &path)?;
+            let lease = match ContainerLease::lock_existing(&path, false) {
+                Ok(lease) => lease,
+                Err(LeaseError::Io(e)) if e.kind() == io::ErrorKind::NotFound => {
+                    let file = OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .create_new(true)
+                        .open(&path)
+                        .map_err(LeaseError::Io)?;
+                    file.try_lock().map_err(lock_result)?;
+                    ContainerLease { file }
+                }
+                Err(e) => return Err(e),
+            };
+            drop(gate);
+            Self::from_lease(lease, world)
         }
         pub fn open_existing(path: &Path, world: &str) -> Result<Self, LeaseError> {
             if world.is_empty() || world.len() > 2048 {
@@ -3960,12 +4236,13 @@ pub mod container {
             Self::from_existing(ContainerLease::open_existing(path)?, world)
         }
         pub(super) fn open_preview(path: &Path, world: &str) -> Result<Self, LeaseError> {
-            let file = File::open(path).map_err(LeaseError::Io)?;
-            file.try_lock_shared().map_err(|error| match error {
-                TryLockError::WouldBlock => LeaseError::Busy,
-                TryLockError::Error(e) => LeaseError::Io(e),
-            })?;
-            Self::from_existing(ContainerLease { file }, world)
+            let directory = path
+                .parent()
+                .ok_or_else(|| LeaseError::Io(invalid("Invalid cache file")))?;
+            let gate = NamespaceGate::acquire(directory)?;
+            let lease = ContainerLease::lock_existing(path, true)?;
+            drop(gate);
+            Self::from_existing(lease, world)
         }
         fn from_existing(mut lease: ContainerLease, world: &str) -> Result<Self, LeaseError> {
             if lease.file_len().map_err(LeaseError::Io)? < PREFIX {
@@ -4417,6 +4694,7 @@ pub mod cache_manager {
     #[derive(Clone)]
     pub struct Entry {
         pub file: String,
+        pub deletion: Option<container::DeleteSelection>,
         pub world: Option<String>,
         pub name: String,
         pub icon: Option<Arc<Vec<u8>>>, // validated 64x64 RGBA, never a source path
@@ -4464,6 +4742,7 @@ pub mod cache_manager {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Snapshot::default()),
             Err(e) => return Err(e),
         };
+        let directory = container::directory_handle(directory).ok();
         let mut out = Snapshot::default();
         for file in files {
             let file = file?;
@@ -4478,17 +4757,28 @@ pub mod cache_manager {
             let Ok(name) = file.file_name().into_string() else {
                 continue;
             };
-            let info = container::inspect(&path).unwrap_or_else(|_| container::FileInfo {
-                world: None,
-                bytes: file.metadata().map_or(0, |m| m.len()),
-                compatibility: container::Compatibility::Damaged,
-            });
+            let mut handle = fs::File::open(&path).ok();
+            let info = handle
+                .as_mut()
+                .and_then(|file| container::inspect_file(file).ok())
+                .unwrap_or_else(|| container::FileInfo {
+                    world: None,
+                    bytes: file.metadata().map_or(0, |m| m.len()),
+                    compatibility: container::Compatibility::Damaged,
+                });
+            let deletion = directory
+                .as_ref()
+                .zip(handle.as_ref())
+                .and_then(|(directory, file)| {
+                    container::DeleteSelection::from_handles(&name, directory, file).ok()
+                });
             out.entries.push(Entry {
                 name: info
                     .world
                     .as_deref()
                     .and_then(|w| w.split_once(':'))
                     .map_or_else(|| name.clone(), |(_, n)| n.to_owned()),
+                deletion,
                 file: name,
                 world: info.world,
                 icon: None,
@@ -4930,6 +5220,21 @@ pub mod maps {
             }
             prepared
         }
+        fn visible_region(&self) -> [i64; 4] {
+            let extents = if self.large {
+                self.span
+            } else {
+                [self.span[0].hypot(self.span[1]); 2]
+            };
+            let left = (self.center[0] - extents[0] / 2.).floor() as i64;
+            let top = (self.center[1] - extents[1] / 2.).floor() as i64;
+            [
+                left,
+                top,
+                (self.center[0] + extents[0] / 2.).ceil() as i64 - left,
+                (self.center[1] + extents[1] / 2.).ceil() as i64 - top,
+            ]
+        }
         fn atlas_region(&self) -> [i64; 4] {
             let step = 2f64.powf(
                 (self.span[0].max(self.span[1]) / 4.0)
@@ -5010,7 +5315,7 @@ pub mod maps {
     const ZOOM_EPSILON: f64 = 0.0005;
     const SNAP_DISTANCE: f64 = 48.0;
     const MIN_ZOOM: f64 = 0.1;
-    const MAX_ZOOM: f64 = 64.0;
+    const MAX_ZOOM: f64 = 512.0;
 
     fn ease(current: f64, target: f64, dt: f64, rate: f64, epsilon: f64) -> f64 {
         let next = current + (target - current) * (1.0 - (-dt * rate).exp());
@@ -5598,6 +5903,25 @@ pub mod maps {
         pub atlas: Option<Arc<TerrainAtlas>>,
     }
 
+    /// Place an off-screen indicator on the ray from the usable map center.
+    pub fn edge_indicator(point: [f32; 2], bounds: [f32; 4]) -> Option<([f32; 2], [f32; 2])> {
+        let [x, y, w, h] = bounds;
+        if w <= 0. || h <= 0. || point.iter().any(|v| !v.is_finite()) {
+            return None;
+        }
+        let middle = [x + w / 2., y + h / 2.];
+        let delta = [point[0] - middle[0], point[1] - middle[1]];
+        let scale = (delta[0].abs() / (w / 2.)).max(delta[1].abs() / (h / 2.));
+        if scale <= 1. {
+            return None;
+        }
+        let length = delta[0].hypot(delta[1]);
+        Some((
+            [middle[0] + delta[0] / scale, middle[1] + delta[1] / scale],
+            [delta[0] / length, delta[1] / length],
+        ))
+    }
+
     /// Reproject an axis-aligned raster into the current world-map camera.
     pub fn raster_quad(source: &View, view: &View, rect: [f32; 4]) -> Option<([f32; 4], [f32; 4])> {
         let mut src = [0.0; 4];
@@ -5955,11 +6279,12 @@ pub mod maps {
     pub struct LastPosition {
         pub dimension: Dimension,
         pub block: [i32; 3],
+        pub yaw: Option<i16>,
     }
 
     impl LastPosition {
         fn encode(self) -> Vec<u8> {
-            [
+            let mut bytes: Vec<_> = [
                 self.dimension as i32,
                 self.block[0],
                 self.block[1],
@@ -5967,11 +6292,15 @@ pub mod maps {
             ]
             .into_iter()
             .flat_map(i32::to_le_bytes)
-            .collect()
+            .collect();
+            if let Some(yaw) = self.yaw {
+                bytes.extend(yaw.to_le_bytes());
+            }
+            bytes
         }
 
         fn decode(bytes: &[u8]) -> Option<Self> {
-            if bytes.len() != 16 {
+            if !matches!(bytes.len(), 16 | 18) {
                 return None;
             }
             let get = |i: usize| i32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap());
@@ -5981,14 +6310,49 @@ pub mod maps {
                     .copied()
                     .filter(|d| *d != Dimension::Player)?,
                 block: [get(1), get(2), get(3)],
+                yaw: bytes
+                    .get(16..18)
+                    .map(|yaw| i16::from_le_bytes([yaw[0], yaw[1]])),
             })
         }
     }
 
+    #[derive(Clone)]
+    pub struct CachedColumn {
+        pub height: Option<i32>,
+        pub biome: Option<Arc<str>>,
+        pub approximate: bool,
+    }
+
+    pub fn map_coordinates(text: &str) -> Option<[i32; 2]> {
+        let mut fields = text
+            .split(|c: char| c.is_whitespace() || c == ',')
+            .filter(|s| !s.is_empty());
+        let x: i32 = fields.next()?.parse().ok()?;
+        let z: i32 = fields.next()?.parse().ok()?;
+        (fields.next().is_none()
+            && [x, z]
+                .into_iter()
+                .all(|n| (-30_000_000..=30_000_000).contains(&n)))
+        .then_some([x, z])
+    }
+
+    type PreviewPortals = Arc<Vec<([i32; 3], Portal)>>;
+
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct PreviewDimension {
+        pub dimension: Dimension,
+        pub layers: Vec<(Layer, [f64; 2])>,
+    }
+
     pub struct Preview {
         pub position: Option<LastPosition>,
-        pub dimensions: Vec<(Dimension, [f64; 2])>,
+        pub dimensions: Vec<PreviewDimension>,
         cache: Cache,
+        atlas: Option<AtlasCache>,
+        portal_region: Option<(Dimension, Layer, [i64; 4])>,
+        portals: PreviewPortals,
+        portal_work: std::collections::VecDeque<RecordKey>,
     }
 
     impl Preview {
@@ -6005,38 +6369,149 @@ pub mod maps {
                 .ok()
                 .flatten()
                 .and_then(|bytes| LastPosition::decode(&bytes));
-            let mut first = BTreeMap::new();
-            for key in store.keys().filter(|key| matches!(key[1], 0 | 2)) {
-                if let Some(dimension) = record_dimension(key) {
+            let mut dimensions = BTreeMap::<Dimension, BTreeMap<Layer, [f64; 2]>>::new();
+            for key in store.keys().filter(|key| matches!(key[1], 0..=2)) {
+                if let Some(dimension) = record_dimension(key)
+                    && let Some(layer) = if key[1] == 2 {
+                        Some(Layer::Surface)
+                    } else {
+                        record_layer(key)
+                    }
+                {
                     let size = 16_i64 << if key[1] == 2 { key[5].clamp(0, 22) } else { 0 };
-                    first.entry(dimension).or_insert([
-                        (i64::from(key[3]) * size + size / 2) as f64,
-                        (i64::from(key[4]) * size + size / 2) as f64,
-                    ]);
+                    dimensions
+                        .entry(dimension)
+                        .or_default()
+                        .entry(layer)
+                        .or_insert([
+                            (i64::from(key[3]) * size + size / 2) as f64,
+                            (i64::from(key[4]) * size + size / 2) as f64,
+                        ]);
                 }
             }
-            if let Some(at) = position {
-                first.insert(
-                    at.dimension,
-                    [f64::from(at.block[0]), f64::from(at.block[2])],
-                );
-            }
-            let dimension = position
-                .map(|at| at.dimension)
-                .or_else(|| first.keys().next().copied());
+            let mut dimensions: Vec<_> = dimensions
+                .into_iter()
+                .map(|(dimension, layers)| {
+                    let last = position.filter(|at| at.dimension == dimension);
+                    let mut layers: Vec<_> = layers.into_iter().collect();
+                    layers.sort_by_key(|(layer, _)| match layer {
+                        Layer::Surface => (dimension == Dimension::Nether, 0),
+                        Layer::Below(y) => (
+                            dimension != Dimension::Nether,
+                            y.abs_diff(last.map_or(64, |at| at.block[1].saturating_add(1))),
+                        ),
+                    });
+                    if let Some(at) = last
+                        && let Some((_, center)) = layers.first_mut()
+                    {
+                        *center = [f64::from(at.block[0]), f64::from(at.block[2])];
+                    }
+                    PreviewDimension { dimension, layers }
+                })
+                .collect();
+            dimensions.sort_by_key(|d| position.is_none_or(|p| p.dimension != d.dimension));
+            let mut cache = Cache::from_store(store, 32 * 1024 * 1024)?;
+            cache.read_only = true;
+            // Prepare only the current view and its target. Derived images
+            // missing from the file are rebuilt in memory on demand.
+            cache.overviews.done = true;
             Ok(Self {
                 position,
-                dimensions: dimension
-                    .into_iter()
-                    .chain(first.keys().copied().filter(|d| Some(*d) != dimension))
-                    .map(|d| (d, first[&d]))
-                    .collect(),
-                cache: Cache::from_store(store, 32 * 1024 * 1024)?,
+                dimensions,
+                cache,
+                atlas: None,
+                portal_region: None,
+                portals: Arc::new(Vec::new()),
+                portal_work: Default::default(),
             })
         }
 
-        pub fn render(&self, view: View) -> Frame {
-            self.cache.render(view, 0)
+        pub fn prepare(&mut self, view: &View, target: &View) -> io::Result<Arc<TerrainAtlas>> {
+            self.cache.presentation_step(view, target, None)?;
+            let atlas = self.cache.prepared_atlas(view, target, &mut self.atlas);
+            self.cache.overviews.displayed |= !atlas.chunks.is_empty() || !atlas.coarse.is_empty();
+            Ok(atlas)
+        }
+
+        pub fn portals(&mut self, view: &View) -> PreviewPortals {
+            // Portal metadata lives in detailed tiles. Probe a bounded
+            // neighbourhood on the worker; do not read tiles on the GUI thread.
+            let [x, z] = view.center.map(|v| (v as i64).div_euclid(128) * 128);
+            let region = [x - 128, z - 128, 256, 256];
+            let scope = (view.dimension, view.layer, region);
+            if self.portal_region != Some(scope) {
+                self.portal_region = Some(scope);
+                let kind = if view.layer == Layer::Surface { 0 } else { 1 };
+                self.portal_work = self.cache.query_visual(view, 0, region, kind, 256).into();
+                self.portals = Arc::new(Vec::new());
+            }
+            let start = Instant::now();
+            for _ in 0..16 {
+                if start.elapsed() >= Duration::from_millis(2) {
+                    break;
+                }
+                let Some(key) = self.portal_work.pop_front() else {
+                    break;
+                };
+                if let Some(tile) = self
+                    .cache
+                    .tile_at((view.dimension, view.layer, key[3], key[4]))
+                    && !tile.portals.is_empty()
+                {
+                    Arc::make_mut(&mut self.portals).extend(tile.portals.iter().copied());
+                }
+            }
+            self.portals.clone()
+        }
+
+        pub fn column(
+            &self,
+            dimension: Dimension,
+            layer: Layer,
+            at: [i32; 2],
+        ) -> Option<CachedColumn> {
+            let [x, z] = at.map(|v| v.div_euclid(16));
+            if let Some(tile) = self.cache.tile_at((dimension, layer, x, z)) {
+                let cell = (at[1].rem_euclid(16) * 16 + at[0].rem_euclid(16)) as usize;
+                return Some(CachedColumn {
+                    height: (tile.pixels[cell * 4 + 3] != 0).then_some(tile.heights[cell]),
+                    biome: tile.biomes.get(cell).cloned().flatten(),
+                    approximate: false,
+                });
+            }
+            if layer != Layer::Surface {
+                return None;
+            }
+            let mut levels = self.cache.lod_levels.get(&dimension).copied().unwrap_or(0);
+            while levels != 0 {
+                let level = levels.trailing_zeros() as u8;
+                levels &= levels - 1;
+                let size = 16_i64 << level;
+                let key = LodKey {
+                    x: i64::from(at[0]).div_euclid(size) as i32,
+                    z: i64::from(at[1]).div_euclid(size) as i32,
+                    level,
+                };
+                if let Some(tile) = self.cache.coarse_at(dimension, key)
+                    && let Some(cell) = key.cell(at)
+                    && tile.pixels[cell * 4 + 3] != 0
+                {
+                    return Some(CachedColumn {
+                        height: Some(tile.heights[cell]),
+                        biome: tile.biomes.get(cell).cloned().flatten(),
+                        approximate: true,
+                    });
+                }
+            }
+            None
+        }
+
+        pub fn portals_pending(&self) -> bool {
+            !self.portal_work.is_empty()
+        }
+
+        pub fn preparing(&self) -> bool {
+            self.cache.visual_work()
         }
     }
 
@@ -6166,6 +6641,8 @@ pub mod maps {
         done: bool,
         modified: bool,
         wanted: BTreeSet<RecordKey>,
+        load_order: std::collections::VecDeque<RecordKey>,
+        rebuild_order: std::collections::VecDeque<RecordKey>,
         goal: Option<PresentationGoal>,
         bad: BTreeSet<RecordKey>,
         displayed: bool,
@@ -6299,6 +6776,7 @@ pub mod maps {
     }
     #[derive(Default)]
     pub struct Cache {
+        read_only: bool,
         lod_current_colors: BTreeSet<(Dimension, LodKey)>,
         tiles: BTreeMap<Key, (u64, Arc<Tile>)>,
         lod_tiles: BTreeMap<(Dimension, LodKey), (u64, Arc<Tile>)>,
@@ -6311,6 +6789,23 @@ pub mod maps {
         overviews: Overviews,
     }
     impl Cache {
+        fn merge_transient(&mut self, transient: &Cache) -> io::Result<()> {
+            for (&(dimension, layer, x, z), (_, tile)) in &transient.tiles {
+                self.insert(dimension, layer, [x, z], (**tile).clone());
+                let tile = self.tiles[&(dimension, layer, x, z)].1.clone();
+                self.save(record_key(dimension, layer, x, z), tile)?;
+                self.trim()?;
+            }
+            for (&(dimension, key), (_, tile)) in &transient.lod_tiles {
+                if self.insert_lod(dimension, key, (**tile).clone()) {
+                    let tile = self.lod_tiles[&(dimension, key)].1.clone();
+                    self.save(lod_record(dimension, key), tile)?;
+                    self.trim()?;
+                }
+            }
+            self.flush()
+        }
+
         fn schedule_visual_rebuild(&mut self) -> io::Result<()> {
             self.flush()?;
             self.overviews = Overviews {
@@ -6367,6 +6862,9 @@ pub mod maps {
                 .sum()
         }
         fn flush(&mut self) -> io::Result<()> {
+            if self.read_only {
+                return Ok(());
+            }
             if let Some(backing) = &self.backing {
                 let mut backing = backing.borrow_mut();
                 if backing.store.dirty() || self.overviews.modified {
@@ -6491,6 +6989,9 @@ pub mod maps {
                 self.overviews.remember(key, tile.clone(), capacity);
                 return Some(tile);
             }
+            if self.read_only && self.overviews.stale && key[1] != 2 {
+                return None;
+            }
             let data = self.backing.as_ref()?.borrow_mut().store.read(key);
             let tile = match data {
                 Ok(None) => return None,
@@ -6531,6 +7032,9 @@ pub mod maps {
                 if key[1] == 2 {
                     self.overviews.bad.insert(key);
                     return None;
+                }
+                if self.read_only {
+                    self.overviews.bad.insert(key);
                 }
                 self.overviews.dirty.insert((key[5] as u8, key));
                 self.overviews.urgent.insert((key[5] as u8, key));
@@ -6605,7 +7109,9 @@ pub mod maps {
             {
                 return Ok(());
             }
-            if let Some(backing) = &self.backing {
+            if !self.read_only
+                && let Some(backing) = &self.backing
+            {
                 backing.borrow_mut().store.put(key, image.encode())?;
             }
             if self.overviews.stale {
@@ -6621,6 +7127,7 @@ pub mod maps {
                 self.overviews.wanted.insert(key);
             }
             let capacity = (self.limit / 2).clamp(32 * 1024 * 1024, 64 * 1024 * 1024) / 1680;
+            self.overviews.bad.remove(&key);
             self.overviews.remember(key, Arc::new(image), capacity);
             self.clock += 1;
             self.overviews.modified = true;
@@ -6691,17 +7198,26 @@ pub mod maps {
             }
             self.overviews.goal = Some(goal);
             self.overviews.wanted.clear();
+            self.overviews.rebuild_order.clear();
             self.clock += 1;
-            for (v, l, r) in [(view, level, region), (target, target_level, future)] {
+            for (index, (v, l, r)) in [(view, level, region), (target, target_level, future)]
+                .into_iter()
+                .enumerate()
+            {
+                if index == 1 && region == future && level == target_level {
+                    continue;
+                }
                 let prefix = record_key(v.dimension, v.layer, 0, 0);
                 for level in (l..=22).rev() {
-                    self.overviews.wanted.extend(self.query_visual(
-                        v,
-                        level,
-                        r,
-                        prefix[1] + 3,
-                        32768,
-                    ));
+                    if !self.read_only || !self.overviews.stale {
+                        self.overviews.wanted.extend(self.query_visual(
+                            v,
+                            level,
+                            r,
+                            prefix[1] + 3,
+                            32768,
+                        ));
+                    }
                 }
                 let mut sources = self.backing.as_ref().map_or_else(Vec::new, |b| {
                     b.borrow()
@@ -6726,7 +7242,10 @@ pub mod maps {
                     i128::from(dx).pow(2) + i128::from(dz).pow(2)
                 });
                 for source in sources.into_iter().take(1024) {
-                    self.seed_visual_source(source);
+                    let key = self.seed_visual_source(source);
+                    if self.overviews.dirty.contains(&key) {
+                        self.overviews.rebuild_order.push_back(key.1);
+                    }
                 }
                 if v.layer == Layer::Surface {
                     for level in (0..=22).rev() {
@@ -6748,30 +7267,50 @@ pub mod maps {
                 }
             }
         }
-        fn bound_visual_wanted(&mut self, target: &View) {
+        fn bound_visual_wanted(&mut self, view: &View, target: &View) {
             let Some((_, _, _, _, level, future, fine)) = self.overviews.goal else {
                 return;
             };
+            let visible = view.visible_region();
+            let near = view.atlas_region();
             let mut wanted: Vec<_> = self.overviews.wanted.iter().copied().collect();
             wanted.sort_unstable_by_key(|key| {
+                let bounds = footprint(*key).bounds();
+                let onscreen = intersects(visible, bounds);
+                let priority = if onscreen && key[5] >= i32::from(level) + 3 {
+                    // A few coarse records can provide immediate coverage.
+                    0
+                } else if onscreen && (key[5] == i32::from(level) || key[1] == 2) {
+                    1
+                } else if onscreen {
+                    2
+                } else if key[5] == i32::from(fine) && intersects(future, bounds) {
+                    3
+                } else if intersects(near, bounds) {
+                    4
+                } else {
+                    5
+                };
+                let center = if priority < 3 {
+                    view.center
+                } else {
+                    target.center
+                };
                 (
-                    if key[5] >= i32::from(level.max(fine)) + 4 {
-                        0
-                    } else if key[5] == i32::from(fine)
-                        && intersects(future, footprint(*key).bounds())
-                    {
-                        1
-                    } else if key[5] == i32::from(level) {
-                        2
-                    } else {
-                        3
-                    },
+                    priority,
+                    (i128::from(bounds[0] + bounds[2] / 2) - center[0] as i128).pow(2)
+                        + (i128::from(bounds[1] + bounds[3] / 2) - center[1] as i128).pow(2),
                     std::cmp::Reverse(key[5]),
-                    i128::from(footprint(*key).bounds()[0] - target.center[0] as i64).pow(2)
-                        + i128::from(footprint(*key).bounds()[1] - target.center[1] as i64).pow(2),
                 )
             });
-            self.overviews.wanted = wanted.into_iter().take(32768).collect();
+            wanted.truncate(32768);
+            self.overviews.wanted = wanted.iter().copied().collect();
+            self.overviews.load_order = wanted
+                .into_iter()
+                .filter(|key| {
+                    !self.overviews.tiles.contains_key(key) && !self.overviews.bad.contains(key)
+                })
+                .collect();
             self.overviews.order = self
                 .overviews
                 .tiles
@@ -6780,20 +7319,44 @@ pub mod maps {
                 .map(|(k, (stamp, _))| (*stamp, *k))
                 .collect();
         }
-        fn seed_visual_source(&mut self, source: RecordKey) {
+        fn seed_visual_source(&mut self, source: RecordKey) -> (u8, RecordKey) {
             let mut key = source;
             key[1] = if source[1] == 1 { 4 } else { 3 };
             key[5] = if source[1] == 2 { source[5] } else { 0 };
-            let known = if let Some(backing) = &self.backing {
-                backing.borrow().store.version(key).is_some()
+            let resident = self.overviews.tiles.contains_key(&key);
+            let stored = self
+                .backing
+                .as_ref()
+                .is_some_and(|backing| backing.borrow().store.version(key).is_some());
+            let known = if self.overviews.stale {
+                if self.read_only {
+                    resident
+                } else {
+                    (resident || stored) && self.overviews.fresh.contains(&key)
+                }
             } else {
-                self.overviews.tiles.contains_key(&key)
+                resident || stored
             };
-            if !known || self.overviews.stale || self.overviews.dirty.contains(&(key[5] as u8, key))
-            {
+            let tag = (key[5] as u8, key);
+            if !known || self.overviews.dirty.contains(&tag) {
                 self.overviews.mark(source, true);
             }
+            tag
         }
+        fn load_saved_visuals(&mut self, start: Instant, budget: Duration, limit: usize) {
+            for _ in 0..limit {
+                if start.elapsed() >= budget {
+                    break;
+                }
+                let Some(key) = self.overviews.load_order.pop_front() else {
+                    break;
+                };
+                if !self.overviews.tiles.contains_key(&key) {
+                    self.overview_get(key);
+                }
+            }
+        }
+
         fn presentation_step(
             &mut self,
             view: &View,
@@ -6804,8 +7367,10 @@ pub mod maps {
             let old_goal = self.overviews.goal;
             self.seed_presentation(view, target);
             if old_goal != self.overviews.goal {
-                self.bound_visual_wanted(target);
+                self.bound_visual_wanted(view, target);
             }
+            let started = Instant::now();
+            self.load_saved_visuals(started, Duration::from_millis(5), 128);
             if !self.overviews.done {
                 let sources = self.backing.as_ref().map_or_else(Vec::new, |b| {
                     b.borrow()
@@ -6822,15 +7387,21 @@ pub mod maps {
                 }
                 self.overviews.modified = true;
             }
-            let started = Instant::now();
+            let rebuilding = Instant::now();
             for _ in 0..256 {
-                if started.elapsed() >= Duration::from_millis(6) {
+                if rebuilding.elapsed() >= Duration::from_millis(6) {
                     break;
                 }
                 let next = self
                     .overviews
-                    .urgent
-                    .pop_first()
+                    .rebuild_order
+                    .pop_front()
+                    .map(|key| {
+                        let tag = (key[5] as u8, key);
+                        self.overviews.urgent.remove(&tag);
+                        tag
+                    })
+                    .or_else(|| self.overviews.urgent.pop_first())
                     .or_else(|| self.overviews.dirty.first().copied());
                 let Some((level, key)) = next else {
                     break;
@@ -6844,84 +7415,46 @@ pub mod maps {
                 }
                 self.overviews.modified = true;
             }
-            if self.overviews.done && self.overviews.dirty.is_empty() && self.overviews.stale {
+            if !self.read_only
+                && self.overviews.done
+                && self.overviews.dirty.is_empty()
+                && self.overviews.stale
+            {
                 self.overviews.stale = false;
                 self.overviews.fresh.clear();
                 self.overviews.modified = true;
             }
-            let mut wanted: Vec<_> = self
-                .overviews
-                .wanted
-                .iter()
-                .copied()
-                .filter(|k| {
-                    !self.overviews.tiles.contains_key(k) && !self.overviews.bad.contains(k)
-                })
-                .collect();
-            let near = target.atlas_region();
-            let fine = Self::overview_level(target);
-            wanted.sort_unstable_by_key(|k| {
-                (
-                    if !self.overviews.displayed {
-                        if k[1] == 2 {
-                            0
-                        } else if k[5] == i32::from(fine) {
-                            1
-                        } else {
-                            2
-                        }
-                    } else if k[5] == i32::from(fine) && intersects(near, footprint(*k).bounds()) {
-                        0
-                    } else {
-                        1
-                    },
-                    std::cmp::Reverse(k[5]),
-                    (i128::from(footprint(*k).bounds()[0] - target.center[0] as i64)).pow(2)
-                        + (i128::from(footprint(*k).bounds()[1] - target.center[1] as i64)).pow(2),
-                )
-            });
-            for key in wanted {
-                if started.elapsed() >= Duration::from_millis(12) {
-                    break;
-                }
-                self.overview_get(key);
-            }
+            self.load_saved_visuals(started, Duration::from_millis(12), 128);
             self.trim()?;
             Ok(())
         }
         fn visual_work(&self) -> bool {
             !self.overviews.done
                 || !self.overviews.dirty.is_empty()
-                || self.overviews.wanted.iter().any(|k| {
-                    !self.overviews.tiles.contains_key(k) && !self.overviews.bad.contains(k)
-                })
+                || !self.overviews.load_order.is_empty()
         }
-        fn ready_level(&self, view: &View) -> u8 {
-            let region = view.atlas_region();
-            let mut level = Self::overview_level(view);
-            while level < 22 {
-                let missing = self.overviews.wanted.iter().any(|k| {
-                    record_dimension(*k) == Some(view.dimension)
-                        && overview_layer(*k) == view.layer
-                        && k[5] == i32::from(level)
-                        && intersects(region, footprint(*k).bounds())
-                        && !self.overviews.tiles.contains_key(k)
-                        && !self.overviews.bad.contains(k)
-                });
-                let building = self.overviews.dirty.iter().any(|(l, k)| {
-                    *l == level
-                        && record_dimension(*k) == Some(view.dimension)
-                        && overview_layer(*k) == view.layer
-                        && intersects(region, footprint(*k).bounds())
-                        && !self.overviews.tiles.contains_key(k)
-                });
-                if !missing && !building {
-                    break;
-                }
-                level += 1;
+        fn prepared_atlas(
+            &self,
+            view: &View,
+            target: &View,
+            cached: &mut Option<AtlasCache>,
+        ) -> Arc<TerrainAtlas> {
+            let key = (view.session, view.dimension, view.layer, self.clock);
+            if let Some(atlas) = cached
+                .as_ref()
+                .filter(|atlas| atlas.key == key && atlas.terrain.covers(view))
+            {
+                return atlas.terrain.clone();
             }
-            level
+            let previous = cached.as_ref().map(|atlas| atlas.terrain.as_ref());
+            let terrain = Arc::new(self.visual_atlas(view, target, previous));
+            *cached = Some(AtlasCache {
+                key,
+                terrain: terrain.clone(),
+            });
+            terrain
         }
+
         fn visual_atlas(
             &self,
             view: &View,
@@ -6933,8 +7466,8 @@ pub mod maps {
                 previous.filter(|p| p.scope == (view.session, view.dimension, view.layer));
             let region = view.atlas_region();
             let future = target.atlas_region();
-            let level = self.ready_level(view);
-            let fine = self.ready_level(target);
+            let level = Self::overview_level(view);
+            let fine = Self::overview_level(target);
             let mut candidates: Vec<_> = self
                 .overviews
                 .tiles
@@ -8082,7 +8615,7 @@ pub mod maps {
     }
     enum Job {
         Delete {
-            file: String,
+            selection: container::DeleteSelection,
             active_world: String,
             reply: mpsc::SyncSender<Result<(), String>>,
         },
@@ -8253,6 +8786,7 @@ pub mod maps {
                     let mut atlas = None::<AtlasCache>;
                     let mut last_commit = Instant::now();
                     let mut paused = false;
+                    let mut lease_retry = None::<Instant>;
                     let mut blocked_format=None;
                     let mut last_probe=None;
                     let mut saved_position = None;
@@ -8292,42 +8826,70 @@ pub mod maps {
                             || configured.as_ref().map(|b| (&b.world, b.session))
                                 != wanted.as_ref().map(|b| (&b.world, b.session))
                         {
-                            if let Err(e) = cache.flush() {
+                            if !paused && let Err(e) = cache.flush() {
                                 paused = true;
-                                *errors.lock().unwrap_or_else(|e| e.into_inner()) =
+                                *errors.lock().unwrap_or_else(|e|e.into_inner()) =
                                     Some(format!("Cache write failed; sampling paused: {e}"));
                             }
-                            if !paused {
-                                cache = Cache::default();
-                                blocked_format=None;
-                                *errors.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                                if let (Some(directory), Some(b)) = (&directory, &wanted) {
-                                    if b.world.is_empty() {
-                                        cache.limit=b.limit;
-                                        *errors.lock().unwrap_or_else(|e|e.into_inner())=Some("Unknown world identity; temporary RAM map only".into());
-                                    } else {match Cache::open(directory, &b.world, b.limit) {
-                                        Ok(opened) => cache = opened,
-                                        Err(container::LeaseError::Busy) => {
-                                            cache.limit = b.limit;
-                                            *errors.lock().unwrap_or_else(|e| e.into_inner()) = Some(
-                                                "Cache is used by another client; temporary RAM map only".into(),
-                                            );
-                                        }
-                                        Err(container::LeaseError::Io(e)) => {
-                                            if e.to_string().contains("unsupported container version") {blocked_format=Some(b.world.clone());}
-                                            paused = true;
-                                            *errors.lock().unwrap_or_else(|e| e.into_inner()) =
-                                                Some(format!("Cannot open cache; sampling paused: {e}"));
-                                        }
-                                    }
+                            // Drop the old lease even after a failed write. Keep
+                            // its error visible through disconnect.
+                            cache = Cache::default();
+                            blocked_format = None;
+                            lease_retry = None;
+                            if let Some(binding) = &wanted {
+                                paused = cpu_failed.load(Ordering::Acquire);
+                                cache.limit = binding.limit;
+                                if !paused && directory.is_some() && !binding.world.is_empty() {
+                                    lease_retry = Some(Instant::now());
+                                } else if !paused {
+                                    *errors.lock().unwrap_or_else(|e|e.into_inner()) = if binding.world.is_empty() && directory.is_some() {
+                                        Some("Unknown world identity; temporary RAM map only".into())
+                                    } else {
+                                        None
+                                    };
+                                }
+                            }
+                            latest_position.lock().unwrap_or_else(|e| e.into_inner()).retain(|session, _| *session >= next);
+                            current = next;
+                            configured = wanted.clone();
+                            atlas = None;
+                            last_probe = None;
+                            changed = true;
+                            last_commit = Instant::now();
+                        }
+                        if let (Some(at), Some(directory), Some(binding)) = (lease_retry, &directory, &wanted)
+                            && binding.session == next && Instant::now() >= at && !paused
+                        {
+                            match Cache::open(directory, &binding.world, binding.limit) {
+                                Ok(mut opened) => {
+                                    lease_retry = None;
+                                    if let Err(error) = opened.merge_transient(&cache) {
+                                        paused = true;
+                                        *errors.lock().unwrap_or_else(|e|e.into_inner()) =
+                                            Some(format!("Cache write failed; sampling paused: {error}"));
+                                    } else {
+                                        cache = opened;
+                                        atlas = None;
+                                        changed = true;
+                                        last_probe = None;
+                                        last_commit = Instant::now();
+                                        *errors.lock().unwrap_or_else(|e|e.into_inner()) = None;
                                     }
                                 }
-                                latest_position.lock().unwrap_or_else(|e| e.into_inner()).retain(|session, _| *session >= next);
-                                current = next;
-                                configured = wanted.clone();
-                                atlas = None;
-                                changed = true;
-                                last_commit = Instant::now();
+                                Err(container::LeaseError::Busy) => {
+                                    lease_retry = Some(Instant::now() + Duration::from_millis(250));
+                                    *errors.lock().unwrap_or_else(|e|e.into_inner()) =
+                                        Some("Cache is used by another client; temporary RAM map only".into());
+                                }
+                                Err(container::LeaseError::Io(e)) => {
+                                    lease_retry = None;
+                                    if e.to_string().contains("unsupported container version") {
+                                        blocked_format = Some(binding.world.clone());
+                                    }
+                                    paused = true;
+                                    *errors.lock().unwrap_or_else(|e|e.into_inner()) =
+                                        Some(format!("Cannot open cache; sampling paused: {e}"));
+                                }
                             }
                         }
                         if let (Some(old), Some(new)) = (&configured.clone(), &wanted) {
@@ -8337,7 +8899,9 @@ pub mod maps {
                                     *errors.lock().unwrap_or_else(|e| e.into_inner()) =
                                         Some(format!("Cache write failed; sampling paused: {e}"));
                                 } else {
-                                    cache.clear_payloads();
+                                    if lease_retry.is_none() {
+                                        cache.clear_payloads();
+                                    }
                                     atlas = None;
                                     changed = true;
                                     *coverage_state.lock().unwrap_or_else(|e| e.into_inner()) =
@@ -8373,19 +8937,15 @@ pub mod maps {
                         jobs.extend(rx.try_iter().take(7));
                         for job in jobs {
                             let job = match job {
-                                Job::Delete { file, active_world, reply } => {
+                                Job::Delete { selection, active_world, reply } => {
                                     let result = (|| {
                                         let directory = directory.as_ref().ok_or("Persistent cache is unavailable")?;
-                                        let path = super::cache_manager::selected_path(directory, &file)
-                                            .map_err(|e| e.to_string())?;
-                                        if !active_world.is_empty() && container::world_path(directory, &active_world) == path {
+                                        if !active_world.is_empty() && container::world_path(directory, &active_world)
+                                            .file_name().is_some_and(|name| name == selection.file.as_str())
+                                        {
                                             return Err("Cache is in use by another client".into());
                                         }
-                                        let lease = container::ContainerLease::open_existing(&path)
-                                            .map_err(|e| e.to_string())?;
-                                        let result = std::fs::remove_file(path).map_err(|e| e.to_string());
-                                        drop(lease);
-                                        result
+                                        container::delete_selected(directory, &selection).map_err(|e| e.to_string())
                                     })();
                                     let _ = reply.try_send(result);
                                     continue;
@@ -8395,8 +8955,10 @@ pub mod maps {
                                     let correct_file = directory.as_ref().is_some_and(|d| container::world_path(d,&world).file_name().is_some_and(|n| n == file.as_str()));
                                     let result = if !correct_file {
                                         Err("Open this cache's world before rebuilding its legacy file".into())
-                                    } else if paused {
+                                    } else if is_active && paused {
                                         Err("Cache writer is paused; resolve the write error first".into())
+                                    } else if is_active && lease_retry.is_some() {
+                                        Err("Cache is in use by another client".into())
                                     } else if is_active {
                                         cache.schedule_visual_rebuild().map_err(|e|e.to_string())
                                     } else if let Some(directory) = &directory {
@@ -8543,17 +9105,7 @@ pub mod maps {
                         }
                         serial += 1;
                         let frame = {
-                            let key = (view.session, view.dimension, view.layer, cache.clock);
-                            if atlas
-                                .as_ref()
-                                .is_none_or(|a| a.key != key || !a.terrain.covers(&view))
-                            {
-                                atlas = Some(AtlasCache {
-                                    key,
-                                    terrain: Arc::new(cache.visual_atlas(&view,&target,atlas.as_ref().map(|a| a.terrain.as_ref()))),
-                                });
-                            }
-                            let terrain = atlas.as_ref().unwrap().terrain.clone();
+                            let terrain = cache.prepared_atlas(&view, &target, &mut atlas);
                             Arc::new(Frame {
                                 raster_source: None,
                                 serial,
@@ -8651,14 +9203,14 @@ pub mod maps {
         }
         pub fn delete_cache(
             &self,
-            file: &str,
+            selection: container::DeleteSelection,
             active_world: &str,
         ) -> Result<mpsc::Receiver<Result<(), String>>, String> {
             let (reply, rx) = mpsc::sync_channel(1);
             let wake = self.wake.lock().unwrap_or_else(|e| e.into_inner());
             let tx = wake.as_ref().ok_or("Cache worker is unavailable")?;
             tx.try_send(Job::Delete {
-                file: file.into(),
+                selection,
                 active_world: active_world.into(),
                 reply,
             })
@@ -8690,10 +9242,10 @@ pub mod maps {
         pub fn reset(&self, session: u64) {
             *self.binding.lock().unwrap_or_else(|e| e.into_inner()) = None;
             *self.latest.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            self.session.store(session, Ordering::Release);
             if let Some(tx) = self.tx.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
                 let _ = tx.try_send(Job::Wake);
             }
-            self.session.store(session, Ordering::Release);
             *self.coverage.lock().unwrap_or_else(|e| e.into_inner()) =
                 Arc::new(Coverage::default());
             self.resident

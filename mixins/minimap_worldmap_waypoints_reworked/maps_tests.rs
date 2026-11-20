@@ -39,12 +39,31 @@ macro_rules! define_tests {
                 let keys=reopened.backing.as_ref().unwrap().borrow().store.query(1,2,0,[0,0,256,256],8);assert_eq!(keys,vec![lod_record(d,key)]);
             }
             #[test]
+            fn world_map_can_zoom_further_and_point_to_an_offscreen_player() {
+                let mut camera = Camera::new([0.; 2], 64.);
+                camera.zoom_at(-4., [0.; 2]);
+                assert_eq!(camera.zoom_target, 512.);
+                let bounds = [12., 40., 200., 100.];
+                assert_eq!(edge_indicator([112., 90.], bounds), None);
+                assert_eq!(edge_indicator([312., 90.], bounds), Some(([212., 90.], [1., 0.])));
+                assert_eq!(edge_indicator([112., -90.], bounds), Some(([112., 40.], [0., -1.])));
+            }
+            #[test]
+            fn coordinates_accept_negative_and_comma_separated_blocks() {
+                assert_eq!(map_coordinates(" -120, 64 "), Some([-120, 64]));
+                assert_eq!(map_coordinates("30000000 -30000000"), Some([30_000_000, -30_000_000]));
+                for invalid in ["", "12", "12 63 56", "12.5 64", "30000001 0"] {
+                    assert_eq!(map_coordinates(invalid), None, "{invalid}");
+                }
+            }
+            #[test]
             fn offline_preview_reads_last_position_and_terrain_and_blocks_deletion_until_closed() {
                 let dir = CacheDir::new("offline-preview");
                 let world = "save:offline";
                 let other = "server:keep";
                 let dimension = Dimension::Nether;
-                let at = LastPosition { dimension, block: [-2, 72, 4] };
+                let layer = Layer::Below(73);
+                let at = LastPosition { dimension, block: [-2, 72, 4], yaw: Some(90) };
                 let service = Service::with_directory(Some(dir.0.clone()));
                 service.reset(1);
                 service.configure(1, world, dimension, 16);
@@ -59,29 +78,92 @@ macro_rules! define_tests {
                 service.shutdown();
                 {
                     let mut cache = Cache::open(&dir.0, world, 16 * 1024 * 1024).unwrap();
-                    save_chunk(&mut cache, dimension, Layer::Surface, [-1, 0], saved_tile());
+                    let mut tile = saved_tile();
+                    tile.portals = vec![([-2, 71, 4], Portal::Nether)];
+                    tile.biomes = vec![Some(Arc::from("minecraft:nether_wastes")); 256];
+                    save_chunk(&mut cache, dimension, layer, [-1, 0], tile);
                     cache.flush().unwrap();
                 }
                 drop(Store::open(&dir.0, other).unwrap());
                 let before = std::fs::read(&path).unwrap();
-                let preview = Preview::open(&dir.0, file, world).unwrap();
+                let mut preview = Preview::open(&dir.0, file, world).unwrap();
                 assert_eq!(preview.position, Some(at));
-                assert_eq!(preview.dimensions, vec![(dimension, [-2., 4.])]);
+                assert_eq!(LastPosition::decode(&at.encode()[..16]), Some(LastPosition { yaw: None, ..at }));
+                assert_eq!(preview.dimensions, vec![PreviewDimension { dimension, layers: vec![(layer, [-2., 4.])] }]);
                 let mut v = view(dimension);
                 v.center = [-2., 4.];
-                assert!(preview.render(v).known > 0);
+                v.layer = layer;
+                assert_eq!(preview.portals(&v).as_slice(), &[([-2, 71, 4], Portal::Nether)]);
+                let column = preview.column(dimension, layer, [-2, 4]).unwrap();
+                assert_eq!(column.biome.as_deref(), Some("minecraft:nether_wastes"));
+                assert!(!column.approximate);
+                let mut other_dimension = v.clone();
+                other_dimension.dimension = Dimension::End;
+                assert!(preview.portals(&other_dimension).is_empty());
+
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let atlas = loop {
+                    let atlas = preview.prepare(&v, &v).unwrap();
+                    if !preview.preparing() {
+                        break atlas;
+                    }
+                    assert!(Instant::now() < deadline, "offline atlas must settle");
+                };
+                assert!(atlas.chunks.contains(&[-1, 0]));
+                assert!(!atlas.pages.is_empty());
+                assert!(Arc::ptr_eq(&atlas, &preview.prepare(&v, &v).unwrap()));
+                let mut nearby = v.clone();
+                nearby.center[0] += 0.125;
+                let next = preview.prepare(&nearby, &nearby).unwrap();
+                assert!(Arc::ptr_eq(&atlas.pages[0], &next.pages[0]));
+                assert_eq!(preview.cache.backing.as_ref().unwrap().borrow().store.pending_bytes(), 0);
                 let service = Service::with_directory(Some(dir.0.clone()));
-                let delete = |file: &str, active: &str| service.delete_cache(file, active)
+                let delete = |file: &str, active: &str| service.delete_cache(
+                    container::DeleteSelection::read(&dir.0, file).unwrap(), active)
                     .unwrap().recv_timeout(Duration::from_secs(5)).unwrap();
                 assert!(delete(file, "").is_err());
                 drop(preview);
                 assert_eq!(std::fs::read(&path).unwrap(), before);
                 assert!(delete(file, world).is_err());
-                assert!(delete("../outside.mwwr", "").is_err());
+                assert!(container::DeleteSelection::read(&dir.0, "../outside.mwwr").is_err());
                 delete(file, "").unwrap();
                 assert!(!path.exists());
                 assert!(container::world_path(&dir.0, other).exists());
                 service.shutdown();
+            }
+            #[test]
+            fn live_cache_acquires_released_preview_lease_and_preserves_waiting_samples() {
+                let dir = CacheDir::new("retry-lease");
+                let world = "save:retry";
+                let d = Dimension::Overworld;
+                let path = container::world_path(&dir.0, world);
+                drop(Store::open(&dir.0, world).unwrap());
+                let file = path.file_name().unwrap().to_str().unwrap();
+                let preview = Preview::open(&dir.0, file, world).unwrap();
+                let service = Service::with_directory(Some(dir.0.clone()));
+                service.reset(1);
+                service.configure(1, world, d, 16);
+                let start = Instant::now();
+                while service.status().is_none() {
+                    assert!(start.elapsed() < Duration::from_secs(5));
+                    thread::sleep(Duration::from_millis(5));
+                }
+                let mut v = view(d);
+                v.session = 1;
+                service.request(v);
+                assert!(service.submit(1, d, Layer::Surface, [0, 0], saved_tile));
+                while !service.contains(d, Layer::Surface, [0, 0]) {
+                    assert!(start.elapsed() < Duration::from_secs(5));
+                    thread::sleep(Duration::from_millis(5));
+                }
+                drop(preview);
+                while service.status().is_some() {
+                    assert!(start.elapsed() < Duration::from_secs(5));
+                    thread::sleep(Duration::from_millis(5));
+                }
+                service.shutdown();
+                let mut disk = Store::open_existing(&path, world).unwrap();
+                assert!(disk.read(record_key(d, Layer::Surface, 0, 0)).unwrap().is_some());
             }
             #[test]
             fn manager_rebuild_preserves_canonical_records_and_resumes_on_reopen() {
@@ -134,7 +216,7 @@ macro_rules! define_tests {
                 let start=Instant::now();finish_overviews(&mut cache,&far);cache.flush().unwrap();let build=start.elapsed();drop(cache);
                 let start=Instant::now();let mut cache=Cache::open(&dir.0,"save:zoom",64*1024*1024).unwrap();finish_overviews(&mut cache,&far);let overview=cache.visual_atlas(&far,&far,None);let cold=start.elapsed();cache.overviews.displayed=true;
                 let near=view(d);let start=Instant::now();
-                loop {cache.presentation_step(&far,&near,None).unwrap();if cache.ready_level(&near)==0{break;}assert!(start.elapsed()<Duration::from_secs(10));}
+                loop {cache.presentation_step(&far,&near,None).unwrap();if cache.overviews.tiles.contains_key(&overview_key(d,Layer::Surface,LodKey{x:0,z:0,level:0})){break;}assert!(start.elapsed()<Duration::from_secs(10));}
                 let prepared=cache.visual_atlas(&far,&near,Some(&overview));let ready=start.elapsed();assert!(prepared.chunks.contains(&[0,0]));
                 let start=Instant::now();let sharp=cache.visual_atlas(&near,&near,Some(&prepared));let zoom=start.elapsed();assert!(sharp.chunks.contains(&[0,0]));
                 eprintln!("canonical_tiles=4096 first_preview_ms={:.3} initial_backfill_ms={:.3} reopen_visual_ms={:.3} target_prefetch_ms={:.3} zoom_assembly_ms={:.3} pages={}",first.as_secs_f64()*1000.,build.as_secs_f64()*1000.,cold.as_secs_f64()*1000.,ready.as_secs_f64()*1000.,zoom.as_secs_f64()*1000.,sharp.pages.len());
@@ -210,6 +292,21 @@ macro_rules! define_tests {
                 assert_eq!(&atlas.pixels[start..start+4],&[0,0,0,0]);
                 for draw in &atlas.coarse {for fragment in &draw.fragments {assert!(!intersects(*fragment,[-16,-16,16,16]));}}
                 assert!(!atlas.pages.is_empty());
+            }
+            #[test]
+            fn ready_visible_detail_does_not_wait_for_pending_neighbours() {
+                let mut cache = Cache::default();
+                let v = view(Dimension::Overworld);
+                let first = overview_key(v.dimension, v.layer, LodKey { x: 0, z: 0, level: 0 });
+                let pending = overview_key(v.dimension, v.layer, LodKey { x: 1, z: 0, level: 0 });
+                cache.overviews.remember(first, Arc::new(Overview {
+                    pixels: [50, 90, 40, 255].repeat(256),
+                    coverage: [u16::MAX; 256],
+                }), 1024);
+                cache.overviews.wanted.insert(pending);
+                let atlas = cache.visual_atlas(&v, &v, None);
+                assert!(!atlas.pages.is_empty());
+                assert!(atlas.locations.contains_key(&VisualKey::Lod(footprint(first))));
             }
             #[test]
             fn visual_records_reopen_sharp_without_loading_canonical_payloads() {
@@ -827,6 +924,20 @@ macro_rules! define_tests {
                     },
                     saved_tile
                 ));
+                let failure = service.status();
+                service.reset(2);
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    match Store::open(&dir.0, "server:encode-error") {
+                        Ok(_) => break,
+                        Err(container::LeaseError::Busy) => {
+                            assert!(Instant::now() < deadline, "disconnect must release the paused lease");
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("{error}"),
+                    }
+                }
+                assert_eq!(service.status(), failure);
                 service.shutdown();
             }
             #[test]

@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.7.9 — progressive map loading and colour icons
+
+- Redraw button and context-menu icons in colour.
+- Publish ready terrain while nearby tiles are still loading. Give visible disk records and rebuilds priority over prefetch and background work.
+- Reuse ordered read queues and batch portal reads. Read catalog headers and deletion identity from the same open file.
+
+## 0.7.8 — cache manager review fixes
+
+- Serialize cache open/create, migration and deletion and bind deletion confirmation to the selected directory and file identities.
+- Retry occupied live caches, merge retained RAM samples after acquisition, and release write-failed leases on disconnect while retaining the error.
+- Discover stored Nether and other underground layers during offline preview and allow switching layers.
+- Close title Options before showing the cache manager. Route synthetic clicks, focus, shortcuts and Back through the cache overlay.
+
+## 0.7.7 — cache map actions and waypoint teleport
+
+- Show saved biome pictograms, Nether coordinates and nearby portal markers in the offline map.
+- Add waypoint create, edit and delete actions to the offline context menu and a coordinate dialog for centering the camera.
+- Resolve waypoint actions by the visible marker and teleport using the saved position and dimension.
+- Draw action icons for custom screens and map context menus.
+
+## 0.7.6 — shared world map renderer
+
+- Use the same camera, terrain pages and map renderer for the world map and offline cache viewer.
+- Use the actual frame interval for camera easing and prepare the newest view and zoom target in the background.
+- Show player direction at the edge of the large map and allow zooming out to 512 blocks per GUI pixel.
+- Persist player heading with last position and read older position records without a heading.
+
 ## 0.7.5 — 2026-11-20, offline cache viewer
 
 - Open Map caches from the main menu and preview saved terrain with pan, zoom and dimension tabs.

@@ -42,8 +42,9 @@ enum Mode {
 #[derive(Default)]
 struct CacheUi {
     title_open: bool,
+    pad_buttons: u8,
     preview: Option<CachePreview>,
-    confirm_delete: Option<String>,
+    confirm_delete: Option<runtime::container::DeleteSelection>,
     deleting: bool,
     attention: bool,
     catalog_revision: u64,
@@ -57,26 +58,59 @@ struct CacheUi {
     confirm: Option<String>,
 }
 
+type PageImages = Vec<(
+    Arc<maps::AtlasPage>,
+    Arc<horizon_client::hud::pictures::Picture>,
+)>;
+#[derive(Clone, PartialEq)]
+struct PreviewRequest {
+    view: View,
+    target: View,
+    point: Option<[i32; 2]>,
+}
+
+#[derive(Clone)]
+struct PreparedPreview {
+    dimension: Dimension,
+    layer: Layer,
+    atlas: Arc<maps::TerrainAtlas>,
+    point: Option<[i32; 2]>,
+    column: Option<maps::CachedColumn>,
+    portals: Arc<Vec<([i32; 3], Portal)>>,
+}
+
 struct CachePreview {
     name: String,
-    request: std::sync::mpsc::SyncSender<runtime::maps::View>,
+    world: String,
+    menu: Option<Menu>,
+    form: Option<PreviewForm>,
+    notice: Option<(String, Instant)>,
+    waypoints: Vec<Waypoint>,
+    waypoint_labels: Vec<String>,
+    waypoint_letters: runtime::minimap::WaypointLetters,
+    wake: std::sync::mpsc::SyncSender<()>,
+    request: Arc<Mutex<Option<PreviewRequest>>>,
+    prepared: Arc<Mutex<Option<PreparedPreview>>>,
     response: std::sync::mpsc::Receiver<PreviewUpdate>,
-    dimensions: Vec<(Dimension, [f64; 2])>,
-    position: Option<runtime::maps::LastPosition>,
+    dimensions: Vec<maps::PreviewDimension>,
+    layer_index: usize,
+    position: Option<maps::LastPosition>,
     camera: maps::Camera,
+    last_frame: Instant,
     dimension: Dimension,
-    sent: Option<runtime::maps::View>,
-    image: Option<(
-        runtime::maps::View,
-        Arc<horizon_client::hud::pictures::Picture>,
-    )>,
+    uploaded: Option<Arc<maps::TerrainAtlas>>,
+    page_images: PageImages,
     dragging: bool,
     error: Option<String>,
 }
 
+enum PreviewForm {
+    Waypoint(NameForm),
+    Coordinates { text: String, invalid: bool },
+}
+
 enum PreviewUpdate {
-    Ready(Vec<(Dimension, [f64; 2])>, Option<maps::LastPosition>),
-    Frame(runtime::maps::Frame),
+    Ready(Vec<maps::PreviewDimension>, Option<maps::LastPosition>),
     Error(String),
 }
 
@@ -141,6 +175,9 @@ enum MenuAction {
     Teleport,
     TeleportDestination,
     DeleteWaypoint,
+    EditWaypoint,
+    TeleportWaypoint,
+    MoveView,
     Toggle3D,
     Information,
 }
@@ -387,10 +424,7 @@ struct State {
     marker: [f64; 2],
     elapsed: f64,
     frame: Option<Arc<maps::Frame>>,
-    page_images: Vec<(
-        Arc<maps::AtlasPage>,
-        Arc<horizon_client::hud::pictures::Picture>,
-    )>,
+    page_images: PageImages,
     dragging: bool,
     close: bool,
     mode: Mode,
@@ -896,28 +930,51 @@ fn highlight(game: &Game<'_>, batch: &mut HudBatch, view: &View, rect: [f32; 4],
     game.native_fill(batch, [left + width - line, top, line, height], 0xff000000);
 }
 
+struct PlayerMarker {
+    at: [f64; 2],
+    yaw: Option<f64>,
+    colors: (u32, u32),
+}
+
 fn draw_marker(
     game: &Game<'_>,
     batch: &mut HudBatch,
     view: &View,
     rect: [f32; 4],
-    at: [f64; 2],
-    player: &crate::game::native_hooks::NativePlayer,
+    marker: PlayerMarker,
 ) {
-    let pixel = view.screen_at(at);
-    let x = rect[0] + pixel[0] as f32 * rect[2] / view.width as f32;
-    let y = rect[1] + pixel[1] as f32 * rect[3] / view.height as f32;
-    if !inside([x, y], rect) {
+    let pixel = view.screen_at(marker.at);
+    let mut point = [
+        rect[0] + pixel[0] as f32 * rect[2] / view.width as f32,
+        rect[1] + pixel[1] as f32 * rect[3] / view.height as f32,
+    ];
+    let bounds = [rect[0] + 16., rect[1] + 42., rect[2] - 32., rect[3] - 100.];
+    let (forward, size) = if view.large
+        && let Some((edge, forward)) = maps::edge_indicator(point, bounds)
+    {
+        point = edge;
+        (forward, 6.)
+    } else if !inside(point, rect) {
         return;
-    }
-    let (border, fill) = if Dimension::from_id(player.dimension) == view.dimension {
-        (0xfff0f4fa, 0xffff5050)
+    } else if let Some(yaw) = marker.yaw {
+        (view.player_heading(yaw, [rect[2], rect[3]]), 7.)
     } else {
-        (0xc0f0f4fa, 0xc060a0ff)
+        game.native_fill(
+            batch,
+            [point[0] - 4., point[1] - 4., 8., 8.],
+            marker.colors.0,
+        );
+        game.native_fill(
+            batch,
+            [point[0] - 2., point[1] - 2., 4., 4.],
+            marker.colors.1,
+        );
+        return;
     };
-    let forward = view.player_heading(f64::from(player.yaw), [rect[2], rect[3]]);
+    let [x, y] = point;
+    let (border, fill) = marker.colors;
     let right = [-forward[1], forward[0]];
-    for (size, color) in [(7.0, border), (5.0, fill)] {
+    for (size, color) in [(size, border), (size - 2., fill)] {
         let point = |along: f32, across: f32| {
             [
                 x + size * (forward[0] * along + right[0] * across),
@@ -1268,6 +1325,13 @@ fn menu_subtitle(
     menu: Menu,
     player: &crate::game::native_hooks::NativePlayer,
 ) -> Option<String> {
+    if let Some(spot) = menu.waypoint {
+        return state
+            .waypoints
+            .iter()
+            .find(|w| waypoint_spot(w) == spot)
+            .map(|w| w.name.clone());
+    }
     menu.portal.map(|kind| {
         let target = portal_target(state, menu, player.y.floor() as i32);
         format!(
@@ -1288,12 +1352,94 @@ fn menu_subtitle(
     })
 }
 
+fn waypoint_menu(can_teleport: bool) -> Vec<(&'static str, MenuAction)> {
+    let mut items = vec![
+        (
+            tr(
+                "Edit waypoint",
+                "Изменить вейпоинт",
+                "Modifier le repère",
+                "Editar marcador",
+                "Wegpunkt bearbeiten",
+            ),
+            MenuAction::EditWaypoint,
+        ),
+        (
+            tr(
+                "Delete waypoint",
+                "Удалить вейпоинт",
+                "Supprimer le repère",
+                "Eliminar marcador",
+                "Wegpunkt löschen",
+            ),
+            MenuAction::DeleteWaypoint,
+        ),
+    ];
+    if can_teleport {
+        items.push((
+            tr(
+                "Teleport to waypoint",
+                "Телепорт к вейпоинту",
+                "Se téléporter au repère",
+                "Teletransporte al marcador",
+                "Zum Wegpunkt teleportieren",
+            ),
+            MenuAction::TeleportWaypoint,
+        ));
+    }
+    items
+}
+
+fn move_view_label() -> &'static str {
+    tr(
+        "Move view to…",
+        "Перенести вид на…",
+        "Centrer la vue sur…",
+        "Centrar vista en…",
+        "Ansicht verschieben…",
+    )
+}
+
+fn create_waypoint_label() -> &'static str {
+    tr(
+        "Create waypoint",
+        "Поставить вейпоинт",
+        "Créer un repère",
+        "Crear marcador",
+        "Wegpunkt erstellen",
+    )
+}
+
 fn menu_items(
     game: &Game<'_>,
     menu: Menu,
     target: Option<PortalTarget>,
     show_3d: bool,
 ) -> Vec<(&'static str, MenuAction)> {
+    if menu.waypoint.is_some() {
+        let mut items = waypoint_menu(teleport_allowed(game));
+        items.push((
+            if show_3d {
+                tr(
+                    "Hide in 3D world",
+                    "Скрыть в 3D-мире",
+                    "Masquer dans le monde 3D",
+                    "Ocultar en el mundo 3D",
+                    "In 3D-Welt ausblenden",
+                )
+            } else {
+                tr(
+                    "Show in 3D world",
+                    "Показать в 3D-мире",
+                    "Afficher dans le monde 3D",
+                    "Mostrar en el mundo 3D",
+                    "In 3D-Welt zeigen",
+                )
+            },
+            MenuAction::Toggle3D,
+        ));
+        return items;
+    }
     let mut items = vec![
         (
             tr(
@@ -1338,38 +1484,6 @@ fn menu_items(
             MenuAction::CopyDestination,
         ));
     }
-    if menu.waypoint.is_some() {
-        items.push((
-            tr(
-                "Delete waypoint",
-                "Удалить вейпоинт",
-                "Supprimer le repère",
-                "Eliminar marcador",
-                "Wegpunkt löschen",
-            ),
-            MenuAction::DeleteWaypoint,
-        ));
-        items.push((
-            if show_3d {
-                tr(
-                    "Hide in 3D world",
-                    "Скрыть в 3D-мире",
-                    "Masquer dans le monde 3D",
-                    "Ocultar en el mundo 3D",
-                    "In 3D-Welt ausblenden",
-                )
-            } else {
-                tr(
-                    "Show in 3D world",
-                    "Показать в 3D-мире",
-                    "Afficher dans le monde 3D",
-                    "Mostrar en el mundo 3D",
-                    "In 3D-Welt zeigen",
-                )
-            },
-            MenuAction::Toggle3D,
-        ));
-    }
     if teleport_allowed(game) {
         if menu.portal.is_some() {
             if matches!(target, Some(PortalTarget::Exact { .. })) {
@@ -1402,6 +1516,24 @@ fn menu_items(
 
 /// Whether the waypoint under the pointer is shown in the 3D world; defaults to
 /// true for a point no longer in the current snapshot.
+fn waypoint_spot(waypoint: &Waypoint) -> Spot {
+    Spot {
+        dimension: waypoint.dimension,
+        x: waypoint.x,
+        z: waypoint.z,
+    }
+}
+
+fn waypoint_form(waypoint: &Waypoint, background: Mode) -> NameForm {
+    NameForm {
+        text: waypoint.name.clone(),
+        color: waypoint.color,
+        target: None,
+        rename: Some(waypoint_spot(waypoint)),
+        background,
+    }
+}
+
 fn waypoint_show_3d(state: &State, spot: Spot) -> bool {
     state
         .waypoints
@@ -1426,7 +1558,7 @@ fn menu_layout(
     for (label, _) in items {
         width = width.max(game.map_text_width(label));
     }
-    let width = (width + 18.0).clamp(160.0, 340.0);
+    let width = (width + 32.).min((size[0] - 12.).clamp(40., 340.));
     let header = MENU_HEADER
         + if subtitle.is_some() {
             MENU_SUBLINE
@@ -1546,6 +1678,29 @@ fn perform_menu(game: &Game<'_>, state: &mut State, menu: Menu, action: MenuActi
                 ));
             }
         }
+        MenuAction::EditWaypoint | MenuAction::TeleportWaypoint => {
+            let controller = runtime::initialize(game.native_data_dir(runtime::MOD_ID));
+            let points = controller.waypoints(&state.world);
+            let Some(waypoint) = points
+                .iter()
+                .find(|w| Some(waypoint_spot(w)) == menu.waypoint)
+            else {
+                return;
+            };
+            if action == MenuAction::EditWaypoint {
+                state.name_form = Some(waypoint_form(waypoint, Mode::Map));
+                state.set_mode(Mode::Name);
+                runtime::set_text_input(true);
+            } else if teleport_allowed(game) {
+                state.pending_command = Some(teleport_command(
+                    waypoint.dimension,
+                    [waypoint.x, waypoint.y, waypoint.z],
+                    Dimension::from_id(player.dimension),
+                ));
+                state.close = true;
+            }
+        }
+        MenuAction::MoveView => {}
         MenuAction::Teleport => {
             if !teleport_allowed(game) {
                 return;
@@ -1614,19 +1769,23 @@ fn draw_menu(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         return;
     };
     let subtitle = menu_subtitle(state, menu, &player);
-    let has_subtitle = subtitle.is_some();
     let target = portal_target(state, menu, player.y.floor() as i32);
     let show_3d = menu
         .waypoint
         .map_or(true, |spot| waypoint_show_3d(state, spot));
     let items = menu_items(game, menu, target, show_3d);
-    let (rect, rows) = menu_layout(
-        game,
-        [batch.width, batch.height],
-        menu,
-        subtitle.as_deref(),
-        &items,
-    );
+    draw_context_menu(game, batch, menu, subtitle.as_deref(), &items);
+}
+
+fn draw_context_menu(
+    game: &Game<'_>,
+    batch: &mut HudBatch,
+    menu: Menu,
+    subtitle: Option<&str>,
+    items: &[(&'static str, MenuAction)],
+) {
+    let has_subtitle = subtitle.is_some();
+    let (rect, rows) = menu_layout(game, [batch.width, batch.height], menu, subtitle, items);
     let mouse = game.cursor();
     let border = 0xff3a4553;
     game.native_fill(batch, rect, 0xf01b2028);
@@ -1649,7 +1808,7 @@ fn draw_menu(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         0xffffff,
         true,
     );
-    if let Some(subtitle) = subtitle.as_deref() {
+    if let Some(subtitle) = subtitle {
         game.map_text(
             batch,
             subtitle,
@@ -1664,11 +1823,24 @@ fn draw_menu(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         [rect[0] + 4.0, rect[1] + header - 1.0, rect[2] - 8.0, 1.0],
         border,
     );
-    for ((label, _), row) in items.iter().zip(rows) {
+    for ((label, action), row) in items.iter().zip(rows) {
         if inside(mouse, row) {
             game.native_fill(batch, row, 0xff2e3a48);
         }
-        game.map_text(batch, label, [row[0] + 7.0, row[1] + 4.0], 0xdddddd, false);
+        paint_button_icon(
+            game,
+            batch,
+            action_icon(*action),
+            [row[0] + 5., row[1] + 4.],
+            true,
+        );
+        game.map_text(
+            batch,
+            &fit_text(game, label, row[2] - 23.),
+            [row[0] + 18., row[1] + 4.],
+            0xdddddd,
+            false,
+        );
     }
 }
 
@@ -1705,9 +1877,207 @@ fn draw_notice(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     game.map_text(batch, text, [x, y], 0xffffd24a, true);
 }
 
+#[derive(Clone, Copy)]
+enum ButtonIcon {
+    Plain,
+    Add,
+    Back,
+    Edit,
+    Delete,
+    View,
+    Save,
+    Cancel,
+    Cache,
+    Refresh,
+    Previous,
+    Next,
+    Move,
+    Copy,
+    Teleport,
+    Info,
+    Toggle,
+}
+
+impl ButtonIcon {
+    fn art(self) -> ([&'static str; 8], [u32; 3]) {
+        match self {
+            Self::Plain => (["........"; 8], [0; 3]),
+            Self::Add => (
+                [
+                    "........", "...11...", "...12...", ".111221.", ".122221.", "...12...",
+                    "...11...", "........",
+                ],
+                [0xff259756, 0xff94f4a8, 0xffe9ffef],
+            ),
+            Self::Back => (
+                [
+                    "........", "...1....", "..12....", ".122111.", "1222221.", ".122111.",
+                    "..12....", "...1....",
+                ],
+                [0xff4383bc, 0xffb8e6ff, 0xffeefaff],
+            ),
+            Self::Edit => (
+                [
+                    ".....33.", "....3223", "...3213.", "..3213..", ".3213...", "3213....",
+                    "213.....", "1.......",
+                ],
+                [0xff9d642d, 0xffffdf77, 0xfff6a74d],
+            ),
+            Self::Delete => (
+                [
+                    "...22...", ".222222.", "..1111..", "..1231..", "..1231..", "..1231..",
+                    "..1111..", "........",
+                ],
+                [0xffbb3a4b, 0xffff8588, 0xfff75b67],
+            ),
+            Self::View => (
+                [
+                    "........", "..1111..", ".123321.", "12311321", "12311321", ".123321.",
+                    "..1111..", "........",
+                ],
+                [0xff2a8a9d, 0xff89f0e0, 0xffd0fff8],
+            ),
+            Self::Save => (
+                [
+                    ".11111..", ".122211.", ".122311.", ".111111.", ".133331.", ".132231.",
+                    ".133331.", ".111111.",
+                ],
+                [0xff427dc1, 0xff88b9f0, 0xffd2ecff],
+            ),
+            Self::Cancel => (
+                [
+                    "........", ".12..21.", "..1221..", "...22...", "...22...", "..1221..",
+                    ".12..21.", "........",
+                ],
+                [0xffab415a, 0xffffa0a2, 0xffffd1cc],
+            ),
+            Self::Cache => (
+                [
+                    "..2222..", ".233332.", ".111111.", ".233332.", ".111111.", ".233332.",
+                    "..1111..", "........",
+                ],
+                [0xff936730, 0xfff6b953, 0xffffe29b],
+            ),
+            Self::Refresh => (
+                [
+                    "..222...", ".21122..", "21...222", "2....132", "231....2", "222...12",
+                    "..22112.", "...222..",
+                ],
+                [0xff328c7f, 0xff83dfb6, 0xffd2ffe4],
+            ),
+            Self::Previous => (
+                [
+                    "........", "....21..", "...21...", "..21....", "..21....", "...21...",
+                    "....21..", "........",
+                ],
+                [0xff477eb1, 0xffa8d7ff, 0xffeefaff],
+            ),
+            Self::Next => (
+                [
+                    "........", "..12....", "...12...", "....12..", "....12..", "...12...",
+                    "..12....", "........",
+                ],
+                [0xff477eb1, 0xffa8d7ff, 0xffeefaff],
+            ),
+            Self::Move => (
+                [
+                    "...22...", "...22...", ".11..11.", "22.33.22", "22.33.22", ".11..11.",
+                    "...22...", "...22...",
+                ],
+                [0xff4678cb, 0xff8cd8ff, 0xfff0fbff],
+            ),
+            Self::Copy => (
+                [
+                    ".1111...", ".122111.", ".1221321", ".1111321", "...13321", "...13321",
+                    "...11111", "........",
+                ],
+                [0xff7587c0, 0xffaebdf4, 0xffeceeff],
+            ),
+            Self::Teleport => (
+                [
+                    ".....22.", "....21..", "...21...", "..22222.", "...121..", "..121...",
+                    ".121....", ".11.....",
+                ],
+                [0xffb773fe, 0xfff9d366, 0xfffff0c0],
+            ),
+            Self::Info => (
+                [
+                    "..1111..", ".112111.", "11111111", "11122111", "11112111", "11112111",
+                    ".112211.", "..1111..",
+                ],
+                [0xff3e7db7, 0xffe4f8ff, 0xff84cffd],
+            ),
+            Self::Toggle => (
+                [
+                    "........", ".111111.", "12332221", "12332221", "12222221", ".111111.",
+                    "........", "........",
+                ],
+                [0xff37766d, 0xff60a997, 0xffc2ffe0],
+            ),
+        }
+    }
+}
+
+fn paint_button_icon(
+    game: &Game<'_>,
+    batch: &mut HudBatch,
+    icon: ButtonIcon,
+    at: [f32; 2],
+    enabled: bool,
+) {
+    let (rows, colors) = icon.art();
+    let colors = colors.map(|color| {
+        if enabled {
+            color
+        } else {
+            (color & 0x00ffffff) | 0x60000000
+        }
+    });
+    for (y, row) in rows.iter().enumerate() {
+        let pixels = row.as_bytes();
+        let mut x = 0;
+        while x < pixels.len() {
+            let start = x;
+            let value = pixels[x];
+            x += 1;
+            while x < pixels.len() && pixels[x] == value {
+                x += 1;
+            }
+            if let Some(i) = value.checked_sub(b'1').filter(|i| *i < 3) {
+                game.native_fill(
+                    batch,
+                    [
+                        at[0] + start as f32,
+                        at[1] + y as f32,
+                        (x - start) as f32,
+                        1.,
+                    ],
+                    colors[i as usize],
+                );
+            }
+        }
+    }
+}
+
+fn action_icon(action: MenuAction) -> ButtonIcon {
+    match action {
+        MenuAction::Copy | MenuAction::CopyDestination => ButtonIcon::Copy,
+        MenuAction::Waypoint => ButtonIcon::Add,
+        MenuAction::DeleteWaypoint => ButtonIcon::Delete,
+        MenuAction::EditWaypoint => ButtonIcon::Edit,
+        MenuAction::Teleport | MenuAction::TeleportWaypoint | MenuAction::TeleportDestination => {
+            ButtonIcon::Teleport
+        }
+        MenuAction::MoveView => ButtonIcon::Move,
+        MenuAction::Toggle3D => ButtonIcon::Toggle,
+        MenuAction::Information => ButtonIcon::Info,
+    }
+}
+
 fn button(
     game: &Game<'_>,
     batch: &mut HudBatch,
+    icon: ButtonIcon,
     rect: [f32; 4],
     label: &str,
     mouse: [f32; 2],
@@ -1722,13 +2092,28 @@ fn button(
     };
     game.native_fill(batch, rect, color);
     let text_color = if enabled { 0xffffff } else { 0x707880 };
+    let icon_width = if matches!(icon, ButtonIcon::Plain) {
+        0.
+    } else if label.is_empty() {
+        8.
+    } else {
+        12.
+    };
+    let label = fit_text(game, label, (rect[2] - icon_width - 6.).max(0.));
+    let x = rect[0] + (rect[2] - game.map_text_width(&label) - icon_width) / 2.;
+    if icon_width > 0. {
+        paint_button_icon(
+            game,
+            batch,
+            icon,
+            [x.round(), (rect[1] + (rect[3] - 8.) / 2.).round()],
+            enabled,
+        );
+    }
     game.map_text(
         batch,
-        label,
-        [
-            rect[0] + (rect[2] - game.map_text_width(label)) / 2.0,
-            rect[1] + 4.0,
-        ],
+        &label,
+        [x + icon_width, rect[1] + (rect[3] - 10.) / 2.],
         text_color,
         false,
     );
@@ -1828,6 +2213,7 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     button(
         game,
         batch,
+        ButtonIcon::Add,
         create,
         tr(
             "Create here",
@@ -1842,6 +2228,7 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     button(
         game,
         batch,
+        ButtonIcon::Back,
         back,
         tr("Back", "Назад", "Retour", "Volver", "Zurück"),
         mouse,
@@ -1942,11 +2329,18 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             game.native_fill(batch, toggle, 0xff3a4a5c);
         }
         let label = tr("3D", "3D", "3D", "3D", "3D");
+        paint_button_icon(
+            game,
+            batch,
+            ButtonIcon::Toggle,
+            [toggle[0] + 3., toggle[1] + 3.],
+            on,
+        );
         game.map_text(
             batch,
             label,
             [
-                toggle[0] + (toggle[2] - game.map_text_width(label)) / 2.0,
+                toggle[0] + 6. + (toggle[2] - game.map_text_width(label)) / 2.0,
                 toggle[1] + 3.0,
             ],
             if on { 0xffffff } else { 0x707880 },
@@ -1961,6 +2355,7 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     button(
         game,
         batch,
+        ButtonIcon::Edit,
         rename,
         tr("Edit", "Изменить", "Modifier", "Editar", "Bearbeiten"),
         mouse,
@@ -1969,6 +2364,7 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     button(
         game,
         batch,
+        ButtonIcon::Delete,
         delete,
         tr("Delete", "Удалить", "Supprimer", "Eliminar", "Löschen"),
         mouse,
@@ -1977,6 +2373,7 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     button(
         game,
         batch,
+        ButtonIcon::Move,
         show,
         tr(
             "Show on map",
@@ -2030,6 +2427,26 @@ fn draw_name_form(game: &Game<'_>, batch: &mut HudBatch, state: &State, form: &N
         Mode::Name => {}
         Mode::Caches => draw_cache_screen(game, batch, state),
     }
+    draw_name_panel(game, batch, form);
+}
+
+fn name_form_buttons(rect: [f32; 4]) -> ([f32; 4], [f32; 4]) {
+    let save = [
+        rect[0] + rect[2] - 184.0,
+        rect[1] + rect[3] - 24.0,
+        80.0,
+        18.0,
+    ];
+    let cancel = [
+        rect[0] + rect[2] - 96.0,
+        rect[1] + rect[3] - 24.0,
+        80.0,
+        18.0,
+    ];
+    (save, cancel)
+}
+
+fn draw_name_panel(game: &Game<'_>, batch: &mut HudBatch, form: &NameForm) {
     game.native_fill(batch, [0.0, 0.0, batch.width, batch.height], 0x70000000);
     let rect = name_form_rect(batch.width, batch.height);
     game.native_fill(batch, rect, 0xf01b2028);
@@ -2095,21 +2512,11 @@ fn draw_name_form(game: &Game<'_>, batch: &mut HudBatch, state: &State, form: &N
         game.native_fill(batch, swatch, waypoint_argb(color));
     }
     let mouse = game.cursor();
-    let save = [
-        rect[0] + rect[2] - 184.0,
-        rect[1] + rect[3] - 24.0,
-        80.0,
-        18.0,
-    ];
-    let cancel = [
-        rect[0] + rect[2] - 96.0,
-        rect[1] + rect[3] - 24.0,
-        80.0,
-        18.0,
-    ];
+    let (save, cancel) = name_form_buttons(rect);
     button(
         game,
         batch,
+        ButtonIcon::Save,
         save,
         tr("Save", "Сохранить", "Enregistrer", "Guardar", "Speichern"),
         mouse,
@@ -2118,6 +2525,7 @@ fn draw_name_form(game: &Game<'_>, batch: &mut HudBatch, state: &State, form: &N
     button(
         game,
         batch,
+        ButtonIcon::Cancel,
         cancel,
         tr("Cancel", "Отмена", "Annuler", "Cancelar", "Abbrechen"),
         mouse,
@@ -2154,26 +2562,45 @@ fn waypoint_at_pointer<'a>(
     rect: [f32; 4],
     mouse: [f32; 2],
 ) -> Option<&'a Waypoint> {
-    state
-        .waypoints
+    waypoint_hit(
+        game,
+        &state.waypoints,
+        &state.waypoint_labels,
+        view,
+        rect,
+        mouse,
+    )
+}
+
+fn waypoint_hit<'a>(
+    game: &Game<'_>,
+    points: &'a [Waypoint],
+    labels: &[String],
+    view: &View,
+    rect: [f32; 4],
+    mouse: [f32; 2],
+) -> Option<&'a Waypoint> {
+    points
         .iter()
         .enumerate()
-        .find(|(index, waypoint)| {
+        .filter_map(|(index, waypoint)| {
             if waypoint.dimension != view.dimension {
-                return false;
+                return None;
             }
             let pixel = view.screen_at([f64::from(waypoint.x) + 0.5, f64::from(waypoint.z) + 0.5]);
-            let x = rect[0] + pixel[0] as f32 * rect[2] / view.width as f32;
-            let y = rect[1] + pixel[1] as f32 * rect[3] / view.height as f32;
-            let letter = waypoint_text(state, *index, waypoint);
+            let dx = mouse[0] - (rect[0] + pixel[0] as f32 * rect[2] / view.width as f32);
+            let dy = mouse[1] - (rect[1] + pixel[1] as f32 * rect[3] / view.height as f32);
             let radius = if waypoint.icon == runtime::WaypointIcon::Letter {
-                (game.map_text_width(&letter) + 4.).max(14.) / 2.
+                labels
+                    .get(index)
+                    .map_or(7., |label| (game.map_text_width(label) + 4.).max(14.) / 2.)
             } else {
                 7.
             };
-            (mouse[0] - x).abs() <= radius && (mouse[1] - y).abs() <= 7.0
+            (dx.abs() <= radius && dy.abs() <= 7.).then_some((waypoint, dx * dx + dy * dy))
         })
-        .map(|(_, point)| point)
+        .min_by(|(_, a), (_, b)| a.total_cmp(b))
+        .map(|(waypoint, _)| waypoint)
 }
 
 fn portal_near(state: &State, dimension: Dimension, block: [i32; 2]) -> Option<(Portal, [i32; 3])> {
@@ -2748,6 +3175,42 @@ fn draw_world_waypoints(
     }
 }
 
+fn large_camera_view(
+    session: u64,
+    dimension: Dimension,
+    layer: Layer,
+    camera: &maps::Camera,
+    rect: [f32; 4],
+    scale: f32,
+) -> View {
+    View {
+        session,
+        dimension,
+        layer,
+        center: camera.center,
+        span: [
+            f64::from(rect[2]) * camera.zoom,
+            f64::from(rect[3]) * camera.zoom,
+        ],
+        width: ((rect[2] * scale.max(1.)).ceil() as usize).max(1),
+        height: ((rect[3] * scale.max(1.)).ceil() as usize).max(1),
+        angle: 0.,
+        round: false,
+        large: true,
+    }
+}
+
+fn camera_target(view: &View, camera: &maps::Camera) -> View {
+    let mut target = view.clone();
+    target.center = camera.target;
+    if view.large {
+        target.span = view
+            .span
+            .map(|size| size * (camera.zoom_target / camera.zoom));
+    }
+    target
+}
+
 // Camera motion never waits for terrain preparation. Newly exposed areas may
 // be empty until the next atlas arrives; existing tiles retain world positions.
 fn complete_map_view(desired: View, prepared: &View) -> View {
@@ -2922,6 +3385,10 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
                     player.y.floor() as i32,
                     player.z.floor() as i32,
                 ],
+                yaw: player
+                    .yaw
+                    .is_finite()
+                    .then(|| player.yaw.rem_euclid(360.).round() as i16),
             },
         );
     }
@@ -3491,57 +3958,43 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
             game.settings.gui_scale_inputs(),
         );
         let rect = rectangle(viewport.width, viewport.height);
-        let (width, height, span) = if large {
-            // The HUD draws in GUI pixels, but the texture is sampled at the
-            // window's physical resolution. Keep this coordinate space for
-            // overlays; terrain tiles are now rasterized directly by the GPU.
-            let scale = viewport.scale.max(1.0);
-            (
-                ((rect[2] * scale).ceil() as usize).max(1),
-                ((rect[3] * scale).ceil() as usize).max(1),
-                [
-                    f64::from(rect[2]) * state.camera.zoom,
-                    f64::from(rect[3]) * state.camera.zoom,
-                ],
+        let selected_layer = state
+            .layers
+            .get(&selected)
+            .copied()
+            .unwrap_or(Layer::Surface);
+        let view = if large {
+            large_camera_view(
+                state.session,
+                selected,
+                selected_layer,
+                &state.camera,
+                rect,
+                viewport.scale,
             )
         } else {
             let size = settings
                 .fitted_size(viewport.width, viewport.height)
                 .unwrap_or(128.0);
             let texture = (size * 4.0).round().clamp(64.0, 1024.0) as usize;
-            (
-                texture,
-                texture,
-                [f64::from(settings.blocks_per_pixel) * 128.0; 2],
-            )
+            View {
+                session: state.session,
+                dimension: selected,
+                layer: selected_layer,
+                center: state.camera.center,
+                span: [f64::from(settings.blocks_per_pixel) * 128.0; 2],
+                width: texture,
+                height: texture,
+                angle: if settings.rotate_with_player && selected == dimension {
+                    (f64::from(player.yaw) + 180.0).to_radians()
+                } else {
+                    0.0
+                },
+                round: settings.round,
+                large: false,
+            }
         };
-        let selected_layer = state
-            .layers
-            .get(&selected)
-            .copied()
-            .unwrap_or(Layer::Surface);
-        let view = View {
-            session: state.session,
-            dimension: selected,
-            layer: selected_layer,
-            center: state.camera.center,
-            span,
-            width,
-            height,
-            angle: if !large && settings.rotate_with_player && selected == dimension {
-                (f64::from(player.yaw) + 180.0).to_radians()
-            } else {
-                0.0
-            },
-            round: !large && settings.round,
-            large,
-        };
-        let mut target = view.clone();
-        target.center = state.camera.target;
-        if large {
-            let ratio = state.camera.zoom_target / state.camera.zoom;
-            target.span = span.map(|size| size * ratio);
-        }
+        let target = camera_target(&view, &state.camera);
         controller.maps.request_ahead(view.clone(), target);
         current_view = Some(view);
     }
@@ -3581,39 +4034,7 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
             image
         };
         let paged = next.atlas.as_ref().is_some_and(|a| !a.pages.is_empty());
-        if paged {
-            let _timing = runtime::profiling::measure("page-upload");
-            state.page_images = next
-                .atlas
-                .as_ref()
-                .unwrap()
-                .pages
-                .iter()
-                .map(|page| {
-                    let image = state
-                        .page_images
-                        .iter()
-                        .find(|(old, _)| Arc::ptr_eq(old, page))
-                        .map(|(_, image)| image.clone())
-                        .unwrap_or_else(|| {
-                            runtime::profiling::record(
-                                "texture-transfer",
-                                Duration::ZERO,
-                                1,
-                                page.pixels.len() as u64,
-                            );
-                            super::minimap_pages::create(
-                                page.width as u32,
-                                page.height as u32,
-                                page.pixels.clone(),
-                            )
-                        });
-                    (page.clone(), image)
-                })
-                .collect();
-        } else {
-            state.page_images.clear();
-        }
+        sync_page_images(&mut state.page_images, next.atlas.as_deref());
         let previous = if next.atlas.is_some() {
             state.frame.as_ref().and_then(|f| f.atlas.clone())
         } else {
@@ -3932,28 +4353,68 @@ fn draw_terrain_polygon(
     points.len() >= 3
 }
 
+fn sync_page_images(images: &mut PageImages, atlas: Option<&maps::TerrainAtlas>) {
+    let Some(atlas) = atlas else {
+        images.clear();
+        return;
+    };
+    if images.len() == atlas.pages.len()
+        && images
+            .iter()
+            .zip(&atlas.pages)
+            .all(|((old, _), page)| Arc::ptr_eq(old, page))
+    {
+        return;
+    }
+    let _timing = runtime::profiling::measure("page-upload");
+    *images = atlas
+        .pages
+        .iter()
+        .map(|page| {
+            let image = images
+                .iter()
+                .find(|(old, _)| Arc::ptr_eq(old, page))
+                .map(|(_, image)| image.clone())
+                .unwrap_or_else(|| {
+                    runtime::profiling::record(
+                        "texture-transfer",
+                        Duration::ZERO,
+                        1,
+                        page.pixels.len() as u64,
+                    );
+                    super::minimap_pages::create(
+                        page.width as u32,
+                        page.height as u32,
+                        page.pixels.clone(),
+                    )
+                });
+            (page.clone(), image)
+        })
+        .collect();
+}
+
 fn draw_paged_terrain(
     batch: &mut HudBatch,
-    state: &State,
-    frame: &maps::Frame,
+    images: &PageImages,
+    view: &View,
     atlas: &maps::TerrainAtlas,
     rect: [f32; 4],
 ) -> bool {
     let mut visible = false;
     // Keep the padded/predicted page set resident on the GPU, including pages
     // just behind the camera. Horizon drops picture textures absent from a batch.
-    for (_, image) in &state.page_images {
+    for (_, image) in images {
         if !batch.pictures.iter().any(|old| Arc::ptr_eq(old, image)) {
             batch.pictures.push(image.clone());
         }
     }
     let mut paint = |bounds: [i64; 4], mut uv: [f32; 4]| {
         let page = uv[1] as usize / 64;
-        let Some((_, image)) = state.page_images.get(page) else {
+        let Some((_, image)) = images.get(page) else {
             return;
         };
         uv[1] -= (page * 64) as f32;
-        let mut points = maps::terrain_polygon(&frame.view, bounds, uv);
+        let mut points = maps::terrain_polygon(view, bounds, uv);
         for p in &mut points {
             p[0] = f64::from(rect[0]) + (p[0] + 0.5) * f64::from(rect[2]);
             p[1] = f64::from(rect[1]) + (p[1] + 0.5) * f64::from(rect[3]);
@@ -3986,6 +4447,134 @@ fn draw_paged_terrain(
         );
     }
     visible
+}
+
+struct MapScene<'a> {
+    rect: [f32; 4],
+    frame: &'a maps::Frame,
+    images: &'a PageImages,
+    hover: Option<[i32; 2]>,
+    waypoints: &'a [Waypoint],
+    labels: &'a [String],
+    marker: Option<PlayerMarker>,
+    settings: &'a runtime::minimap::Settings,
+}
+
+fn draw_map_scene(
+    game: &Game<'_>,
+    batch: &mut HudBatch,
+    scene: MapScene<'_>,
+    draw_live_overlays: impl FnOnce(&mut HudBatch),
+) -> bool {
+    let frame = scene.frame;
+    let view = &frame.view;
+    let rect = scene.rect;
+    let mut terrain_visible = frame.known > 0;
+    if let Some(atlas) = &frame.atlas {
+        terrain_visible = false;
+        if !atlas.pages.is_empty() {
+            terrain_visible = draw_paged_terrain(batch, scene.images, view, atlas, rect);
+        } else {
+            for coarse in &atlas.coarse {
+                for part in &coarse.fragments {
+                    if view.large {
+                        if let Some((src, dst)) = atlas.coarse_quad(view, rect, coarse, *part) {
+                            game.map_sprite(batch, horizon_client::hud::MOD_IMAGE_SPRITE, src, dst);
+                            terrain_visible = true;
+                        }
+                    } else {
+                        let bounds = coarse.key.bounds();
+                        let uv = [
+                            coarse.uv_origin[0] as f32
+                                + ((part[0] - bounds[0]) as f64 * 16.0 / bounds[2] as f64) as f32,
+                            coarse.uv_origin[1] as f32
+                                + ((part[1] - bounds[1]) as f64 * 16.0 / bounds[3] as f64) as f32,
+                            (part[2] as f64 * 16.0 / bounds[2] as f64) as f32,
+                            (part[3] as f64 * 16.0 / bounds[3] as f64) as f32,
+                        ];
+                        terrain_visible |= draw_terrain_polygon(game, batch, view, rect, *part, uv);
+                    }
+                }
+            }
+            for (slot, chunk) in atlas.chunks.iter().enumerate() {
+                if view.large {
+                    if let Some((src, dst)) = atlas.quad(view, rect, *chunk, slot) {
+                        game.map_sprite(batch, horizon_client::hud::MOD_IMAGE_SPRITE, src, dst);
+                        terrain_visible = true;
+                    }
+                } else {
+                    let columns = atlas.width / 16;
+                    let slot = atlas.slots[slot];
+                    terrain_visible |= draw_terrain_polygon(
+                        game,
+                        batch,
+                        view,
+                        rect,
+                        [i64::from(chunk[0]) * 16, i64::from(chunk[1]) * 16, 16, 16],
+                        [
+                            (slot % columns * 16) as f32,
+                            (slot / columns * 16) as f32,
+                            16.,
+                            16.,
+                        ],
+                    );
+                }
+            }
+        }
+    } else if let Some(source) = &frame.raster_source {
+        if let Some((src, dst)) = maps::raster_quad(&source.view, view, rect) {
+            game.map_sprite(batch, horizon_client::hud::MOD_IMAGE_SPRITE, src, dst);
+        } else {
+            terrain_visible = false;
+        }
+    } else if frame.known > 0 {
+        game.map_sprite(
+            batch,
+            horizon_client::hud::MOD_IMAGE_SPRITE,
+            [0.0, 0.0, frame.view.width as f32, frame.view.height as f32],
+            rect,
+        );
+    }
+    draw_live_overlays(batch);
+    if let Some(block) = scene.hover {
+        highlight(game, batch, view, rect, block);
+    }
+    for (index, waypoint) in scene
+        .waypoints
+        .iter()
+        .enumerate()
+        .filter(|(_, waypoint)| waypoint.dimension == view.dimension)
+    {
+        let fallback;
+        let label = if let Some(label) = scene.labels.get(index) {
+            label
+        } else {
+            fallback = first_letter(&waypoint.name).to_string();
+            &fallback
+        };
+        draw_waypoint(
+            game,
+            batch,
+            view,
+            rect,
+            waypoint,
+            label,
+            if view.large { 11. } else { 8. },
+        );
+    }
+    if let Some(marker) = scene.marker {
+        draw_marker(game, batch, view, rect, marker);
+    }
+    draw_directions(
+        game,
+        batch,
+        view,
+        rect,
+        view.round,
+        view.large,
+        scene.settings,
+    );
+    terrain_visible
 }
 
 fn draw(
@@ -4022,155 +4611,85 @@ fn draw(
                     at,
                 );
         }
-        let mut terrain_visible = frame.known > 0;
-        if let Some(atlas) = &frame.atlas {
-            terrain_visible = false;
-            if !atlas.pages.is_empty() {
-                terrain_visible = draw_paged_terrain(batch, state, frame, atlas, rect);
+        let hover = if large {
+            state
+                .menu
+                .map(|menu| menu.block)
+                .or_else(|| mouse.and_then(|mouse| hovered_block(&frame.view, rect, mouse)))
+        } else {
+            None
+        };
+        let marker = game.native_player().map(|player| PlayerMarker {
+            at: state.marker,
+            yaw: Some(f64::from(player.yaw)),
+            colors: if Dimension::from_id(player.dimension) == frame.view.dimension {
+                (0xfff0f4fa, 0xffff5050)
             } else {
-                for coarse in &atlas.coarse {
-                    for part in &coarse.fragments {
-                        if large {
-                            if let Some((src, dst)) =
-                                atlas.coarse_quad(&frame.view, rect, coarse, *part)
-                            {
-                                game.map_sprite(
-                                    batch,
-                                    horizon_client::hud::MOD_IMAGE_SPRITE,
-                                    src,
-                                    dst,
-                                );
-                                terrain_visible = true;
-                            }
-                        } else {
-                            let bounds = coarse.key.bounds();
-                            let uv = [
-                                coarse.uv_origin[0] as f32
-                                    + ((part[0] - bounds[0]) as f64 * 16.0 / bounds[2] as f64)
-                                        as f32,
-                                coarse.uv_origin[1] as f32
-                                    + ((part[1] - bounds[1]) as f64 * 16.0 / bounds[3] as f64)
-                                        as f32,
-                                (part[2] as f64 * 16.0 / bounds[2] as f64) as f32,
-                                (part[3] as f64 * 16.0 / bounds[3] as f64) as f32,
-                            ];
-                            terrain_visible |=
-                                draw_terrain_polygon(game, batch, &frame.view, rect, *part, uv);
-                        }
+                (0xc0f0f4fa, 0xc060a0ff)
+            },
+        });
+        let terrain_visible = draw_map_scene(
+            game,
+            batch,
+            MapScene {
+                rect,
+                frame,
+                images: &state.page_images,
+                hover,
+                waypoints: &state.waypoints,
+                labels: &state.waypoint_labels,
+                marker,
+                settings: &settings,
+            },
+            |batch| {
+                draw_border(game, batch, &frame.view, rect, mouse);
+                let mut drawn: Vec<[i32; 2]> = Vec::new();
+                for (dimension, at, kind) in &state.portals {
+                    if *dimension != frame.view.dimension {
+                        continue;
                     }
+                    if drawn
+                        .iter()
+                        .any(|point| (point[0] - at[0]).abs() <= 2 && (point[1] - at[2]).abs() <= 2)
+                    {
+                        continue;
+                    }
+                    drawn.push([at[0], at[2]]);
+                    draw_portal_marker(game, batch, &frame.view, rect, *at, *kind);
                 }
-                for (slot, chunk) in atlas.chunks.iter().enumerate() {
-                    if large {
-                        if let Some((src, dst)) = atlas.quad(&frame.view, rect, *chunk, slot) {
-                            game.map_sprite(batch, horizon_client::hud::MOD_IMAGE_SPRITE, src, dst);
-                            terrain_visible = true;
-                        }
-                    } else {
-                        let columns = atlas.width / 16;
-                        let slot = atlas.slots[slot];
-                        terrain_visible |= draw_terrain_polygon(
+                if large {
+                    if let Some(menu) = state.menu {
+                        let (chunk, region) = maps::chunk_region(menu.block);
+                        draw_world_box(
                             game,
                             batch,
                             &frame.view,
                             rect,
-                            [i64::from(chunk[0]) * 16, i64::from(chunk[1]) * 16, 16, 16],
                             [
-                                (slot % columns * 16) as f32,
-                                (slot / columns * 16) as f32,
-                                16.,
-                                16.,
+                                f64::from(chunk[0] * 16),
+                                f64::from(chunk[1] * 16),
+                                f64::from(chunk[0] * 16 + 16),
+                                f64::from(chunk[1] * 16 + 16),
                             ],
+                            0xffffd45c,
+                        );
+                        draw_world_box(
+                            game,
+                            batch,
+                            &frame.view,
+                            rect,
+                            [
+                                f64::from(region[0] * 512),
+                                f64::from(region[1] * 512),
+                                f64::from(region[0] * 512 + 512),
+                                f64::from(region[1] * 512 + 512),
+                            ],
+                            0xff58c7ff,
                         );
                     }
                 }
-            }
-        } else if let Some(source) = &frame.raster_source {
-            if let Some((src, dst)) = maps::raster_quad(&source.view, &frame.view, rect) {
-                game.map_sprite(batch, horizon_client::hud::MOD_IMAGE_SPRITE, src, dst);
-            } else {
-                terrain_visible = false;
-            }
-        } else {
-            game.map_sprite(
-                batch,
-                horizon_client::hud::MOD_IMAGE_SPRITE,
-                [0.0, 0.0, frame.view.width as f32, frame.view.height as f32],
-                rect,
-            );
-        }
-        draw_border(game, batch, &frame.view, rect, mouse);
-        let mut drawn: Vec<[i32; 2]> = Vec::new();
-        for (dimension, at, kind) in &state.portals {
-            if *dimension != frame.view.dimension {
-                continue;
-            }
-            if drawn
-                .iter()
-                .any(|point| (point[0] - at[0]).abs() <= 2 && (point[1] - at[2]).abs() <= 2)
-            {
-                continue;
-            }
-            drawn.push([at[0], at[2]]);
-            draw_portal_marker(game, batch, &frame.view, rect, *at, *kind);
-        }
-        if large {
-            let hover = state
-                .menu
-                .map(|menu| menu.block)
-                .or_else(|| mouse.and_then(|mouse| hovered_block(&frame.view, rect, mouse)));
-            if let Some(block) = hover {
-                highlight(game, batch, &frame.view, rect, block);
-            }
-            if let Some(menu) = state.menu {
-                let (chunk, region) = maps::chunk_region(menu.block);
-                draw_world_box(
-                    game,
-                    batch,
-                    &frame.view,
-                    rect,
-                    [
-                        f64::from(chunk[0] * 16),
-                        f64::from(chunk[1] * 16),
-                        f64::from(chunk[0] * 16 + 16),
-                        f64::from(chunk[1] * 16 + 16),
-                    ],
-                    0xffffd45c,
-                );
-                draw_world_box(
-                    game,
-                    batch,
-                    &frame.view,
-                    rect,
-                    [
-                        f64::from(region[0] * 512),
-                        f64::from(region[1] * 512),
-                        f64::from(region[0] * 512 + 512),
-                        f64::from(region[1] * 512 + 512),
-                    ],
-                    0xff58c7ff,
-                );
-            }
-        }
-        for (index, waypoint) in state
-            .waypoints
-            .iter()
-            .enumerate()
-            .filter(|(_, waypoint)| waypoint.dimension == frame.view.dimension)
-        {
-            draw_waypoint(
-                game,
-                batch,
-                &frame.view,
-                rect,
-                waypoint,
-                &waypoint_text(state, index, waypoint),
-                if large { 11.0 } else { 8.0 },
-            );
-        }
-        if let Some(player) = game.native_player() {
-            draw_marker(game, batch, &frame.view, rect, state.marker, &player);
-        }
-        draw_directions(game, batch, &frame.view, rect, round, large, &settings);
+            },
+        );
         if terrain_visible {
             return;
         }
@@ -4529,6 +5048,7 @@ fn draw_information(game: &Game<'_>, batch: &mut HudBatch, state: &State, menu: 
     button(
         game,
         batch,
+        ButtonIcon::Cancel,
         [
             rect[0] + rect[2] - 82.0,
             rect[1] + rect[3] - 24.0,
@@ -4539,6 +5059,15 @@ fn draw_information(game: &Game<'_>, batch: &mut HudBatch, state: &State, menu: 
         game.cursor(),
         true,
     );
+}
+
+fn nether_coordinates(view: &View, block: [i32; 2]) -> Option<String> {
+    let [x, _, z] = runtime::portal_coordinates(
+        view.dimension,
+        Dimension::Nether,
+        [f64::from(block[0]), 0., f64::from(block[1])],
+    )?;
+    Some(format!("{}: X {x}  Z {z}", Dimension::Nether.label()))
 }
 
 fn map_footer(width: f32, height: f32) -> [f32; 4] {
@@ -4554,6 +5083,37 @@ fn over_map_controls(mouse: [f32; 2], width: f32, height: f32) -> bool {
         || inside(mouse, map_footer(width, height))
         || (0..4).any(|i| inside(mouse, tab(width, i)))
 }
+fn draw_dimension_tab(
+    game: &Game<'_>,
+    batch: &mut HudBatch,
+    rect: [f32; 4],
+    dimension: Dimension,
+    selected: bool,
+    available: bool,
+) {
+    button(
+        game,
+        batch,
+        ButtonIcon::Plain,
+        rect,
+        "",
+        game.cursor(),
+        available,
+    );
+    if selected && available {
+        game.native_fill(batch, rect, 0xe032624b);
+    }
+    dimension_icon(game, batch, dimension, [rect[0] + 4., rect[1] + 4.]);
+    let label = fit_text(game, dimension.label(), rect[2] - 25.);
+    game.map_text(
+        batch,
+        &label,
+        [rect[0] + 24., rect[1] + 8.],
+        if available { 0xffffff } else { 0x707880 },
+        true,
+    );
+}
+
 fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     let mouse = game.cursor();
     let rect = rectangle(batch.width, batch.height);
@@ -4637,18 +5197,8 @@ fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
                 block[1]
             ),
         };
-        if let Some([x, _, z]) = runtime::portal_coordinates(
-            frame.view.dimension,
-            Dimension::Nether,
-            [f64::from(block[0]), 0.0, f64::from(block[1])],
-        ) {
-            nether = localized_format!(
-                "Nether: X {x}  Z {z}",
-                "Незер: X {x}  Z {z}",
-                "Nether : X {x}  Z {z}",
-                "Nether: X {x}  Z {z}",
-                "Nether: X {x}  Z {z}"
-            );
+        if let Some(converted) = nether_coordinates(&frame.view, block) {
+            nether = converted;
         }
         if state.dimension == frame.view.dimension {
             if let Some(y) = height.or_else(|| game.native_player().map(|p| p.y.floor() as i32)) {
@@ -4674,17 +5224,12 @@ fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     }
     let settings = runtime::initialize(game.native_data_dir(runtime::MOD_ID)).settings();
     for (i, dimension) in Dimension::ALL.into_iter().enumerate() {
-        let tab = tab(batch.width, i);
-        button(game, batch, tab, "", mouse, true);
-        if dimension == settings.world_dimension {
-            game.native_fill(batch, tab, 0xe032624b);
-        }
-        dimension_icon(game, batch, dimension, [tab[0] + 4.0, tab[1] + 4.0]);
-        game.map_text(
+        draw_dimension_tab(
+            game,
             batch,
-            dimension.label(),
-            [tab[0] + 24.0, tab[1] + 8.0],
-            0xffffff,
+            tab(batch.width, i),
+            dimension,
+            dimension == settings.world_dimension,
             true,
         );
     }
@@ -4737,6 +5282,7 @@ fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         button(
             game,
             batch,
+            ButtonIcon::Cache,
             cache_map_button(batch.width),
             if attention {
                 tr(
@@ -4950,6 +5496,7 @@ fn title_cache_button(width: f32) -> [f32; 4] {
 }
 
 fn close_cache_manager(state: &mut State) {
+    runtime::set_text_input(false);
     state.caches.title_open = false;
     state.caches.preview = None;
     state.caches.confirm = None;
@@ -4965,17 +5512,50 @@ fn is_active_cache(state: &State, entry: &runtime::cache_manager::Entry) -> bool
                 .is_some_and(|name| name == entry.file.as_str()))
 }
 
-fn preview_rect(width: f32, height: f32) -> [f32; 4] {
-    [12., 40., (width - 24.).max(1.), (height - 70.).max(1.)]
+impl CachePreview {
+    fn layers(&self) -> &[(Layer, [f64; 2])] {
+        self.dimensions
+            .iter()
+            .find(|d| d.dimension == self.dimension)
+            .map_or(&[], |d| d.layers.as_slice())
+    }
+
+    fn layer(&self) -> Layer {
+        self.layers()
+            .get(self.layer_index)
+            .map_or(Layer::Surface, |(layer, _)| *layer)
+    }
 }
 
-fn preview_back() -> [f32; 4] {
-    [12., 12., 74., 18.]
+fn preview_layer_button(width: f32) -> [f32; 4] {
+    [8., 36., (width / 2. - 22.).clamp(1., 124.), 18.]
 }
 
-fn preview_dimension(width: f32, index: usize) -> [f32; 4] {
-    let w = ((width - 110.) / 3.).clamp(1., 112.);
-    [94. + index as f32 * (w + 4.), 12., w, 18.]
+fn cache_layer_label(layer: Layer) -> String {
+    match layer {
+        Layer::Surface => tr(
+            "Surface",
+            "Поверхность",
+            "Surface",
+            "Superficie",
+            "Oberfläche",
+        )
+        .into(),
+        Layer::Below(y) => localized_format!(
+            "Below Y {y}",
+            "Ниже Y {y}",
+            "Sous Y {y}",
+            "Por debajo de Y {y}",
+            "Unter Y {y}"
+        ),
+    }
+}
+
+fn over_preview_controls(mouse: [f32; 2], width: f32, height: f32) -> bool {
+    inside(mouse, map_footer(width, height))
+        || inside(mouse, preview_move_button(width))
+        || inside(mouse, preview_layer_button(width))
+        || (0..4).any(|i| inside(mouse, tab(width, i)))
 }
 
 fn open_preview(
@@ -4985,12 +5565,16 @@ fn open_preview(
     let directory = game.native_data_dir(runtime::MOD_ID).join("cache");
     let world = entry.world.clone().ok_or("Unknown cache identity")?;
     let file = entry.file.clone();
-    let (request, views) = std::sync::mpsc::sync_channel(1);
+    let (wake, changes) = std::sync::mpsc::sync_channel(1);
     let (updates, response) = std::sync::mpsc::sync_channel(1);
+    let request = Arc::new(Mutex::new(None::<PreviewRequest>));
+    let prepared = Arc::new(Mutex::new(None));
+    let (requested, output) = (request.clone(), prepared.clone());
+    let preview_world = world.clone();
     std::thread::Builder::new()
         .name("map-preview".into())
         .spawn(move || {
-            let preview = match maps::Preview::open(&directory, &file, &world) {
+            let mut preview = match maps::Preview::open(&directory, &file, &preview_world) {
                 Ok(preview) => preview,
                 Err(error) => {
                     let _ = updates.send(PreviewUpdate::Error(error.to_string()));
@@ -5006,26 +5590,87 @@ fn open_preview(
             {
                 return;
             }
-            while let Ok(view) = views.recv() {
-                if updates
-                    .send(PreviewUpdate::Frame(preview.render(view)))
-                    .is_err()
-                {
+            let mut pending = false;
+            let mut portals_pending = false;
+            let mut previous = None::<(View, View, Arc<maps::TerrainAtlas>)>;
+            loop {
+                use std::sync::mpsc::RecvTimeoutError;
+                let change = if pending || portals_pending {
+                    changes.recv_timeout(Duration::from_millis(8))
+                } else {
+                    changes.recv().map_err(|_| RecvTimeoutError::Disconnected)
+                };
+                if change == Err(RecvTimeoutError::Disconnected) {
                     break;
                 }
+                let current = requested.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let Some(PreviewRequest {
+                    view,
+                    target,
+                    point,
+                }) = current
+                else {
+                    continue;
+                };
+                let atlas = if !pending
+                    && let Some((old, old_target, atlas)) = &previous
+                    && *old == view
+                    && *old_target == target
+                {
+                    atlas.clone()
+                } else {
+                    match preview.prepare(&view, &target) {
+                        Ok(atlas) => {
+                            pending = preview.preparing();
+                            previous = Some((view.clone(), target, atlas.clone()));
+                            atlas
+                        }
+                        Err(error) => {
+                            let _ = updates.send(PreviewUpdate::Error(error.to_string()));
+                            break;
+                        }
+                    }
+                };
+                let column =
+                    point.and_then(|point| preview.column(view.dimension, view.layer, point));
+                let portals = preview.portals(&view);
+                portals_pending = preview.portals_pending();
+                *output.lock().unwrap_or_else(|e| e.into_inner()) = Some(PreparedPreview {
+                    dimension: view.dimension,
+                    layer: view.layer,
+                    atlas,
+                    point,
+                    column,
+                    portals,
+                });
             }
         })
         .map_err(|error| error.to_string())?;
+    let controller = runtime::initialize(game.native_data_dir(runtime::MOD_ID));
+    let waypoints = controller.waypoints(&world);
+    let waypoint_letters = controller.settings().waypoint_letters;
+    let waypoint_labels = runtime::waypoint_labels(&waypoints, waypoint_letters);
     Ok(CachePreview {
         name: entry.name.clone(),
+        world,
+        menu: None,
+        form: None,
+        notice: None,
+        waypoints,
+        waypoint_labels,
+        waypoint_letters,
+        wake,
         request,
+        prepared,
         response,
         dimensions: Vec::new(),
+        layer_index: 0,
         position: None,
         camera: maps::Camera::new([0.; 2], 2.),
+        last_frame: Instant::now(),
         dimension: Dimension::Overworld,
-        sent: None,
-        image: None,
+        uploaded: None,
+        page_images: Vec::new(),
         dragging: false,
         error: None,
     })
@@ -5043,32 +5688,26 @@ fn draw_preview(game: &Game<'_>, batch: &mut HudBatch, preview: &mut CachePrevie
     use std::sync::mpsc::TryRecvError;
     match preview.response.try_recv() {
         Ok(PreviewUpdate::Ready(dimensions, position)) => {
-            if let Some(&(dimension, center)) = dimensions.first() {
-                preview.dimension = dimension;
-                preview.camera.snap(center);
+            if let Some(first) = dimensions.first() {
+                preview.dimension = first.dimension;
+                if let Some(&(_, center)) = first.layers.first() {
+                    preview.camera.snap(center);
+                }
             }
             preview.position = position;
             preview.dimensions = dimensions;
             if preview.dimensions.is_empty() {
                 preview.error = Some(
                     tr(
-                        "No saved surface terrain",
-                        "Нет сохранённой поверхности",
-                        "Aucun terrain de surface enregistré",
-                        "No hay superficie guardada",
-                        "Kein Oberflächengelände gespeichert",
+                        "No saved terrain",
+                        "Нет сохранённого рельефа",
+                        "Aucun terrain enregistré",
+                        "No hay terreno guardado",
+                        "Kein Gelände gespeichert",
                     )
                     .into(),
                 );
             }
-        }
-        Ok(PreviewUpdate::Frame(frame)) if frame.view.dimension == preview.dimension => {
-            let image = super::minimap_pages::create(
-                frame.view.width as u32,
-                frame.view.height as u32,
-                frame.pixels,
-            );
-            preview.image = Some((frame.view, image));
         }
         Ok(PreviewUpdate::Error(error)) => preview.error = Some(runtime::localize_message(&error)),
         Err(TryRecvError::Disconnected) if preview.error.is_none() => {
@@ -5086,83 +5725,137 @@ fn draw_preview(game: &Game<'_>, batch: &mut HudBatch, preview: &mut CachePrevie
         _ => {}
     }
     game.native_fill(batch, [0., 0., batch.width, batch.height], 0xff181b20);
+    let rect = rectangle(batch.width, batch.height);
+    let now = Instant::now();
+    preview
+        .camera
+        .advance((now - preview.last_frame).as_secs_f64());
+    preview.last_frame = now;
+    let view = large_camera_view(
+        0,
+        preview.dimension,
+        preview.layer(),
+        &preview.camera,
+        rect,
+        batch.scale,
+    );
+    let mouse = game.cursor();
+    let point = preview.menu.map(|menu| menu.block).or_else(|| {
+        (preview.form.is_none() && !over_preview_controls(mouse, batch.width, batch.height))
+            .then(|| hovered_block(&view, rect, mouse))
+            .flatten()
+    });
+    if preview.error.is_none() && !preview.dimensions.is_empty() {
+        let request = PreviewRequest {
+            target: camera_target(&view, &preview.camera),
+            view: view.clone(),
+            point,
+        };
+        let mut latest = preview.request.lock().unwrap_or_else(|e| e.into_inner());
+        if latest.as_ref() != Some(&request) {
+            *latest = Some(request);
+            let _ = preview.wake.try_send(());
+        }
+    }
+    let prepared = preview
+        .prepared
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .filter(|prepared| prepared.dimension == view.dimension && prepared.layer == view.layer);
+    let atlas = prepared.as_ref().map(|prepared| prepared.atlas.clone());
+    if let Some(atlas) = &atlas
+        && preview
+            .uploaded
+            .as_ref()
+            .is_none_or(|old| !Arc::ptr_eq(old, atlas))
+    {
+        sync_page_images(&mut preview.page_images, Some(atlas));
+        preview.uploaded = Some(atlas.clone());
+    }
+    let settings = runtime::initialize(game.native_data_dir(runtime::MOD_ID)).settings();
+    if preview.waypoint_letters != settings.waypoint_letters {
+        preview.waypoint_letters = settings.waypoint_letters;
+        preview.waypoint_labels =
+            runtime::waypoint_labels(&preview.waypoints, preview.waypoint_letters);
+    }
+    let marker = preview
+        .position
+        .filter(|at| at.dimension == view.dimension)
+        .map(|at| PlayerMarker {
+            at: [f64::from(at.block[0]) + 0.5, f64::from(at.block[2]) + 0.5],
+            yaw: at.yaw.map(f64::from),
+            colors: (0xff343434, 0xffaaaaaa),
+        });
+    let frame = maps::Frame {
+        view: view.clone(),
+        atlas,
+        raster_source: None,
+        serial: 0,
+        pixels: Vec::new(),
+        known: 0,
+    };
+    draw_map_scene(
+        game,
+        batch,
+        MapScene {
+            rect,
+            frame: &frame,
+            images: &preview.page_images,
+            hover: point,
+            waypoints: &preview.waypoints,
+            labels: &preview.waypoint_labels,
+            marker,
+            settings: &settings,
+        },
+        |batch| {
+            if let Some(prepared) = &prepared {
+                for &(at, kind) in prepared.portals.iter() {
+                    draw_portal_marker(game, batch, &view, rect, at, kind);
+                }
+            }
+        },
+    );
     button(
         game,
         batch,
-        preview_back(),
+        ButtonIcon::Back,
+        tab(batch.width, 0),
         tr("Back", "Назад", "Retour", "Atrás", "Zurück"),
-        game.cursor(),
+        mouse,
         true,
     );
-    for (index, (dimension, _)) in preview.dimensions.iter().enumerate() {
-        let rect = preview_dimension(batch.width, index);
-        let label = cache_text(game, dimension.label(), rect[2] - 4.);
+    for (index, dimension) in Dimension::ALL.into_iter().enumerate().skip(1) {
+        let tab = tab(batch.width, index);
+        let available = preview.dimensions.iter().any(|d| d.dimension == dimension);
+        draw_dimension_tab(
+            game,
+            batch,
+            tab,
+            dimension,
+            dimension == view.dimension,
+            available,
+        );
+    }
+    button(
+        game,
+        batch,
+        ButtonIcon::Move,
+        preview_move_button(batch.width),
+        move_view_label(),
+        mouse,
+        !preview.dimensions.is_empty(),
+    );
+    if !preview.layers().is_empty() {
         button(
             game,
             batch,
-            rect,
-            &label,
-            game.cursor(),
-            *dimension != preview.dimension,
+            ButtonIcon::Next,
+            preview_layer_button(batch.width),
+            &cache_layer_label(preview.layer()),
+            mouse,
+            preview.layers().len() > 1,
         );
-    }
-    let rect = preview_rect(batch.width, batch.height);
-    preview.camera.advance(0.25);
-    let view = maps::View {
-        session: 0,
-        dimension: preview.dimension,
-        layer: Layer::Surface,
-        center: preview
-            .camera
-            .center
-            .map(|v| v.clamp(-30_000_000., 30_000_000.)),
-        span: [
-            f64::from(rect[2]) * preview.camera.zoom,
-            f64::from(rect[3]) * preview.camera.zoom,
-        ],
-        width: rect[2] as usize,
-        height: rect[3] as usize,
-        angle: 0.,
-        round: false,
-        large: true,
-    };
-    if preview.error.is_none()
-        && !preview.dimensions.is_empty()
-        && preview.sent.as_ref() != Some(&view)
-        && preview.request.try_send(view.clone()).is_ok()
-    {
-        preview.sent = Some(view.clone());
-    }
-    if let Some((source, image)) = &preview.image
-        && source.dimension == view.dimension
-        && let Some((src, dst)) = maps::raster_quad(source, &view, rect)
-    {
-        let [x, y, w, h] = dst.map(f64::from);
-        let [u, v, sw, sh] = src.map(f64::from);
-        super::minimap_pages::paint(
-            batch,
-            image,
-            &[
-                [x, y, u, v],
-                [x + w, y, u + sw, v],
-                [x + w, y + h, u + sw, v + sh],
-                [x, y + h, u, v + sh],
-            ],
-        );
-    }
-    if let Some(at) = preview.position.filter(|at| at.dimension == view.dimension) {
-        let [x, z] = view.screen_at([f64::from(at.block[0]) + 0.5, f64::from(at.block[2]) + 0.5]);
-        let mark = [
-            rect[0] + (x / view.width as f64) as f32 * rect[2],
-            rect[1] + (z / view.height as f64) as f32 * rect[3],
-        ];
-        if inside(
-            mark,
-            [rect[0] + 5., rect[1] + 5., rect[2] - 10., rect[3] - 10.],
-        ) {
-            game.native_fill(batch, [mark[0] - 5., mark[1] - 5., 10., 10.], 0xff343434);
-            game.native_fill(batch, [mark[0] - 3., mark[1] - 3., 6., 6.], 0xffaaaaaa);
-        }
     }
     let footer = if let Some(error) = &preview.error {
         error.clone()
@@ -5194,13 +5887,367 @@ fn draw_preview(game: &Game<'_>, batch: &mut HudBatch, preview: &mut CachePrevie
     } else {
         preview.name.clone()
     };
+    let panel = map_footer(batch.width, batch.height);
+    game.native_fill(batch, panel, 0xdf10151d);
+    let column = prepared
+        .as_ref()
+        .filter(|prepared| prepared.point == point)
+        .and_then(|prepared| prepared.column.as_ref());
+    if let Some([x, z]) = point {
+        let height = column
+            .and_then(|column| {
+                column
+                    .height
+                    .map(|y| format!("  Y {}{y}", if column.approximate { "≈" } else { "" }))
+            })
+            .unwrap_or_default();
+        let nether = nether_coordinates(&view, [x, z]).unwrap_or_default();
+        let position = format!(
+            "{}: X {x}{height}  Z {z}   {nether}",
+            view.dimension.label()
+        );
+        if view.dimension != Dimension::End {
+            dimension_icon(
+                game,
+                batch,
+                Dimension::Nether,
+                [panel[0] + 5., panel[1] + 2.],
+            );
+        }
+        game.map_text(
+            batch,
+            &fit_text(game, &position, panel[2] - 34.),
+            [panel[0] + 25., panel[1] + 5.],
+            0xffffff,
+            true,
+        );
+        let biome = column.and_then(|column| column.biome.as_deref());
+        biome_icon(game, batch, biome, [panel[0] + 5., panel[1] + 18.]);
+        if let Some(biome) = biome {
+            let label = localized_biome(biome);
+            game.map_text(
+                batch,
+                &fit_text(game, &label, panel[2] / 2. - 26.),
+                [panel[0] + 25., panel[1] + 21.],
+                0xffffff,
+                true,
+            );
+        }
+    }
     game.map_text(
         batch,
-        &cache_text(game, &footer, batch.width - 24.),
-        [12., batch.height - 17.],
+        &fit_text(game, &footer, panel[2] / 2. - 8.),
+        [panel[0] + panel[2] / 2., panel[1] + 21.],
         0xbac4d0,
+        true,
+    );
+    if let Some((notice, at)) = &preview.notice
+        && at.elapsed() < Duration::from_secs(2)
+    {
+        draw_tooltip(game, batch, notice, [12., (batch.height - 80.).max(12.)]);
+    }
+    if let Some(menu) = preview.menu {
+        let subtitle = preview
+            .waypoints
+            .iter()
+            .find(|w| Some(waypoint_spot(w)) == menu.waypoint)
+            .map(|w| w.name.as_str());
+        draw_context_menu(game, batch, menu, subtitle, &preview_menu_items(menu));
+    }
+    match preview.form.as_ref() {
+        Some(PreviewForm::Waypoint(form)) => draw_name_panel(game, batch, form),
+        Some(PreviewForm::Coordinates { text, invalid }) => {
+            draw_coordinate_panel(game, batch, text, *invalid)
+        }
+        None => {}
+    }
+}
+
+fn preview_menu_items(menu: Menu) -> Vec<(&'static str, MenuAction)> {
+    let mut items = if menu.waypoint.is_some() {
+        waypoint_menu(false)
+    } else {
+        vec![(create_waypoint_label(), MenuAction::Waypoint)]
+    };
+    items.push((move_view_label(), MenuAction::MoveView));
+    items
+}
+
+fn preview_move_button(width: f32) -> [f32; 4] {
+    [(width - 154.).max(8.), 36., 146., 18.]
+}
+
+fn coordinate_buttons(rect: [f32; 4]) -> ([f32; 4], [f32; 4]) {
+    (
+        [
+            rect[0] + 10.,
+            rect[1] + rect[3] - 26.,
+            (rect[2] - 29.) / 2.,
+            18.,
+        ],
+        [
+            rect[0] + (rect[2] + 9.) / 2.,
+            rect[1] + rect[3] - 26.,
+            (rect[2] - 29.) / 2.,
+            18.,
+        ],
+    )
+}
+
+fn draw_coordinate_panel(game: &Game<'_>, batch: &mut HudBatch, text: &str, invalid: bool) {
+    game.native_fill(batch, [0., 0., batch.width, batch.height], 0x70000000);
+    let rect = name_form_rect(batch.width, batch.height);
+    game.native_fill(batch, rect, 0xf01b2028);
+    game.map_text(
+        batch,
+        move_view_label(),
+        [rect[0] + 10., rect[1] + 8.],
+        0xffffff,
+        true,
+    );
+    let field = [rect[0] + 10., rect[1] + 30., rect[2] - 20., 18.];
+    game.native_fill(batch, field, 0xff0d1117);
+    game.map_text(
+        batch,
+        &format!("{text}_"),
+        [field[0] + 4., field[1] + 4.],
+        0xffffff,
         false,
     );
+    let hint = if invalid {
+        tr(
+            "Enter valid X Z",
+            "Введите допустимые X Z",
+            "Saisissez des X Z valides",
+            "Introduce X Z válidas",
+            "Gültige X Z eingeben",
+        )
+    } else {
+        tr(
+            "Enter X and Z, e.g. -120 64",
+            "Введите X и Z, например -120 64",
+            "Saisissez X et Z, p. ex. -120 64",
+            "Introduce X y Z, p. ej. -120 64",
+            "X und Z eingeben, z. B. -120 64",
+        )
+    };
+    game.map_text(
+        batch,
+        &fit_text(game, hint, rect[2] - 20.),
+        [rect[0] + 10., rect[1] + 54.],
+        if invalid { 0xff8888 } else { 0xbac4d0 },
+        false,
+    );
+    let (apply, cancel) = coordinate_buttons(rect);
+    button(
+        game,
+        batch,
+        ButtonIcon::Move,
+        apply,
+        move_view_label(),
+        game.cursor(),
+        true,
+    );
+    button(
+        game,
+        batch,
+        ButtonIcon::Cancel,
+        cancel,
+        tr("Cancel", "Отмена", "Annuler", "Cancelar", "Abbrechen"),
+        game.cursor(),
+        true,
+    );
+}
+
+fn open_preview_coordinates(preview: &mut CachePreview, block: Option<[i32; 2]>) {
+    preview.dragging = false;
+    preview.menu = None;
+    preview.form = Some(PreviewForm::Coordinates {
+        text: block.map_or_else(String::new, |[x, z]| format!("{x} {z}")),
+        invalid: false,
+    });
+    runtime::set_text_input(true);
+}
+
+fn finish_preview_form(game: &Game<'_>, preview: &mut CachePreview, save: bool) {
+    let Some(form) = preview.form.take() else {
+        return;
+    };
+    if save {
+        match form {
+            PreviewForm::Coordinates { text, .. } => {
+                let Some([x, z]) = maps::map_coordinates(&text) else {
+                    preview.form = Some(PreviewForm::Coordinates {
+                        text,
+                        invalid: true,
+                    });
+                    return;
+                };
+                preview
+                    .camera
+                    .snap([f64::from(x) + 0.5, f64::from(z) + 0.5]);
+            }
+            PreviewForm::Waypoint(form) => {
+                let controller = runtime::initialize(game.native_data_dir(runtime::MOD_ID));
+                let changed = if let Some(spot) = form.rename {
+                    controller.update_waypoint(
+                        &preview.world,
+                        spot.dimension,
+                        spot.x,
+                        spot.z,
+                        &form.text,
+                        form.color,
+                    )
+                } else if let Some(at) = form.target {
+                    let biome = preview
+                        .prepared
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .as_ref()
+                        .filter(|p| p.dimension == at.dimension && p.point == Some([at.x, at.z]))
+                        .and_then(|p| p.column.as_ref()?.biome.as_deref().map(str::to_owned));
+                    controller.add_waypoint(Waypoint {
+                        world: preview.world.clone(),
+                        dimension: at.dimension,
+                        x: at.x,
+                        y: at.y,
+                        z: at.z,
+                        name: form.text,
+                        color: form.color,
+                        icon: runtime::WaypointIcon::Letter,
+                        biome,
+                        show_3d: true,
+                    })
+                } else {
+                    false
+                };
+                refresh_preview_waypoints(preview, controller);
+                preview.notice = Some((
+                    if changed {
+                        tr(
+                            "Waypoint saved",
+                            "Вейпоинт сохранён",
+                            "Repère enregistré",
+                            "Marcador guardado",
+                            "Wegpunkt gespeichert",
+                        )
+                    } else {
+                        tr(
+                            "Waypoint unchanged",
+                            "Вейпоинт не изменён",
+                            "Repère inchangé",
+                            "Marcador sin cambios",
+                            "Wegpunkt unverändert",
+                        )
+                    }
+                    .into(),
+                    Instant::now(),
+                ));
+            }
+        }
+    }
+    runtime::set_text_input(false);
+}
+
+fn refresh_preview_waypoints(preview: &mut CachePreview, controller: &runtime::Controller) {
+    preview.waypoints = controller.waypoints(&preview.world);
+    preview.waypoint_labels =
+        runtime::waypoint_labels(&preview.waypoints, preview.waypoint_letters);
+}
+
+fn preview_form_press(
+    game: &Game<'_>,
+    preview: &mut CachePreview,
+    screen: &mod_api::ScreenView<'_>,
+) {
+    let rect = name_form_rect(screen.rect[2], screen.rect[3]);
+    let (save, cancel) = match preview.form.as_mut() {
+        Some(PreviewForm::Coordinates { .. }) => coordinate_buttons(rect),
+        Some(PreviewForm::Waypoint(form)) => {
+            for (index, &color) in runtime::WAYPOINT_COLORS.iter().enumerate() {
+                if inside(screen.mouse, color_swatch_at(rect, index)) {
+                    form.color = color;
+                    return;
+                }
+            }
+            name_form_buttons(rect)
+        }
+        None => return,
+    };
+    if inside(screen.mouse, save) {
+        finish_preview_form(game, preview, true);
+    } else if inside(screen.mouse, cancel) {
+        finish_preview_form(game, preview, false);
+    }
+}
+
+fn perform_preview_menu(
+    game: &Game<'_>,
+    preview: &mut CachePreview,
+    menu: Menu,
+    action: MenuAction,
+) {
+    preview.menu = None;
+    let controller = runtime::initialize(game.native_data_dir(runtime::MOD_ID));
+    match action {
+        MenuAction::MoveView => open_preview_coordinates(preview, Some(menu.block)),
+        MenuAction::Waypoint => {
+            let y = preview
+                .prepared
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .filter(|p| p.dimension == menu.dimension && p.point == Some(menu.block))
+                .and_then(|p| p.column.as_ref()?.height)
+                .or(menu.height)
+                .or_else(|| {
+                    preview
+                        .position
+                        .filter(|p| p.dimension == menu.dimension)
+                        .map(|p| p.block[1])
+                })
+                .unwrap_or(64);
+            let text = localized_format!(
+                "Waypoint {}",
+                "Вейпоинт {}",
+                "Repère {}",
+                "Marcador {}",
+                "Wegpunkt {}",
+                preview.waypoints.len() + 1
+            );
+            preview.form = Some(PreviewForm::Waypoint(NameForm {
+                text,
+                color: runtime::WAYPOINT_COLORS
+                    [preview.waypoints.len() % runtime::WAYPOINT_COLORS.len()],
+                target: Some(Target {
+                    dimension: menu.dimension,
+                    x: menu.block[0],
+                    y,
+                    z: menu.block[1],
+                }),
+                rename: None,
+                background: Mode::Caches,
+            }));
+            runtime::set_text_input(true);
+        }
+        MenuAction::EditWaypoint => {
+            if let Some(waypoint) = preview
+                .waypoints
+                .iter()
+                .find(|w| Some(waypoint_spot(w)) == menu.waypoint)
+            {
+                preview.form = Some(PreviewForm::Waypoint(waypoint_form(waypoint, Mode::Caches)));
+                runtime::set_text_input(true);
+            }
+        }
+        MenuAction::DeleteWaypoint => {
+            if let Some(spot) = menu.waypoint {
+                controller.remove_waypoint(&preview.world, spot.dimension, spot.x, spot.z);
+                refresh_preview_waypoints(preview, controller);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn cache_frontend_press(
@@ -5215,22 +6262,103 @@ fn cache_frontend_press(
         return;
     };
     *canceled = true;
+    if preview.form.is_some() {
+        if button == 0 {
+            preview_form_press(game, preview, screen);
+        }
+        return;
+    }
+    let [_, _, width, height] = screen.rect;
+    if button == 1 {
+        preview.dragging = false;
+        preview.menu = None;
+        if preview.dimensions.is_empty() || over_preview_controls(screen.mouse, width, height) {
+            return;
+        }
+        let rect = rectangle(width, height);
+        let view = large_camera_view(
+            0,
+            preview.dimension,
+            preview.layer(),
+            &preview.camera,
+            rect,
+            1.,
+        );
+        if let Some(waypoint) = waypoint_hit(
+            game,
+            &preview.waypoints,
+            &preview.waypoint_labels,
+            &view,
+            rect,
+            screen.mouse,
+        ) {
+            preview.menu = Some(waypoint_context(waypoint, screen.mouse));
+        } else if let Some(block) = hovered_block(&view, rect, screen.mouse) {
+            let prepared = preview.prepared.lock().unwrap_or_else(|e| e.into_inner());
+            let column = prepared
+                .as_ref()
+                .filter(|p| p.dimension == view.dimension && p.point == Some(block))
+                .and_then(|p| p.column.as_ref());
+            preview.menu = Some(Menu {
+                block,
+                height: column.and_then(|column| column.height),
+                height_approximate: column.is_some_and(|c| c.approximate),
+                fluid: None,
+                dimension: view.dimension,
+                at: screen.mouse,
+                portal: None,
+                waypoint: None,
+            });
+        }
+        return;
+    }
     if button != 0 {
         return;
     }
-    if inside(screen.mouse, preview_back()) {
+    if let Some(menu) = preview.menu.take() {
+        let items = preview_menu_items(menu);
+        let subtitle = preview
+            .waypoints
+            .iter()
+            .find(|w| Some(waypoint_spot(w)) == menu.waypoint)
+            .map(|w| w.name.as_str());
+        let (_, rows) = menu_layout(game, [width, height], menu, subtitle, &items);
+        if let Some(((_, action), _)) = items
+            .iter()
+            .zip(rows)
+            .find(|(_, row)| inside(screen.mouse, *row))
+        {
+            perform_preview_menu(game, preview, menu, *action);
+        }
+        return;
+    }
+    if inside(screen.mouse, preview_layer_button(width)) && preview.layers().len() > 1 {
+        preview.layer_index = (preview.layer_index + 1) % preview.layers().len();
+        preview.dragging = false;
+        return;
+    }
+    if inside(screen.mouse, preview_move_button(width)) && !preview.dimensions.is_empty() {
+        open_preview_coordinates(preview, None);
+        return;
+    }
+    if inside(screen.mouse, tab(screen.rect[2], 0)) {
         state.caches.preview = None;
         return;
     }
-    for (index, (dimension, center)) in preview.dimensions.iter().enumerate() {
-        if inside(screen.mouse, preview_dimension(screen.rect[2], index)) {
-            preview.dimension = *dimension;
-            preview.sent = None;
-            preview.camera.snap(*center);
+    preview.dragging = false;
+    for entry in &preview.dimensions {
+        if inside(screen.mouse, tab(screen.rect[2], entry.dimension as usize)) {
+            if preview.dimension != entry.dimension
+                && let Some(&(_, center)) = entry.layers.first()
+            {
+                preview.dimension = entry.dimension;
+                preview.layer_index = 0;
+                preview.camera.snap(center);
+            }
             return;
         }
     }
-    preview.dragging = inside(screen.mouse, preview_rect(screen.rect[2], screen.rect[3]));
+    preview.dragging = !over_preview_controls(screen.mouse, screen.rect[2], screen.rect[3]);
 }
 
 fn show_cache_manager(game: &Game<'_>, state: &mut State) {
@@ -5247,6 +6375,20 @@ fn show_cache_manager(game: &Game<'_>, state: &mut State) {
 }
 pub(super) fn open_cache_manager(game: &mut Game<'_>) {
     if game.title.is_some() {
+        if game.screen == super::Screen::Options {
+            game.settings.save(&Game::options_path());
+            game.set_screen(super::Screen::Playing);
+            if game.screen != super::Screen::Playing {
+                return;
+            }
+        }
+        if game.screen != super::Screen::Playing {
+            return;
+        }
+        if let Some(title) = game.title.as_mut() {
+            title.mode = horizon_client::title::Mode::Main;
+        }
+        game.pad_clear_focus();
         let mut state = state();
         state.caches.title_open = true;
         show_cache_manager(game, &mut state);
@@ -5381,6 +6523,7 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     button(
         game,
         batch,
+        ButtonIcon::Refresh,
         [batch.width - 92., 10., 80., 18.],
         tr(
             "Refresh",
@@ -5402,8 +6545,13 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         button(
             game,
             batch,
+            if forwards {
+                ButtonIcon::Next
+            } else {
+                ButtonIcon::Previous
+            },
             cache_page_button(batch.width, forwards),
-            if forwards { "›" } else { "‹" },
+            "",
             game.cursor(),
             if forwards {
                 start + cache_rows(batch.height) < snapshot.entries.len()
@@ -5563,6 +6711,7 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     button(
         game,
         batch,
+        ButtonIcon::Refresh,
         cache_footer(batch.width, batch.height, 0),
         if state.caches.confirm.is_some() {
             tr(
@@ -5603,13 +6752,29 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             } else {
                 tr("Delete", "Удалить", "Supprimer", "Eliminar", "Löschen")
             },
-            !busy && selected.is_some_and(|entry| !is_active_cache(state, entry)),
+            !busy
+                && selected.is_some_and(|entry| {
+                    entry.deletion.is_some() && !is_active_cache(state, entry)
+                }),
         ),
         (3, tr("Back", "Назад", "Retour", "Atrás", "Zurück"), true),
     ] {
         let rect = cache_footer(batch.width, batch.height, index);
         let label = cache_text(game, label, rect[2] - 4.);
-        button(game, batch, rect, &label, game.cursor(), enabled);
+        button(
+            game,
+            batch,
+            [
+                ButtonIcon::Refresh,
+                ButtonIcon::View,
+                ButtonIcon::Delete,
+                ButtonIcon::Back,
+            ][index],
+            rect,
+            &label,
+            game.cursor(),
+            enabled,
+        );
     }
     let diagnostic = snapshot.error.as_deref().map(runtime::localize_message);
     let message = state
@@ -5773,17 +6938,22 @@ fn cache_press(
                     Err(error) => state.caches.message = Some(runtime::localize_message(&error)),
                 }
             }
-        } else if state.caches.confirm_delete.as_deref() == Some(&entry.file) {
-            state.caches.confirm_delete = None;
-            match controller.maps.delete_cache(&entry.file, &state.world) {
-                Ok(rx) => {
-                    state.caches.operation = Some(rx);
-                    state.caches.deleting = true;
+        } else if let Some(selection) = entry.deletion.as_ref() {
+            if state.caches.confirm_delete.as_ref() == Some(selection) {
+                state.caches.confirm_delete = None;
+                match controller
+                    .maps
+                    .delete_cache(selection.clone(), &state.world)
+                {
+                    Ok(rx) => {
+                        state.caches.operation = Some(rx);
+                        state.caches.deleting = true;
+                    }
+                    Err(error) => state.caches.message = Some(runtime::localize_message(&error)),
                 }
-                Err(error) => state.caches.message = Some(runtime::localize_message(&error)),
+            } else {
+                state.caches.confirm_delete = Some(selection.clone());
             }
-        } else {
-            state.caches.confirm_delete = Some(entry.file.clone());
         }
         return;
     }
@@ -5876,6 +7046,7 @@ pub(super) fn screen(game: &Game<'_>, batch: &mut HudBatch, screen: &mod_api::Sc
                 button(
                     game,
                     batch,
+                    ButtonIcon::Cache,
                     title_cache_button(batch.width),
                     cache_title(),
                     game.cursor(),
@@ -6066,6 +7237,19 @@ fn map_press(
     }
 }
 
+fn waypoint_context(waypoint: &Waypoint, at: [f32; 2]) -> Menu {
+    Menu {
+        height_approximate: false,
+        block: [waypoint.x, waypoint.z],
+        height: Some(waypoint.y),
+        fluid: None,
+        dimension: waypoint.dimension,
+        at,
+        portal: None,
+        waypoint: Some(waypoint_spot(waypoint)),
+    }
+}
+
 fn menu_target_at(
     game: &Game<'_>,
     state: &State,
@@ -6078,6 +7262,9 @@ fn menu_target_at(
             && frame.view.large
             && frame.view.session == state.session
     })?;
+    if let Some(waypoint) = waypoint_at_pointer(game, state, &frame.view, rect, at) {
+        return Some(waypoint_context(waypoint, at));
+    }
     let block = hovered_block(&frame.view, rect, at)?;
     let portal = portal_near(state, state.selected, block);
     let column = if state.dimension == frame.view.dimension {
@@ -6115,19 +7302,7 @@ fn menu_target_at(
         dimension: state.selected,
         at,
         portal: portal.map(|(kind, _)| kind),
-        waypoint: state
-            .waypoints
-            .iter()
-            .find(|waypoint| {
-                waypoint.dimension == state.selected
-                    && waypoint.x == block[0]
-                    && waypoint.z == block[1]
-            })
-            .map(|waypoint| Spot {
-                dimension: waypoint.dimension,
-                x: waypoint.x,
-                z: waypoint.z,
-            }),
+        waypoint: None,
     })
 }
 
@@ -6269,18 +7444,7 @@ fn name_press(
             return;
         }
     }
-    let save = [
-        rect[0] + rect[2] - 184.0,
-        rect[1] + rect[3] - 24.0,
-        80.0,
-        18.0,
-    ];
-    let cancel = [
-        rect[0] + rect[2] - 96.0,
-        rect[1] + rect[3] - 24.0,
-        80.0,
-        18.0,
-    ];
+    let (save, cancel) = name_form_buttons(rect);
     if inside(screen.mouse, save) {
         save_name(game, state);
         *canceled = true;
@@ -6422,8 +7586,12 @@ pub(super) fn scroll(
     let mut state = state();
     if state.mode == Mode::Caches {
         if let Some(preview) = &mut state.caches.preview {
-            let rect = preview_rect(screen.rect[2], screen.rect[3]);
-            if inside(screen.mouse, rect) {
+            if preview.form.is_some() || preview.menu.is_some() {
+                *canceled = true;
+                return;
+            }
+            let rect = rectangle(screen.rect[2], screen.rect[3]);
+            if !over_preview_controls(screen.mouse, screen.rect[2], screen.rect[3]) {
                 preview.camera.zoom_at(
                     scroll[1],
                     [
@@ -6484,6 +7652,185 @@ pub(super) fn scroll(
     *canceled = true;
 }
 
+fn title_cache_screen(game: &Game<'_>) -> bool {
+    game.screen == super::Screen::Playing
+        && game
+            .title
+            .as_ref()
+            .is_some_and(|title| title.mode.id() == "title")
+        && !game.prompt_open()
+        && game.map_on(runtime::MOD_ID)
+}
+
+pub(super) fn title_cache_open(game: &Game<'_>) -> bool {
+    title_cache_screen(game) && state().caches.title_open
+}
+
+pub(super) fn cache_pad_event(game: &Game<'_>, event: &winit::event::WindowEvent) -> bool {
+    use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+    if !title_cache_screen(game) {
+        return false;
+    }
+    let open = state().caches.title_open;
+    let Some(screen) = game.screen_view_now() else {
+        return false;
+    };
+    match event {
+        WindowEvent::MouseInput {
+            state: pressed,
+            button,
+            ..
+        } => {
+            let button = match button {
+                MouseButton::Left => 0,
+                MouseButton::Right => 1,
+                _ => 2,
+            };
+            let mask = 1 << button;
+            if *pressed == ElementState::Released {
+                let mut state = state();
+                let captured = state.caches.pad_buttons & mask != 0;
+                state.caches.pad_buttons &= !mask;
+                return captured || open;
+            }
+            let launch = button == 0 && inside(screen.mouse, title_cache_button(screen.rect[2]));
+            if !open && !launch {
+                return false;
+            }
+            state().caches.pad_buttons |= mask;
+            let mut consumed = false;
+            press(game, &screen, button, &mut consumed);
+            true
+        }
+        WindowEvent::MouseWheel { delta, .. } if open => {
+            let amount = match delta {
+                MouseScrollDelta::LineDelta(x, y) => [f64::from(*x), f64::from(*y)],
+                MouseScrollDelta::PixelDelta(p) => [p.x / 16., p.y / 16.],
+            };
+            let mut consumed = false;
+            scroll(game, &screen, amount, &mut consumed);
+            true
+        }
+        _ => false,
+    }
+}
+
+pub(super) fn cache_pad_targets(game: &Game<'_>) -> Option<Vec<horizon_client::widgets::Target>> {
+    use horizon_client::widgets::{Kind, Target};
+    if !title_cache_screen(game) {
+        return None;
+    }
+    let state = state();
+    let (width, height) = game.gui_size();
+    if !state.caches.title_open {
+        let mut targets = super::key_focus::drawn_targets();
+        targets.push(Target {
+            rect: title_cache_button(width),
+            kind: Kind::Button,
+        });
+        return Some(targets);
+    }
+    let mut rects = Vec::new();
+    if let Some(preview) = &state.caches.preview {
+        if let Some(form) = &preview.form {
+            let panel = name_form_rect(width, height);
+            let (save, cancel) = match form {
+                PreviewForm::Waypoint(_) => {
+                    rects.extend(
+                        (0..runtime::WAYPOINT_COLORS.len()).map(|i| color_swatch_at(panel, i)),
+                    );
+                    name_form_buttons(panel)
+                }
+                PreviewForm::Coordinates { .. } => coordinate_buttons(panel),
+            };
+            rects.extend([save, cancel]);
+        } else if let Some(menu) = preview.menu {
+            let items = preview_menu_items(menu);
+            let subtitle = preview
+                .waypoints
+                .iter()
+                .find(|w| Some(waypoint_spot(w)) == menu.waypoint)
+                .map(|w| w.name.as_str());
+            rects = menu_layout(game, [width, height], menu, subtitle, &items).1;
+        } else {
+            rects.push(tab(width, 0));
+            rects.extend(
+                preview
+                    .dimensions
+                    .iter()
+                    .map(|entry| tab(width, entry.dimension as usize)),
+            );
+            if preview.layers().len() > 1 {
+                rects.push(preview_layer_button(width));
+            }
+            if !preview.dimensions.is_empty() {
+                rects.push(preview_move_button(width));
+            }
+        }
+    } else {
+        let catalog = runtime::initialize(game.native_data_dir(runtime::MOD_ID))
+            .caches
+            .snapshot();
+        let rows = cache_rows(height);
+        let start = state
+            .caches
+            .scroll
+            .offset(catalog.entries.len().saturating_sub(rows));
+        rects.extend(
+            (0..rows.min(catalog.entries.len().saturating_sub(start))).map(|i| cache_row(width, i)),
+        );
+        if start > 0 {
+            rects.push(cache_page_button(width, false));
+        }
+        if start + rows < catalog.entries.len() {
+            rects.push(cache_page_button(width, true));
+        }
+        if !catalog.loading && state.caches.operation.is_none() {
+            rects.push([width - 92., 10., 80., 18.]);
+            if let Some(entry) = catalog
+                .entries
+                .iter()
+                .find(|entry| Some(&entry.file) == state.caches.selected.as_ref())
+            {
+                let can_read = entry.world.is_some()
+                    && matches!(
+                        entry.compatibility,
+                        runtime::container::Compatibility::Current
+                            | runtime::container::Compatibility::RebuildImages
+                    );
+                if can_read {
+                    rects.extend([
+                        cache_footer(width, height, 0),
+                        cache_footer(width, height, 1),
+                    ]);
+                }
+                if entry.deletion.is_some() {
+                    rects.push(cache_footer(width, height, 2));
+                }
+            }
+        }
+        rects.push(cache_footer(width, height, 3));
+    }
+    Some(
+        rects
+            .into_iter()
+            .map(|rect| Target {
+                rect,
+                kind: Kind::Button,
+            })
+            .collect(),
+    )
+}
+
+pub(super) fn cache_pad_back(game: &Game<'_>) -> bool {
+    if !title_cache_screen(game) || !state().caches.title_open {
+        return false;
+    }
+    let mut canceled = false;
+    screen_key(game, "key.keyboard.escape", &mut canceled);
+    canceled
+}
+
 pub(super) fn screen_key(game: &Game<'_>, key: &str, canceled: &mut bool) {
     if (game.mod_screen() != Some(runtime::MOD_ID)
         && !(game.title.is_some() && state().caches.title_open))
@@ -6493,8 +7840,26 @@ pub(super) fn screen_key(game: &Game<'_>, key: &str, canceled: &mut bool) {
     }
     let mut state = state();
     if state.mode == Mode::Caches {
-        if state.caches.preview.is_some() {
-            if key == "key.keyboard.escape" {
+        if let Some(preview) = state.caches.preview.as_mut() {
+            if preview.form.is_some() {
+                match key {
+                    "key.keyboard.escape" => finish_preview_form(game, preview, false),
+                    "key.keyboard.enter" | "key.keyboard.keypad.enter" => {
+                        finish_preview_form(game, preview, true)
+                    }
+                    "key.keyboard.backspace" => match preview.form.as_mut() {
+                        Some(PreviewForm::Waypoint(form)) => {
+                            form.text.pop();
+                        }
+                        Some(PreviewForm::Coordinates { text, invalid }) => {
+                            text.pop();
+                            *invalid = false;
+                        }
+                        None => {}
+                    },
+                    _ => {}
+                }
+            } else if key == "key.keyboard.escape" && preview.menu.take().is_none() {
                 state.caches.preview = None;
             }
             *canceled = true;
@@ -6512,7 +7877,13 @@ pub(super) fn screen_key(game: &Game<'_>, key: &str, canceled: &mut bool) {
             "key.keyboard.page.down" => state.caches.scroll.page(true, rows, max),
             "key.keyboard.home" => state.caches.scroll.jump(0, max),
             "key.keyboard.end" => state.caches.scroll.jump(max, max),
-            "key.keyboard.escape" => close_cache_manager(&mut state),
+            "key.keyboard.escape" => {
+                if state.caches.confirm_delete.take().is_none()
+                    && state.caches.confirm.take().is_none()
+                {
+                    close_cache_manager(&mut state);
+                }
+            }
             _ => {}
         }
         *canceled = true;
@@ -6555,10 +7926,30 @@ pub(super) fn screen_key(game: &Game<'_>, key: &str, canceled: &mut bool) {
 }
 
 pub(super) fn screen_char(game: &Game<'_>, c: char, canceled: &mut bool) {
-    if game.mod_screen() != Some(runtime::MOD_ID) || !game.map_on(runtime::MOD_ID) {
+    if (game.mod_screen() != Some(runtime::MOD_ID)
+        && !(game.title.is_some() && state().caches.title_open))
+        || !game.map_on(runtime::MOD_ID)
+    {
         return;
     }
     let mut state = state();
+    if let Some(form) = state.caches.preview.as_mut().and_then(|p| p.form.as_mut()) {
+        match form {
+            PreviewForm::Waypoint(form) if !c.is_control() && form.text.chars().count() < 32 => {
+                form.text.push(c)
+            }
+            PreviewForm::Coordinates { text, invalid }
+                if text.len() < 32
+                    && (c.is_ascii_digit() || matches!(c, ' ' | ',' | '-' | '+')) =>
+            {
+                text.push(c);
+                *invalid = false;
+            }
+            _ => {}
+        }
+        *canceled = true;
+        return;
+    }
     if state.mode != Mode::Name {
         return;
     }

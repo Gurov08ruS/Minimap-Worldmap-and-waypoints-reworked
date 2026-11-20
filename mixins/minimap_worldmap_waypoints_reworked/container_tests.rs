@@ -6,6 +6,68 @@ macro_rules! define_tests {
     () => {
         mod tests {
             #[test]
+            fn namespace_gate_excludes_open_during_detachment() {
+                let dir = TestDir::new("delete-race");
+                let directory = dir.0.join("cache");
+                let world = "save:deletion-race";
+                drop(Store::open(&directory, world).unwrap());
+                let path = world_path(&directory, world);
+                let name = path.file_name().unwrap().to_str().unwrap();
+                let selection = DeleteSelection::read(&directory, name).unwrap();
+                let gate = NamespaceGate::acquire(&directory).unwrap();
+                // Pause deletion before detaching the directory entry. Both
+                // writer and preview must fail before acquiring a stale handle.
+                let other = directory.clone();
+                std::thread::spawn(move || {
+                    assert!(matches!(Store::open(&other, world), Err(LeaseError::Busy)));
+                    assert!(matches!(
+                        Store::open_preview(&world_path(&other, world), world),
+                        Err(LeaseError::Busy)
+                    ));
+                })
+                .join()
+                .unwrap();
+                delete_in_namespace(&directory, &selection).unwrap();
+                drop(gate);
+                let key = [1, 0, 0, 0, 0, 0];
+                let mut new = Store::open(&directory, world).unwrap();
+                new.put(key, vec![41]).unwrap();
+                new.commit().unwrap();
+                drop(new);
+                assert_eq!(
+                    Store::open_existing(&path, world)
+                        .unwrap()
+                        .read(key)
+                        .unwrap(),
+                    Some(vec![41])
+                );
+            }
+
+            #[test]
+            fn delete_confirmation_rejects_replaced_file_and_directory() {
+                let dir = TestDir::new("delete-identity");
+                let directory = dir.0.join("cache");
+                let world = "save:known";
+                drop(Store::open(&directory, world).unwrap());
+                let path = world_path(&directory, world);
+                let name = path.file_name().unwrap().to_str().unwrap();
+                let selection = DeleteSelection::read(&directory, name).unwrap();
+                std::fs::rename(&path, directory.join("old.mwwr")).unwrap();
+                std::fs::copy(directory.join("old.mwwr"), &path).unwrap();
+                assert!(delete_selected(&directory, &selection).is_err());
+                assert!(path.exists());
+                let selection = DeleteSelection::read(&directory, name).unwrap();
+                let retired = dir.0.join("retired");
+                std::fs::rename(&directory, &retired).unwrap();
+                std::fs::create_dir(&directory).unwrap();
+                // Moving the exact original file into the replacement must
+                // still fail because the confirmed directory changed.
+                std::fs::rename(retired.join(name), &path).unwrap();
+                assert!(delete_selected(&directory, &selection).is_err());
+                assert!(path.exists());
+            }
+
+            #[test]
             fn image_upgrade_offer_survives_commits_until_user_rebuilds() {
                 let dir = TestDir::new("upgrade-offer");
                 let world = "save:upgrade";

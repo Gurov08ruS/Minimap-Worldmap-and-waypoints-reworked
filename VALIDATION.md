@@ -1,5 +1,83 @@
 # Validation
 
+## 0.7.9 — progressive map loading and colour icons
+
+Linux, signed SDK `0a875da`, Rust 1.99.1 and launcher 0.2.88.
+Native build `native-0a875da-22680d1991ba` passed all 17 planned injections.
+Formatting, Clippy with warnings denied, template validation and the
+stage audit passed. Both standalone and SDK suites passed 131 runtime
+tests. Three performance cases remain ignored by default.
+
+The new regression verifies that a ready detail tile is emitted while a
+neighbour is still pending. The manually run 4096-tile synthetic benchmark
+with a warm OS file cache measured the first overview at 86 ms in 0.7.8
+and 44 ms in 0.7.9. Reopening the visual cache took 180 ms and 91 ms,
+respectively. These are worker timings from one run per version. They
+do not measure GUI responsiveness or FPS. The live game was not run.
+
+Archive: `target/minimap_worldmap_waypoints_reworked-0.7.9.hmod`,
+403,175 bytes, SHA-256 `f6d296779917597edb47c43acff69ac5f3a2f2520ed057865f527e10ac5d99e9`.
+
+## 0.7.8 — cache review fixes
+
+Linux, signed SDK `0a875da`, Rust 1.99.1 and launcher 0.2.88.
+Native build `native-0a875da-5f999b94e49c` and all 17 planned injections passed
+the compiled payload audit. Formatting, Clippy with warnings denied,
+package templates and stage audit passed. Standalone and SDK suites each
+passed 130 runtime tests, with three performance cases ignored.
+
+- A competing writer and preview are blocked before acquiring a cache file
+  while deletion owns the namespace. A later writer creates and commits to
+  the visible replacement. Old confirmation tokens reject both file and
+  directory replacements.
+- A live writer retries after a shared preview lease and persists samples
+  gathered during the wait. Disconnect after a write error releases the
+  writer's lease while keeping the original error.
+- A Nether preview fixture uses a persisted `Below` layer with a saved
+  portal and biome, with no surface data or LOD.
+- The isolated launcher refused to start Play without a Microsoft account
+  that owns Minecraft Java Edition. Live mouse and gamepad smoke for opening
+  from title Options, confirming deletion and returning with Back remains
+  pending. Windows/macOS execution was not verified.
+
+The namespace lock coordinates clients running 0.7.8 or later with this
+protocol. Older builds do not use that lock.
+
+Archive: `target/minimap_worldmap_waypoints_reworked-0.7.8.hmod`,
+401,690 bytes, SHA-256 `85fc0bffb34ce341d9fcf12a64d35edc84c31bfa4ec79e442b7f76a7935db86e`.
+
+## 0.7.7 — cache map actions and waypoint teleport
+
+Linux, signed SDK `0a875da`, Rust 1.99.1 and launcher 0.2.88.
+Native build `native-0a875da-823448f0d142` and all 13 planned injections passed
+the compiled payload audit. Formatting, Clippy with warnings denied, package
+template validation and stage audit passed. Standalone and SDK test suites
+each passed 127 runtime tests with three performance cases ignored.
+
+Tests cover coordinate input, biome and portal data available from a read-only
+preview, correct dimension filtering and preservation of cache bytes.
+Live GUI and execution of teleport commands in a world remain unverified.
+
+Archive: `target/minimap_worldmap_waypoints_reworked-0.7.7.hmod`,
+394,693 bytes, SHA-256 `90b0d5555424d5f23516b44d7d23531a9f094e92828929b3287428437fa723fa`.
+
+## 0.7.6 — shared world map renderer
+
+Linux, signed SDK `0a875da`, Rust 1.99.1 and launcher 0.2.88.
+Native build `native-0a875da-30c86744680c` passed the plan and payload audit for all
+13 injections. The original Horizon checkout stayed unchanged. Formatting,
+Clippy with warnings denied, workspace and SDK tests, template checks and
+stage audit passed. There were 126 passing runtime tests and three ignored
+performance cases in each runtime suite.
+
+The preview regression covers saved terrain rendered with paged textures,
+texture page reuse during a pan, byte-for-byte read-only viewing, and legacy
+last-position records. The new zoom limit and off-screen arrow projection
+are covered separately. Live GUI and frame-rate measurements were not run.
+
+Archive: `target/minimap_worldmap_waypoints_reworked-0.7.6.hmod`,
+389,028 bytes, SHA-256 `0ab23a9653028bfdd6c92276db5e0c7e84e99b1763c16c8a3be9cdc985111a8b`.
+
 ## 0.7.5 — offline cache manager
 
 Linux, signed SDK `0a875da`, Rust 1.99.1 and launcher 0.2.88.

@@ -1,6 +1,6 @@
 id = "minimap_worldmap_waypoints_reworked"
 name = "Minimap, Worldmap and waypoints reworked"
-version = "0.7.5"
+version = "0.7.9"
 description = "Minimap, persistent world map, LOD terrain, waypoints and cache manager."
 authors = ["daniliammo", "Gurov08ruS"]
 license = "GPL-3.0-only"
@@ -133,3 +133,35 @@ cancellable = true
 target = "horizon_client::game::potions::Game::draw_effect_icons"
 helper = "src/effect_icons.rs"
 bindings = [{name = "game", ty = "&crate::game::Game<'_>", value = "self"}, {name = "batch", ty = "&mut horizon_client::hud::HudBatch", value = "batch"}]
+
+[[native.mixin]]
+id = "cache-pad-pointer"
+kind = "HEAD"
+cancellable = true
+target = "horizon_client::game::pad_menu::Game::pad_synthetic_event"
+helper = "src/cache_pad_event.rs"
+bindings = [{name = "game", ty = "&crate::game::Game<'_>", value = "self"}, {name = "event", ty = "&WindowEvent", value = "&event"}]
+
+[[native.mixin]]
+id = "cache-pad-focus"
+kind = "HEAD"
+cancellable = true
+target = "horizon_client::game::pad_menu::Game::pad_all_targets"
+helper = "src/cache_pad_targets.rs"
+bindings = [{name = "game", ty = "&crate::game::Game<'_>", value = "self"}]
+
+[[native.mixin]]
+id = "cache-pad-back"
+kind = "HEAD"
+cancellable = true
+target = "horizon_client::game::pad::Game::pad_back"
+helper = "src/cache_pad_back.rs"
+bindings = [{name = "game", ty = "&crate::game::Game<'_>", value = "self"}]
+
+[[native.mixin]]
+id = "cache-pad-actions"
+kind = "HEAD"
+cancellable = true
+target = "horizon_client::game::pad_actions::Game::pad_actions"
+helper = "src/cache_pad_actions.rs"
+bindings = [{name = "game", ty = "&crate::game::Game<'_>", value = "self"}]

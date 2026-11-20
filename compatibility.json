@@ -9,7 +9,10 @@
     "crates/horizon-client/src/game/native_hooks/render_gui_post.rs": "7fc72e25d73e462a1781ab824754e2dc8fc585001407fc5a593e6f2a48e5d10b",
     "crates/horizon-client/src/game/network/remote/mod.rs": "e9e555a353dc787e271df37a951dd03dbd9098056aa1fddd6cde7e3cc0d5bad3",
     "crates/horizon-client/src/game/interface/extras.rs": "eb0ca00dd278856404e3aace4e381c74f2ab6d124c9df6822d699e278d5d5167",
-    "crates/horizon-client/src/game/items/potions.rs": "ff56adc254c891aa41918bbd30f26a956a02cb162c724fb4fa63766ab79e897a"
+    "crates/horizon-client/src/game/items/potions.rs": "ff56adc254c891aa41918bbd30f26a956a02cb162c724fb4fa63766ab79e897a",
+    "crates/horizon-client/src/game/interface/pad_menu.rs": "b886b3cbd970bd9e235253e307529e5596cfa768e246b902543800c1f0777c5b",
+    "crates/horizon-client/src/game/interface/pad/mod.rs": "3998cbf15ae6dfd692079cfd6ef15daf56eab3f62824bac5a453dce111480936",
+    "crates/horizon-client/src/game/interface/pad_actions.rs": "756985f03fcd09dc7f684325b55c682dee74f708facb60270fbb110cf25d4215"
   },
   "horizon_repository": "https://github.com/horizon-rust/horizon",
   "horizon_mixins_repository": "https://github.com/horizon-rust/horizon-mixins",
