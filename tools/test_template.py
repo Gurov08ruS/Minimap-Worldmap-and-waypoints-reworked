@@ -16,6 +16,12 @@ def main():
     before = Path(first['file']).read_bytes()
     assert package.package()['sha256'] == hashlib.sha256(before).hexdigest()
     manifest, sources = package.inputs()
+    # These integrations have moved to public hooks. Keep the released
+    # boundary from silently regaining their engine patches/helper payloads.
+    retired = {'map-key', 'map-disconnect', 'map-resources', 'waypoints-no-blur'}
+    assert retired.isdisjoint(row['id'] for row in manifest['native']['mixin'])
+    assert {'src/key.rs', 'src/disconnect.rs', 'src/atlas.rs',
+            'src/menu_background.rs'}.isdisjoint(sources)
     with zipfile.ZipFile(first['file']) as archive:
         assert archive.testzip() is None
         assert set(archive.namelist()) == set(sources)

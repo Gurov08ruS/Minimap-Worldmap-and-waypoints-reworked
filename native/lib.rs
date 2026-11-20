@@ -101,7 +101,73 @@ impl Hooks for Mod {
         }
     }
 
-    // The engine skips these entry points unless an SDK listener subscribes.
+    fn input_key(&self, host: &mut dyn ClientHost, event: &mut InputKeyEvent<'_>) {
+        if event.action != KeyAction::Press
+            || !host.on(runtime::MOD_ID)
+            || runtime::text_input_active()
+        {
+            return;
+        }
+        let map = host.mod_key(runtime::MOD_ID, runtime::WORLD_MAP_KEY);
+        let waypoints = host.mod_key(runtime::MOD_ID, runtime::WAYPOINTS_KEY);
+        fn binding(value: &Option<(String, ClientModifiers)>) -> Option<(&str, u32)> {
+            value
+                .as_ref()
+                .map(|(key, modifiers)| (key.as_str(), modifiers.bits))
+        }
+        let Some(request) = runtime::bound_screen_request(
+            event.key,
+            event.modifiers,
+            binding(&map),
+            binding(&waypoints),
+        ) else {
+            return;
+        };
+        if host.mod_screen() == Some(runtime::MOD_ID) {
+            host.mod_screen_close(runtime::MOD_ID);
+        } else if host.playing() && host.mod_screen_open(runtime::MOD_ID) {
+            runtime::request_screen(request);
+        }
+    }
+
+    fn render_frame_pre(&self, host: &mut dyn ClientHost, _event: &mut RenderFramePreEvent) {
+        if !host.on(runtime::MOD_ID) {
+            return;
+        }
+        let playing = host.playing();
+        if playing || host.mod_screen() == Some(runtime::MOD_ID) {
+            if let Some(code) = host.client_session().client_language() {
+                runtime::set_language(&code);
+            }
+            // Mouse mappings are counted by KeyMapping, not InputKeyEvent.
+            // Drain both queues even behind our screen, where the SDK releases
+            // mappings, so closing it cannot replay an earlier press.
+            let mut requested = None;
+            for (id, screen) in [
+                (runtime::WORLD_MAP_KEY, runtime::ScreenRequest::Map),
+                (runtime::WAYPOINTS_KEY, runtime::ScreenRequest::Waypoints),
+            ] {
+                let clicked = host.consume_click(runtime::MOD_ID, id);
+                if clicked
+                    && requested.is_none()
+                    && host
+                        .mod_key(runtime::MOD_ID, id)
+                        .is_some_and(|(key, _)| key.starts_with("key.mouse."))
+                {
+                    requested = Some(screen);
+                }
+            }
+            if playing
+                && !runtime::text_input_active()
+                && let Some(request) = requested
+                && host.mod_screen_open(runtime::MOD_ID)
+            {
+                runtime::request_screen(request);
+            }
+        }
+    }
+
+    // Drawing still needs the native adapters until the SDK exposes map textures.
     fn render_gui_post(&self, host: &dyn ClientHost, event: &mut RenderGuiPostEvent<'_>) {
         let _ = host;
         let _ = event;
@@ -160,12 +226,17 @@ impl Hooks for Mod {
         Flow::Continue
     }
     fn menu_background(&self, host: &dyn ClientHost, event: &mut MenuBackgroundEvent<'_>) {
-        let _ = host;
-        let _ = event;
+        if host.on(runtime::MOD_ID)
+            && host.mod_screen() == Some(runtime::MOD_ID)
+            && runtime::waypoint_background_transparent()
+        {
+            *event.radius = None;
+        }
     }
     fn client_disconnecting(&self, host: &dyn ClientHost, event: &mut ClientDisconnectingEvent) {
         let _ = host;
         let _ = event;
+        runtime::CLIENT_EVENTS.disconnected();
     }
     fn client_resources_reloaded(
         &self,
@@ -174,6 +245,7 @@ impl Hooks for Mod {
     ) {
         let _ = host;
         let _ = event;
+        runtime::CLIENT_EVENTS.resources_reloaded();
     }
     fn client_stopping(
         &self,

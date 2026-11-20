@@ -55,12 +55,12 @@ jobs:
       - name: Prepare the pinned launcher and installed Nightly
         run: |
           mkdir -p target/ci/launcher target/ci/nightly-index
-          gh release download 'launcher@0.2.78' --repo horizon-rust/horizon --pattern horizon-launcher-linux-x86_64.AppImage --dir target/ci/launcher --clobber
+          gh release download 'launcher@0.2.88' --repo horizon-rust/horizon --pattern horizon-launcher-linux-x86_64.AppImage --dir target/ci/launcher --clobber
           chmod +x target/ci/launcher/horizon-launcher-linux-x86_64.AppImage
           cd target/ci/launcher
           ./horizon-launcher-linux-x86_64.AppImage --appimage-extract > extract.log
           cd ../../..
-          nightly_tag=nightly-2026-11-18
+          nightly_tag=$(python3 -c 'import json; print(json.load(open("compatibility.json"))["nightly_version"].rsplit("-", 1)[0])')
           if gh release download nightly --repo horizon-rust/horizon --pattern sdk.json --dir target/ci/nightly-index --clobber; then
             if python3 -c 'import json; assert json.load(open("target/ci/nightly-index/sdk.json"))["build"]["commit"] == json.load(open("compatibility.json"))["horizon_revision"]'; then
               nightly_tag=nightly

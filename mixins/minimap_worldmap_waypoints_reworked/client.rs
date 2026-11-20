@@ -41,15 +41,43 @@ enum Mode {
 
 #[derive(Default)]
 struct CacheUi {
+    title_open: bool,
+    preview: Option<CachePreview>,
+    confirm_delete: Option<String>,
+    deleting: bool,
     attention: bool,
     catalog_revision: u64,
     selected: Option<String>,
-    scroll: usize,
+    scroll: runtime::ListScroll,
+    scrollbar_grab: Option<f32>,
     revision: u64,
     icons: BTreeMap<String, Arc<horizon_client::hud::pictures::Picture>>,
     operation: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
     message: Option<String>,
     confirm: Option<String>,
+}
+
+struct CachePreview {
+    name: String,
+    request: std::sync::mpsc::SyncSender<runtime::maps::View>,
+    response: std::sync::mpsc::Receiver<PreviewUpdate>,
+    dimensions: Vec<(Dimension, [f64; 2])>,
+    position: Option<runtime::maps::LastPosition>,
+    camera: maps::Camera,
+    dimension: Dimension,
+    sent: Option<runtime::maps::View>,
+    image: Option<(
+        runtime::maps::View,
+        Arc<horizon_client::hud::pictures::Picture>,
+    )>,
+    dragging: bool,
+    error: Option<String>,
+}
+
+enum PreviewUpdate {
+    Ready(Vec<(Dimension, [f64; 2])>, Option<maps::LastPosition>),
+    Frame(runtime::maps::Frame),
+    Error(String),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -373,7 +401,7 @@ struct State {
     waypoint_labels: Vec<String>,
     waypoint_letter_mode: runtime::minimap::WaypointLetters,
     portals: Vec<(Dimension, [i32; 3], Portal)>,
-    waypoint_scroll: usize,
+    waypoint_scroll: runtime::ListScroll,
     waypoint_selected: Option<usize>,
     notice: Option<(String, Instant)>,
     pending_copy: Option<String>,
@@ -387,7 +415,7 @@ struct State {
     lod_sources:
         BTreeMap<(Dimension, maps::LodKey), (Weak<Vec<horizon_client::lod::Column>>, Instant)>,
     info: Option<Menu>,
-    info_scroll: usize,
+    info_scroll: runtime::ListScroll,
 }
 fn known_lod_sources(state: &State, dimension: Dimension) -> BTreeMap<(i32, i32, u8), usize> {
     state
@@ -426,7 +454,7 @@ impl Default for State {
             waypoint_labels: Vec::new(),
             waypoint_letter_mode: runtime::minimap::WaypointLetters::default(),
             portals: Vec::new(),
-            waypoint_scroll: 0,
+            waypoint_scroll: runtime::ListScroll::default(),
             waypoint_selected: None,
             notice: None,
             pending_copy: None,
@@ -437,8 +465,21 @@ impl Default for State {
             lod_elapsed: 1.0,
             lod_sources: BTreeMap::new(),
             info: None,
-            info_scroll: 0,
+            info_scroll: runtime::ListScroll::default(),
         }
+    }
+}
+impl State {
+    fn set_mode(&mut self, mode: Mode) {
+        self.mode = mode;
+        runtime::set_waypoint_background_transparent(
+            mode == Mode::Waypoints
+                || (mode == Mode::Name
+                    && self
+                        .name_form
+                        .as_ref()
+                        .is_some_and(|form| form.background == Mode::Waypoints)),
+        );
     }
 }
 static STATE: OnceLock<Mutex<State>> = OnceLock::new();
@@ -1456,7 +1497,7 @@ fn perform_menu(game: &Game<'_>, state: &mut State, menu: Menu, action: MenuActi
     match action {
         MenuAction::Information => {
             state.info = Some(menu);
-            state.info_scroll = 0;
+            state.info_scroll = runtime::ListScroll::default();
         }
         MenuAction::Copy => {
             state.pending_copy = Some(format!("{} {} {}", menu.block[0], y, menu.block[1]));
@@ -1486,7 +1527,7 @@ fn perform_menu(game: &Game<'_>, state: &mut State, menu: Menu, action: MenuActi
                 rename: None,
                 background: Mode::Map,
             });
-            state.mode = Mode::Name;
+            state.set_mode(Mode::Name);
             runtime::set_text_input(true);
         }
         MenuAction::CopyDestination => {
@@ -1698,7 +1739,12 @@ fn waypoint_visible_rows(height: f32) -> usize {
 }
 
 fn waypoint_row_at(state: &State, width: f32, height: f32, index: usize) -> Option<[f32; 4]> {
-    let start = state.waypoint_scroll;
+    let start = state.waypoint_scroll.offset(
+        state
+            .waypoints
+            .len()
+            .saturating_sub(waypoint_visible_rows(height)),
+    );
     if index < start || index >= start + waypoint_visible_rows(height) {
         return None;
     }
@@ -1740,7 +1786,7 @@ fn show_selected_waypoint(state: &mut State) -> Option<Dimension> {
         z: waypoint.z,
     };
     state.map_focus = Some(spot);
-    state.mode = Mode::Map;
+    state.set_mode(Mode::Map);
     state.menu = None;
     state.dragging = false;
     state.elapsed = 1.0;
@@ -2669,10 +2715,13 @@ fn draw_world_waypoints(
                     let dz = f64::from(waypoint.z) + 0.5 - player.z;
                     let distance = (dx * dx + dy * dy + dz * dz).sqrt().round() as i64;
                     match style {
-                        runtime::minimap::WorldMarkerStyle::NameDistance => {
-                            Some(format!("{}  {} m", waypoint.name, distance))
-                        }
-                        _ => Some(format!("{distance} m")),
+                        runtime::minimap::WorldMarkerStyle::NameDistance => Some(format!(
+                            "{}  {} {}",
+                            waypoint.name,
+                            distance,
+                            tr("m", "м", "m", "m", "m")
+                        )),
+                        _ => Some(format!("{distance} {}", tr("m", "м", "m", "m", "m"))),
                     }
                 }
             }
@@ -2766,8 +2815,22 @@ pub(super) fn client_packet(
     }
 }
 
+fn apply_sdk_lifecycle(game: &Game<'_>) {
+    if !game.native_window() {
+        return;
+    }
+    let pending = runtime::CLIENT_EVENTS.take();
+    if pending.disconnected {
+        disconnect(game);
+    }
+    if pending.resources_reloaded {
+        atlas_invalidated();
+    }
+}
+
 pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
     let _timing = runtime::profiling::measure("client-frame");
+    apply_sdk_lifecycle(game);
     if !game.native_window() {
         return;
     }
@@ -2806,9 +2869,10 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
         game.mod_screen_close(runtime::MOD_ID);
     }
     if game.mod_screen() != Some(runtime::MOD_ID) {
+        state.caches.preview = None;
         runtime::set_text_input(false);
         if state.mode == Mode::Name {
-            state.mode = Mode::Map;
+            state.set_mode(Mode::Map);
             state.name_form = None;
         }
     }
@@ -2819,7 +2883,7 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
         };
         // The key helper opens the screen; this side only chooses its mode.
         if game.mod_screen() == Some(runtime::MOD_ID) {
-            state.mode = desired;
+            state.set_mode(desired);
             state.info = None;
             state.name_form = None;
             state.menu = None;
@@ -2836,6 +2900,7 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
             session: next,
             ..State::default()
         };
+        runtime::set_waypoint_background_transparent(false);
         controller.maps.reset(next);
     }
     update_cache_ui(game, &mut state);
@@ -2847,6 +2912,19 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
         dimension,
         controller.settings().cache_ram_mib,
     );
+    if !state.world.is_empty() {
+        controller.maps.remember_position(
+            state.session,
+            runtime::maps::LastPosition {
+                dimension,
+                block: [
+                    player.x.floor() as i32,
+                    player.y.floor() as i32,
+                    player.z.floor() as i32,
+                ],
+            },
+        );
+    }
     if state.dimension != dimension {
         state.lod_sources.clear();
         state.frame = None;
@@ -3554,7 +3632,47 @@ pub(super) fn frame(game: &mut Game<'_>, elapsed: Duration) {
     refresh_waypoint_labels(&mut state, controller.settings().waypoint_letters);
 }
 
+fn minimap_coordinate_lines(game: &Game<'_>, settings: runtime::minimap::Settings) -> Vec<String> {
+    game.native_player().map_or_else(Vec::new, |player| {
+        let dimension = match player.dimension {
+            "minecraft:overworld" => Dimension::Overworld,
+            "minecraft:the_nether" => Dimension::Nether,
+            _ => return Vec::new(),
+        };
+        runtime::coordinate_lines(settings, dimension, [player.x, player.y, player.z])
+    })
+}
+
+fn minimap_footer_height(lines: usize) -> f32 {
+    if lines == 0 {
+        0.
+    } else {
+        lines as f32 * 12. + 2.
+    }
+}
+
+/// Fixed map slot, including coordinates and the gap before effect rows.
+/// Use the same visibility and size checks as the actual HUD draw.
+pub(super) fn top_right_map_height(game: &Game<'_>, width: f32, height: f32) -> Option<f32> {
+    if !game.native_window()
+        || !game.map_on(runtime::MOD_ID)
+        || game.native_player().is_none()
+        || game.mod_screen().is_some()
+        || game.native_minimap_now().is_some()
+        || !game.native_corner_shown(Corner::TopRight)
+    {
+        return None;
+    }
+    let settings = runtime::initialize(game.native_data_dir(runtime::MOD_ID)).settings();
+    if !settings.enabled || settings.corner != runtime::minimap::Corner::TopRight {
+        return None;
+    }
+    let size = settings.fitted_size(width, height)?;
+    Some(size + minimap_footer_height(minimap_coordinate_lines(game, settings).len()) + 4.)
+}
+
 pub(super) fn hud(game: &Game<'_>, batch: &mut HudBatch, corners: &mut Corners) {
+    apply_sdk_lifecycle(game);
     if !game.native_window()
         || !game.map_on(runtime::MOD_ID)
         || game.native_player().is_none()
@@ -3573,24 +3691,19 @@ pub(super) fn hud(game: &Game<'_>, batch: &mut HudBatch, corners: &mut Corners) 
             };
             if game.native_corner_shown(corner) {
                 let state = state();
-                let lines = game.native_player().map_or_else(Vec::new, |player| {
-                    let dimension = match player.dimension {
-                        "minecraft:overworld" => Dimension::Overworld,
-                        "minecraft:the_nether" => Dimension::Nether,
-                        _ => return Vec::new(),
-                    };
-                    runtime::coordinate_lines(settings, dimension, [player.x, player.y, player.z])
-                });
-                let footer = if lines.is_empty() {
-                    0.0
-                } else {
-                    lines.len() as f32 * 12.0 + 2.0
-                };
+                let lines = minimap_coordinate_lines(game, settings);
+                let footer = minimap_footer_height(lines.len());
                 let width = lines
                     .iter()
                     .map(|line| game.map_text_width(line))
                     .fold(size, f32::max);
-                let (x, y) = corners.place(corner, width, size + footer);
+                // The top-right map owns a fixed slot above status effects.
+                // effect_rows_height reserves that slot for other HUD panels.
+                let (x, y) = if corner == Corner::TopRight {
+                    Corners::new(batch.width, batch.height, 0.).place(corner, width, size + footer)
+                } else {
+                    corners.place(corner, width, size + footer)
+                };
                 let map_x = if matches!(corner, Corner::TopRight | Corner::BottomRight) {
                     x + width - size
                 } else {
@@ -3617,6 +3730,7 @@ pub(super) fn gui_render_post(
     gui_hidden: bool,
     focused: bool,
 ) {
+    apply_sdk_lifecycle(game);
     if gui_hidden
         || !focused
         || !game.native_window()
@@ -4392,7 +4506,9 @@ fn draw_information(game: &Game<'_>, batch: &mut HudBatch, state: &State, menu: 
     );
     let lines = information_lines(game, state, menu, rect[2] - 24.0);
     let visible = ((rect[3] - 56.0) / 12.0).max(1.0) as usize;
-    let start = state.info_scroll.min(lines.len().saturating_sub(visible));
+    let start = state
+        .info_scroll
+        .offset(lines.len().saturating_sub(visible));
     for (i, (text, color)) in lines.iter().skip(start).take(visible).enumerate() {
         game.map_text(
             batch,
@@ -4655,10 +4771,30 @@ fn cache_rows(height: f32) -> usize {
     (((height - 122.).max(0.) / 48.) as usize).clamp(1, 16)
 }
 fn cache_row(width: f32, index: usize) -> [f32; 4] {
-    [12., 42. + index as f32 * 48., (width - 24.).max(1.), 46.]
+    [12., 42. + index as f32 * 48., (width - 38.).max(1.), 46.]
 }
+fn cache_page_button(width: f32, forwards: bool) -> [f32; 4] {
+    [width - if forwards { 122. } else { 150. }, 10., 24., 18.]
+}
+fn cache_scrollbar(width: f32, height: f32) -> [f32; 4] {
+    [width - 20., 42., 8., cache_rows(height) as f32 * 48. - 2.]
+}
+fn cache_scroll_to(state: &mut State, width: f32, height: f32, mouse_y: f32, count: usize) {
+    let max = count.saturating_sub(cache_rows(height));
+    let track = cache_scrollbar(width, height);
+    let bar = runtime::ListScrollbar::new(
+        track[1],
+        track[3],
+        cache_rows(height),
+        count,
+        state.caches.scroll.offset(max),
+    );
+    let grab = state.caches.scrollbar_grab.unwrap_or(bar.thumb_height / 2.);
+    state.caches.scroll.jump(bar.row_at(mouse_y, grab), max);
+}
+
 fn cache_footer(width: f32, height: f32, index: usize) -> [f32; 4] {
-    let w = ((width - 32.) / 3.).max(1.);
+    let w = ((width - 36.) / 4.).max(1.);
     [12. + index as f32 * (w + 4.), height - 55., w, 18.]
 }
 fn cache_status(status: &runtime::container::Compatibility) -> &'static str {
@@ -4698,6 +4834,27 @@ fn cache_status(status: &runtime::container::Compatibility) -> &'static str {
             "En-tête illisible ; fichier conservé",
             "Cabecera ilegible; archivo conservado",
             "Header unlesbar; Datei erhalten",
+        ),
+    }
+}
+fn cache_kind(world: Option<&str>) -> &'static str {
+    match world {
+        Some(world) if world.starts_with("save:") => tr(
+            "Local world",
+            "Локальный мир",
+            "Monde local",
+            "Mundo local",
+            "Lokale Welt",
+        ),
+        Some(world) if world.starts_with("server:") => {
+            tr("Server", "Сервер", "Serveur", "Servidor", "Server")
+        }
+        _ => tr(
+            "Unknown world",
+            "Неизвестный мир",
+            "Monde inconnu",
+            "Mundo desconocido",
+            "Unbekannte Welt",
         ),
     }
 }
@@ -4778,16 +4935,324 @@ fn refresh_cache_catalog(game: &Game<'_>) {
         Ok(())
     });
 }
+fn cache_title() -> &'static str {
+    tr(
+        "Map caches",
+        "Кеши карт",
+        "Caches des cartes",
+        "Cachés de mapas",
+        "Karten-Caches",
+    )
+}
+
+fn title_cache_button(width: f32) -> [f32; 4] {
+    [12., 12., (width - 24.).clamp(1., 124.), 18.]
+}
+
+fn close_cache_manager(state: &mut State) {
+    state.caches.title_open = false;
+    state.caches.preview = None;
+    state.caches.confirm = None;
+    state.caches.confirm_delete = None;
+    state.set_mode(Mode::Map);
+}
+
+fn is_active_cache(state: &State, entry: &runtime::cache_manager::Entry) -> bool {
+    !state.world.is_empty()
+        && (entry.world.as_ref() == Some(&state.world)
+            || runtime::container::world_path(std::path::Path::new(""), &state.world)
+                .file_name()
+                .is_some_and(|name| name == entry.file.as_str()))
+}
+
+fn preview_rect(width: f32, height: f32) -> [f32; 4] {
+    [12., 40., (width - 24.).max(1.), (height - 70.).max(1.)]
+}
+
+fn preview_back() -> [f32; 4] {
+    [12., 12., 74., 18.]
+}
+
+fn preview_dimension(width: f32, index: usize) -> [f32; 4] {
+    let w = ((width - 110.) / 3.).clamp(1., 112.);
+    [94. + index as f32 * (w + 4.), 12., w, 18.]
+}
+
+fn open_preview(
+    game: &Game<'_>,
+    entry: &runtime::cache_manager::Entry,
+) -> Result<CachePreview, String> {
+    let directory = game.native_data_dir(runtime::MOD_ID).join("cache");
+    let world = entry.world.clone().ok_or("Unknown cache identity")?;
+    let file = entry.file.clone();
+    let (request, views) = std::sync::mpsc::sync_channel(1);
+    let (updates, response) = std::sync::mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("map-preview".into())
+        .spawn(move || {
+            let preview = match maps::Preview::open(&directory, &file, &world) {
+                Ok(preview) => preview,
+                Err(error) => {
+                    let _ = updates.send(PreviewUpdate::Error(error.to_string()));
+                    return;
+                }
+            };
+            if updates
+                .send(PreviewUpdate::Ready(
+                    preview.dimensions.clone(),
+                    preview.position,
+                ))
+                .is_err()
+            {
+                return;
+            }
+            while let Ok(view) = views.recv() {
+                if updates
+                    .send(PreviewUpdate::Frame(preview.render(view)))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .map_err(|error| error.to_string())?;
+    Ok(CachePreview {
+        name: entry.name.clone(),
+        request,
+        response,
+        dimensions: Vec::new(),
+        position: None,
+        camera: maps::Camera::new([0.; 2], 2.),
+        dimension: Dimension::Overworld,
+        sent: None,
+        image: None,
+        dragging: false,
+        error: None,
+    })
+}
+
+fn draw_cache_frontend(game: &Game<'_>, batch: &mut HudBatch, state: &mut State) {
+    if let Some(preview) = &mut state.caches.preview {
+        draw_preview(game, batch, preview);
+    } else {
+        draw_cache_screen(game, batch, state);
+    }
+}
+
+fn draw_preview(game: &Game<'_>, batch: &mut HudBatch, preview: &mut CachePreview) {
+    use std::sync::mpsc::TryRecvError;
+    match preview.response.try_recv() {
+        Ok(PreviewUpdate::Ready(dimensions, position)) => {
+            if let Some(&(dimension, center)) = dimensions.first() {
+                preview.dimension = dimension;
+                preview.camera.snap(center);
+            }
+            preview.position = position;
+            preview.dimensions = dimensions;
+            if preview.dimensions.is_empty() {
+                preview.error = Some(
+                    tr(
+                        "No saved surface terrain",
+                        "Нет сохранённой поверхности",
+                        "Aucun terrain de surface enregistré",
+                        "No hay superficie guardada",
+                        "Kein Oberflächengelände gespeichert",
+                    )
+                    .into(),
+                );
+            }
+        }
+        Ok(PreviewUpdate::Frame(frame)) if frame.view.dimension == preview.dimension => {
+            let image = super::minimap_pages::create(
+                frame.view.width as u32,
+                frame.view.height as u32,
+                frame.pixels,
+            );
+            preview.image = Some((frame.view, image));
+        }
+        Ok(PreviewUpdate::Error(error)) => preview.error = Some(runtime::localize_message(&error)),
+        Err(TryRecvError::Disconnected) if preview.error.is_none() => {
+            preview.error = Some(
+                tr(
+                    "Cache worker stopped",
+                    "Поток кеша остановлен",
+                    "Gestion du cache arrêtée",
+                    "Gestor detenido",
+                    "Cache-Verarbeitung beendet",
+                )
+                .into(),
+            );
+        }
+        _ => {}
+    }
+    game.native_fill(batch, [0., 0., batch.width, batch.height], 0xff181b20);
+    button(
+        game,
+        batch,
+        preview_back(),
+        tr("Back", "Назад", "Retour", "Atrás", "Zurück"),
+        game.cursor(),
+        true,
+    );
+    for (index, (dimension, _)) in preview.dimensions.iter().enumerate() {
+        let rect = preview_dimension(batch.width, index);
+        let label = cache_text(game, dimension.label(), rect[2] - 4.);
+        button(
+            game,
+            batch,
+            rect,
+            &label,
+            game.cursor(),
+            *dimension != preview.dimension,
+        );
+    }
+    let rect = preview_rect(batch.width, batch.height);
+    preview.camera.advance(0.25);
+    let view = maps::View {
+        session: 0,
+        dimension: preview.dimension,
+        layer: Layer::Surface,
+        center: preview
+            .camera
+            .center
+            .map(|v| v.clamp(-30_000_000., 30_000_000.)),
+        span: [
+            f64::from(rect[2]) * preview.camera.zoom,
+            f64::from(rect[3]) * preview.camera.zoom,
+        ],
+        width: rect[2] as usize,
+        height: rect[3] as usize,
+        angle: 0.,
+        round: false,
+        large: true,
+    };
+    if preview.error.is_none()
+        && !preview.dimensions.is_empty()
+        && preview.sent.as_ref() != Some(&view)
+        && preview.request.try_send(view.clone()).is_ok()
+    {
+        preview.sent = Some(view.clone());
+    }
+    if let Some((source, image)) = &preview.image
+        && source.dimension == view.dimension
+        && let Some((src, dst)) = maps::raster_quad(source, &view, rect)
+    {
+        let [x, y, w, h] = dst.map(f64::from);
+        let [u, v, sw, sh] = src.map(f64::from);
+        super::minimap_pages::paint(
+            batch,
+            image,
+            &[
+                [x, y, u, v],
+                [x + w, y, u + sw, v],
+                [x + w, y + h, u + sw, v + sh],
+                [x, y + h, u, v + sh],
+            ],
+        );
+    }
+    if let Some(at) = preview.position.filter(|at| at.dimension == view.dimension) {
+        let [x, z] = view.screen_at([f64::from(at.block[0]) + 0.5, f64::from(at.block[2]) + 0.5]);
+        let mark = [
+            rect[0] + (x / view.width as f64) as f32 * rect[2],
+            rect[1] + (z / view.height as f64) as f32 * rect[3],
+        ];
+        if inside(
+            mark,
+            [rect[0] + 5., rect[1] + 5., rect[2] - 10., rect[3] - 10.],
+        ) {
+            game.native_fill(batch, [mark[0] - 5., mark[1] - 5., 10., 10.], 0xff343434);
+            game.native_fill(batch, [mark[0] - 3., mark[1] - 3., 6., 6.], 0xffaaaaaa);
+        }
+    }
+    let footer = if let Some(error) = &preview.error {
+        error.clone()
+    } else if preview.dimensions.is_empty() {
+        tr(
+            "Loading map…",
+            "Загрузка карты…",
+            "Chargement de la carte…",
+            "Cargando mapa…",
+            "Karte wird geladen…",
+        )
+        .into()
+    } else if let Some(at) = preview.position {
+        format!(
+            "{} · {}: {} {} {} ({})",
+            preview.name,
+            tr(
+                "Last position",
+                "Последняя позиция",
+                "Dernière position",
+                "Última posición",
+                "Letzte Position"
+            ),
+            at.block[0],
+            at.block[1],
+            at.block[2],
+            at.dimension.label()
+        )
+    } else {
+        preview.name.clone()
+    };
+    game.map_text(
+        batch,
+        &cache_text(game, &footer, batch.width - 24.),
+        [12., batch.height - 17.],
+        0xbac4d0,
+        false,
+    );
+}
+
+fn cache_frontend_press(
+    game: &Game<'_>,
+    state: &mut State,
+    screen: &mod_api::ScreenView<'_>,
+    button: i32,
+    canceled: &mut bool,
+) {
+    let Some(preview) = &mut state.caches.preview else {
+        cache_press(game, state, screen, button, canceled);
+        return;
+    };
+    *canceled = true;
+    if button != 0 {
+        return;
+    }
+    if inside(screen.mouse, preview_back()) {
+        state.caches.preview = None;
+        return;
+    }
+    for (index, (dimension, center)) in preview.dimensions.iter().enumerate() {
+        if inside(screen.mouse, preview_dimension(screen.rect[2], index)) {
+            preview.dimension = *dimension;
+            preview.sent = None;
+            preview.camera.snap(*center);
+            return;
+        }
+    }
+    preview.dragging = inside(screen.mouse, preview_rect(screen.rect[2], screen.rect[3]));
+}
+
 fn show_cache_manager(game: &Game<'_>, state: &mut State) {
-    state.mode = Mode::Caches;
+    state.set_mode(Mode::Caches);
     state.menu = None;
     state.info = None;
     state.name_form = None;
+    state.caches.scrollbar_grab = None;
+    state.caches.preview = None;
+    state.caches.confirm = None;
+    state.caches.confirm_delete = None;
     runtime::set_text_input(false);
     refresh_cache_catalog(game);
 }
 pub(super) fn open_cache_manager(game: &mut Game<'_>) {
-    if game.native_player().is_none() || game.title.is_some() {
+    if game.title.is_some() {
+        let mut state = state();
+        state.caches.title_open = true;
+        show_cache_manager(game, &mut state);
+        return;
+    }
+    if game.native_player().is_none() {
         return;
     }
     if game.screen == super::Screen::Options {
@@ -4819,6 +5284,14 @@ fn update_cache_ui(game: &Game<'_>, state: &mut State) {
             Ok(result) => {
                 state.caches.operation = None;
                 state.caches.message = Some(match result {
+                    Ok(()) if state.caches.deleting => tr(
+                        "Cache deleted",
+                        "Кеш удалён",
+                        "Cache supprimé",
+                        "Caché eliminada",
+                        "Cache gelöscht",
+                    )
+                    .into(),
                     Ok(()) => tr(
                         "Rebuild scheduled; images update when this cache is viewed",
                         "Перестроение назначено; изображения обновятся при просмотре кеша",
@@ -4827,8 +5300,9 @@ fn update_cache_ui(game: &Game<'_>, state: &mut State) {
                         "Neuaufbau beim Anzeigen geplant",
                     )
                     .into(),
-                    Err(error) => error,
+                    Err(error) => runtime::localize_message(&error),
                 });
+                state.caches.deleting = false;
                 refresh_cache_catalog(game);
             }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -4848,6 +5322,7 @@ fn update_cache_ui(game: &Game<'_>, state: &mut State) {
         }
     }
     if state.caches.revision != snapshot.revision {
+        state.caches.confirm_delete = None;
         state.caches.revision = snapshot.revision;
         state.caches.confirm = None;
         state.caches.icons.clear();
@@ -4860,11 +5335,11 @@ fn update_cache_ui(game: &Game<'_>, state: &mut State) {
             state.caches.selected = None;
         }
     }
-    let height = game.map_client_state().map_or(480., |s| s.gui_size[1]);
+    let height = game.gui_size().1;
     let start = state
         .caches
         .scroll
-        .min(snapshot.entries.len().saturating_sub(cache_rows(height)));
+        .offset(snapshot.entries.len().saturating_sub(cache_rows(height)));
     let visible: BTreeSet<_> = snapshot
         .entries
         .iter()
@@ -4891,8 +5366,8 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         .caches
         .snapshot();
     game.native_fill(batch, [0., 0., batch.width, batch.height], 0xf0181b20);
-    game.map_text(
-        batch,
+    let title = cache_text(
+        game,
         tr(
             "Map caches",
             "Кеши карт",
@@ -4900,10 +5375,9 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             "Cachés de mapas",
             "Karten-Caches",
         ),
-        [12., 14.],
-        0xffffff,
-        true,
+        (batch.width - 166.).max(1.),
     );
+    game.map_text(batch, &title, [12., 14.], 0xffffff, true);
     button(
         game,
         batch,
@@ -4918,11 +5392,45 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         game.cursor(),
         !snapshot.loading && state.caches.operation.is_none(),
     );
-    let start = state.caches.scroll.min(
+    let start = state.caches.scroll.offset(
         snapshot
             .entries
             .len()
             .saturating_sub(cache_rows(batch.height)),
+    );
+    for forwards in [false, true] {
+        button(
+            game,
+            batch,
+            cache_page_button(batch.width, forwards),
+            if forwards { "›" } else { "‹" },
+            game.cursor(),
+            if forwards {
+                start + cache_rows(batch.height) < snapshot.entries.len()
+            } else {
+                start > 0
+            },
+        );
+    }
+    let track = cache_scrollbar(batch.width, batch.height);
+    let bar = runtime::ListScrollbar::new(
+        track[1],
+        track[3],
+        cache_rows(batch.height),
+        snapshot.entries.len(),
+        start,
+    );
+    game.native_fill(batch, track, 0xff232c35);
+    game.native_fill(
+        batch,
+        [track[0], bar.thumb_top, track[2], bar.thumb_height],
+        if bar.max_row == 0 {
+            0xff46515c
+        } else if state.caches.scrollbar_grab.is_some() || inside(game.cursor(), track) {
+            0xffc0d6eb
+        } else {
+            0xff8b9bab
+        },
     );
     for (i, entry) in snapshot
         .entries
@@ -4963,9 +5471,9 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
                     .as_ref()
                     .is_some_and(|w| w.starts_with("server:"))
                 {
-                    "S"
+                    tr("S", "С", "S", "S", "S")
                 } else {
-                    "W"
+                    tr("W", "М", "M", "M", "W")
                 },
                 [row[0] + 18., row[1] + 18.],
                 0xffffff,
@@ -4976,7 +5484,16 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         game.map_text(batch, &title, [row[0] + 44., row[1] + 4.], 0xffffff, false);
         let detail = cache_text(
             game,
-            &format!("{:.2} MiB · {}", entry.bytes as f64 / 1048576., entry.file),
+            &localized_format!(
+                "{:.2} MiB · {} · {}",
+                "{:.2} МиБ · {} · {}",
+                "{:.2} Mio · {} · {}",
+                "{:.2} MiB · {} · {}",
+                "{:.2} MiB · {} · {}",
+                entry.bytes as f64 / 1048576.,
+                cache_kind(entry.world.as_deref()),
+                entry.file
+            ),
             row[2] - 52.,
         );
         game.map_text(
@@ -5024,8 +5541,12 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             game,
             &format!(
                 "{} · {}",
-                entry.name,
-                entry.world.as_deref().unwrap_or(&entry.file)
+                cache_kind(entry.world.as_deref()),
+                entry
+                    .world
+                    .as_deref()
+                    .and_then(|w| w.split_once(':').map(|(_, id)| id))
+                    .unwrap_or(&entry.file)
             ),
             batch.width - 24.,
         );
@@ -5063,33 +5584,39 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         game.cursor(),
         can_rebuild && !busy,
     );
-    button(
-        game,
-        batch,
-        cache_footer(batch.width, batch.height, 1),
-        tr(
-            "Compress: later",
-            "Сжать: позже",
-            "Compresser : plus tard",
-            "Comprimir: después",
-            "Komprimieren: später",
+    for (index, label, enabled) in [
+        (
+            1,
+            tr("View", "Просмотр", "Voir", "Ver", "Ansehen"),
+            can_rebuild && !busy && selected.is_some_and(|entry| !is_active_cache(state, entry)),
         ),
-        game.cursor(),
-        false,
-    );
-    button(
-        game,
-        batch,
-        cache_footer(batch.width, batch.height, 2),
-        tr("Back to map", "К карте", "Carte", "Mapa", "Zur Karte"),
-        game.cursor(),
-        true,
-    );
+        (
+            2,
+            if state.caches.confirm_delete.is_some() {
+                tr(
+                    "Confirm",
+                    "Подтвердить",
+                    "Confirmer",
+                    "Confirmar",
+                    "Bestätigen",
+                )
+            } else {
+                tr("Delete", "Удалить", "Supprimer", "Eliminar", "Löschen")
+            },
+            !busy && selected.is_some_and(|entry| !is_active_cache(state, entry)),
+        ),
+        (3, tr("Back", "Назад", "Retour", "Atrás", "Zurück"), true),
+    ] {
+        let rect = cache_footer(batch.width, batch.height, index);
+        let label = cache_text(game, label, rect[2] - 4.);
+        button(game, batch, rect, &label, game.cursor(), enabled);
+    }
+    let diagnostic = snapshot.error.as_deref().map(runtime::localize_message);
     let message = state
         .caches
         .message
         .as_deref()
-        .or(snapshot.error.as_deref())
+        .or(diagnostic.as_deref())
         .unwrap_or(if busy {
             tr(
                 "Working…",
@@ -5097,6 +5624,14 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
                 "En cours…",
                 "Procesando…",
                 "Verarbeitung…",
+            )
+        } else if state.caches.confirm_delete.is_some() {
+            tr(
+                "Delete the selected terrain cache permanently?",
+                "Удалить выбранный кеш карты безвозвратно?",
+                "Supprimer définitivement le cache sélectionné ?",
+                "¿Eliminar definitivamente la caché seleccionada?",
+                "Ausgewählten Karten-Cache endgültig löschen?",
             )
         } else if state.caches.confirm.is_some() {
             tr(
@@ -5108,18 +5643,31 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             )
         } else {
             tr(
-                "Select a cache. Compression and file conversion are not available yet",
-                "Выберите кеш. Сжатие и конвертация файлов пока недоступны",
-                "Sélectionnez un cache. Compression et conversion à venir",
-                "Selecciona una caché. Compresión y conversión pendientes",
-                "Cache auswählen. Komprimierung und Konvertierung folgen",
+                "Wheel / ‹ › to browse. Select a cache to rebuild its images",
+                "Колесо / ‹ › — листать. Выберите кеш для перестроения изображений",
+                "Molette / ‹ › : parcourir. Sélectionnez un cache à reconstruire",
+                "Rueda / ‹ › para navegar. Selecciona una caché para reconstruir imágenes",
+                "Mausrad / ‹ › zum Blättern. Cache zum Neuaufbau der Bilder auswählen",
             )
         });
     let message = cache_text(game, message, batch.width - 24.);
     game.map_text(batch, &message, [12., batch.height - 29.], 0xffd24a, false);
-    if snapshot.truncated {
-        game.map_text(batch, "4096+", [12., batch.height - 15.], 0xffd24a, false);
-    }
+    let count = localized_format!(
+        "Caches: {}–{} / {}{}",
+        "Кеши: {}–{} / {}{}",
+        "Caches : {}–{} / {}{}",
+        "Cachés: {}–{} / {}{}",
+        "Caches: {}–{} / {}{}",
+        if snapshot.entries.is_empty() {
+            0
+        } else {
+            start + 1
+        },
+        (start + cache_rows(batch.height)).min(snapshot.entries.len()),
+        snapshot.entries.len(),
+        if snapshot.truncated { "+" } else { "" }
+    );
+    game.map_text(batch, &count, [12., batch.height - 15.], 0xbac4d0, false);
 }
 fn cache_press(
     game: &Game<'_>,
@@ -5134,12 +5682,57 @@ fn cache_press(
     }
     let controller = runtime::initialize(game.native_data_dir(runtime::MOD_ID));
     let snapshot = controller.caches.snapshot();
+    state.caches.scrollbar_grab = None;
+    let max = snapshot
+        .entries
+        .len()
+        .saturating_sub(cache_rows(screen.rect[3]));
+    for forwards in [false, true] {
+        if inside(screen.mouse, cache_page_button(screen.rect[2], forwards)) {
+            state
+                .caches
+                .scroll
+                .page(forwards, cache_rows(screen.rect[3]), max);
+            return;
+        }
+    }
+    if max > 0
+        && inside(
+            screen.mouse,
+            cache_scrollbar(screen.rect[2], screen.rect[3]),
+        )
+    {
+        let track = cache_scrollbar(screen.rect[2], screen.rect[3]);
+        let bar = runtime::ListScrollbar::new(
+            track[1],
+            track[3],
+            cache_rows(screen.rect[3]),
+            snapshot.entries.len(),
+            state.caches.scroll.offset(max),
+        );
+        state.caches.scrollbar_grab = Some(
+            if screen.mouse[1] >= bar.thumb_top
+                && screen.mouse[1] <= bar.thumb_top + bar.thumb_height
+            {
+                screen.mouse[1] - bar.thumb_top
+            } else {
+                bar.thumb_height / 2.
+            },
+        );
+        cache_scroll_to(
+            state,
+            screen.rect[2],
+            screen.rect[3],
+            screen.mouse[1],
+            snapshot.entries.len(),
+        );
+        return;
+    }
     if inside(
         screen.mouse,
-        cache_footer(screen.rect[2], screen.rect[3], 2),
+        cache_footer(screen.rect[2], screen.rect[3], 3),
     ) {
-        state.mode = Mode::Map;
-        state.caches.confirm = None;
+        close_cache_manager(state);
         return;
     }
     if snapshot.loading || state.caches.operation.is_some() {
@@ -5147,13 +5740,58 @@ fn cache_press(
     }
     if inside(screen.mouse, [screen.rect[2] - 92., 10., 80., 18.]) {
         state.caches.confirm = None;
+        state.caches.confirm_delete = None;
         refresh_cache_catalog(game);
+        return;
+    }
+    for index in [1, 2] {
+        if !inside(
+            screen.mouse,
+            cache_footer(screen.rect[2], screen.rect[3], index),
+        ) {
+            continue;
+        }
+        state.caches.confirm = None;
+        state.caches.message = None;
+        let Some(entry) = snapshot
+            .entries
+            .iter()
+            .find(|entry| Some(&entry.file) == state.caches.selected.as_ref())
+            .filter(|entry| !is_active_cache(state, entry))
+        else {
+            return;
+        };
+        if index == 1 {
+            state.caches.confirm_delete = None;
+            if matches!(
+                entry.compatibility,
+                runtime::container::Compatibility::Current
+                    | runtime::container::Compatibility::RebuildImages
+            ) {
+                match open_preview(game, entry) {
+                    Ok(preview) => state.caches.preview = Some(preview),
+                    Err(error) => state.caches.message = Some(runtime::localize_message(&error)),
+                }
+            }
+        } else if state.caches.confirm_delete.as_deref() == Some(&entry.file) {
+            state.caches.confirm_delete = None;
+            match controller.maps.delete_cache(&entry.file, &state.world) {
+                Ok(rx) => {
+                    state.caches.operation = Some(rx);
+                    state.caches.deleting = true;
+                }
+                Err(error) => state.caches.message = Some(runtime::localize_message(&error)),
+            }
+        } else {
+            state.caches.confirm_delete = Some(entry.file.clone());
+        }
         return;
     }
     if inside(
         screen.mouse,
         cache_footer(screen.rect[2], screen.rect[3], 0),
     ) {
+        state.caches.confirm_delete = None;
         if let Some(entry) = snapshot
             .entries
             .iter()
@@ -5172,7 +5810,7 @@ fn cache_press(
                         state.caches.operation = Some(rx);
                         state.caches.message = None;
                     }
-                    Err(error) => state.caches.message = Some(error),
+                    Err(error) => state.caches.message = Some(runtime::localize_message(&error)),
                 }
             } else {
                 state.caches.confirm = Some(entry.file.clone());
@@ -5181,7 +5819,7 @@ fn cache_press(
         }
         return;
     }
-    let start = state.caches.scroll.min(
+    let start = state.caches.scroll.offset(
         snapshot
             .entries
             .len()
@@ -5196,6 +5834,7 @@ fn cache_press(
     {
         if inside(screen.mouse, cache_row(screen.rect[2], i)) {
             state.caches.selected = Some(entry.file.clone());
+            state.caches.confirm_delete = None;
             state.caches.confirm = None;
             state.caches.message = None;
             break;
@@ -5214,19 +5853,6 @@ fn map_covers_world(state: &State) -> bool {
                 .is_some_and(|form| form.background == Mode::Map))
 }
 
-pub(super) fn transparent_waypoints(game: &Game<'_>) -> bool {
-    if !game.map_on(runtime::MOD_ID) || game.mod_screen() != Some(runtime::MOD_ID) {
-        return false;
-    }
-    let state = state();
-    state.mode == Mode::Waypoints
-        || (state.mode == Mode::Name
-            && state
-                .name_form
-                .as_ref()
-                .is_some_and(|form| form.background == Mode::Waypoints))
-}
-
 pub(super) fn covers_world(game: &Game<'_>) -> bool {
     game.map_on(runtime::MOD_ID)
         && game.mod_screen() == Some(runtime::MOD_ID)
@@ -5234,11 +5860,37 @@ pub(super) fn covers_world(game: &Game<'_>) -> bool {
         && map_covers_world(&state())
 }
 
-pub(super) fn screen(game: &Game<'_>, batch: &mut HudBatch) {
-    if game.mod_screen() != Some(runtime::MOD_ID) || !game.map_on(runtime::MOD_ID) {
+pub(super) fn screen(game: &Game<'_>, batch: &mut HudBatch, screen: &mod_api::ScreenView<'_>) {
+    apply_sdk_lifecycle(game);
+    if !game.map_on(runtime::MOD_ID) {
         return;
     }
-    let state = state();
+    if game.title.is_some() {
+        runtime::set_language(&horizon_client::lang::code());
+        let mut state = state();
+        if screen.id == "title" {
+            if state.caches.title_open {
+                update_cache_ui(game, &mut state);
+                draw_cache_frontend(game, batch, &mut state);
+            } else {
+                button(
+                    game,
+                    batch,
+                    title_cache_button(batch.width),
+                    cache_title(),
+                    game.cursor(),
+                    true,
+                );
+            }
+        } else if state.caches.title_open {
+            close_cache_manager(&mut state);
+        }
+        return;
+    }
+    if game.mod_screen() != Some(runtime::MOD_ID) {
+        return;
+    }
+    let mut state = state();
     match state.mode {
         Mode::Map => draw_map_screen(game, batch, &state),
         Mode::Waypoints => draw_waypoints_screen(game, batch, &state),
@@ -5247,7 +5899,7 @@ pub(super) fn screen(game: &Game<'_>, batch: &mut HudBatch) {
                 draw_name_form(game, batch, &state, form);
             }
         }
-        Mode::Caches => draw_cache_screen(game, batch, &state),
+        Mode::Caches => draw_cache_frontend(game, batch, &mut state),
     }
 }
 
@@ -5257,6 +5909,17 @@ pub(super) fn press(
     button: i32,
     canceled: &mut bool,
 ) {
+    if game.title.is_some() && screen.id == "title" && game.map_on(runtime::MOD_ID) {
+        let mut state = state();
+        if state.caches.title_open {
+            cache_frontend_press(game, &mut state, screen, button, canceled);
+        } else if button == 0 && inside(screen.mouse, title_cache_button(screen.rect[2])) {
+            state.caches.title_open = true;
+            show_cache_manager(game, &mut state);
+            *canceled = true;
+        }
+        return;
+    }
     if game.mod_screen() != Some(runtime::MOD_ID) || !game.map_on(runtime::MOD_ID) {
         return;
     }
@@ -5297,7 +5960,7 @@ pub(super) fn press(
         Mode::Map => map_press(game, &mut state, screen, button, canceled),
         Mode::Waypoints => waypoint_press(game, &mut state, screen, button, canceled),
         Mode::Name => name_press(game, &mut state, screen, button, canceled),
-        Mode::Caches => cache_press(game, &mut state, screen, button, canceled),
+        Mode::Caches => cache_frontend_press(game, &mut state, screen, button, canceled),
     }
 }
 
@@ -5496,13 +6159,13 @@ fn waypoint_press(
             rename: None,
             background: Mode::Waypoints,
         });
-        state.mode = Mode::Name;
+        state.set_mode(Mode::Name);
         runtime::set_text_input(true);
         *canceled = true;
         return;
     }
     if inside(screen.mouse, back) {
-        state.mode = Mode::Map;
+        state.set_mode(Mode::Map);
         *canceled = true;
         return;
     }
@@ -5555,7 +6218,7 @@ fn waypoint_press(
             }),
             background: Mode::Waypoints,
         });
-        state.mode = Mode::Name;
+        state.set_mode(Mode::Name);
         runtime::set_text_input(true);
         *canceled = true;
         return;
@@ -5688,22 +6351,50 @@ fn save_name(game: &Game<'_>, state: &mut State) {
             Instant::now(),
         ));
     }
-    state.mode = form.background;
+    state.set_mode(form.background);
     runtime::set_text_input(false);
 }
 
 fn cancel_name(state: &mut State) {
     if let Some(form) = state.name_form.take() {
-        state.mode = form.background;
+        state.set_mode(form.background);
     }
     runtime::set_text_input(false);
 }
 
 pub(super) fn drag(game: &Game<'_>, delta: [f32; 2], button: i32, canceled: &mut bool) {
-    if game.mod_screen() != Some(runtime::MOD_ID) || !game.map_on(runtime::MOD_ID) || button != 0 {
+    if (game.mod_screen() != Some(runtime::MOD_ID)
+        && !(game.title.is_some() && state().caches.title_open))
+        || !game.map_on(runtime::MOD_ID)
+        || button != 0
+    {
         return;
     }
     let mut state = state();
+    if state.mode == Mode::Caches {
+        if let Some(preview) = &mut state.caches.preview {
+            if preview.dragging {
+                preview.camera.pan(delta.map(f64::from));
+            }
+            *canceled = true;
+            return;
+        }
+        if state.caches.scrollbar_grab.is_some() {
+            let snapshot = runtime::initialize(game.native_data_dir(runtime::MOD_ID))
+                .caches
+                .snapshot();
+            let (width, height) = game.gui_size();
+            cache_scroll_to(
+                &mut state,
+                width,
+                height,
+                game.cursor()[1],
+                snapshot.entries.len(),
+            );
+        }
+        *canceled = true;
+        return;
+    }
     if state.info.is_some() {
         *canceled = true;
         return;
@@ -5722,11 +6413,28 @@ pub(super) fn scroll(
     scroll: [f64; 2],
     canceled: &mut bool,
 ) {
-    if game.mod_screen() != Some(runtime::MOD_ID) || !game.map_on(runtime::MOD_ID) {
+    if (game.mod_screen() != Some(runtime::MOD_ID)
+        && !(game.title.is_some() && state().caches.title_open))
+        || !game.map_on(runtime::MOD_ID)
+    {
         return;
     }
     let mut state = state();
     if state.mode == Mode::Caches {
+        if let Some(preview) = &mut state.caches.preview {
+            let rect = preview_rect(screen.rect[2], screen.rect[3]);
+            if inside(screen.mouse, rect) {
+                preview.camera.zoom_at(
+                    scroll[1],
+                    [
+                        f64::from(screen.mouse[0] - rect[0] - rect[2] / 2.),
+                        f64::from(screen.mouse[1] - rect[1] - rect[3] / 2.),
+                    ],
+                );
+            }
+            *canceled = true;
+            return;
+        }
         let snapshot = runtime::initialize(game.native_data_dir(runtime::MOD_ID))
             .caches
             .snapshot();
@@ -5734,8 +6442,7 @@ pub(super) fn scroll(
             .entries
             .len()
             .saturating_sub(cache_rows(screen.rect[3]));
-        state.caches.scroll =
-            (state.caches.scroll.min(max) as i64 - scroll[1] as i64).clamp(0, max as i64) as usize;
+        state.caches.scroll.scroll(scroll[1], max);
         *canceled = true;
         return;
     }
@@ -5744,8 +6451,7 @@ pub(super) fn scroll(
         let visible = ((rect[3] - 56.0) / 12.0).max(1.0) as usize;
         let lines = information_lines(game, &state, state.info.unwrap(), rect[2] - 24.0);
         let max = lines.len().saturating_sub(visible);
-        state.info_scroll =
-            (state.info_scroll.min(max) as i32 - scroll[1] as i32).clamp(0, max as i32) as usize;
+        state.info_scroll.scroll(scroll[1], max);
         *canceled = true;
         return;
     }
@@ -5754,8 +6460,7 @@ pub(super) fn scroll(
             .waypoints
             .len()
             .saturating_sub(waypoint_visible_rows(screen.rect[3]));
-        let next = (state.waypoint_scroll as i32 - scroll[1] as i32).clamp(0, rows as i32);
-        state.waypoint_scroll = next as usize;
+        state.waypoint_scroll.scroll(scroll[1], rows);
         *canceled = true;
         return;
     }
@@ -5780,10 +6485,39 @@ pub(super) fn scroll(
 }
 
 pub(super) fn screen_key(game: &Game<'_>, key: &str, canceled: &mut bool) {
-    if game.mod_screen() != Some(runtime::MOD_ID) || !game.map_on(runtime::MOD_ID) {
+    if (game.mod_screen() != Some(runtime::MOD_ID)
+        && !(game.title.is_some() && state().caches.title_open))
+        || !game.map_on(runtime::MOD_ID)
+    {
         return;
     }
     let mut state = state();
+    if state.mode == Mode::Caches {
+        if state.caches.preview.is_some() {
+            if key == "key.keyboard.escape" {
+                state.caches.preview = None;
+            }
+            *canceled = true;
+            return;
+        }
+        let snapshot = runtime::initialize(game.native_data_dir(runtime::MOD_ID))
+            .caches
+            .snapshot();
+        let rows = cache_rows(game.gui_size().1);
+        let max = snapshot.entries.len().saturating_sub(rows);
+        match key {
+            "key.keyboard.up" => state.caches.scroll.page(false, 1, max),
+            "key.keyboard.down" => state.caches.scroll.page(true, 1, max),
+            "key.keyboard.page.up" => state.caches.scroll.page(false, rows, max),
+            "key.keyboard.page.down" => state.caches.scroll.page(true, rows, max),
+            "key.keyboard.home" => state.caches.scroll.jump(0, max),
+            "key.keyboard.end" => state.caches.scroll.jump(max, max),
+            "key.keyboard.escape" => close_cache_manager(&mut state),
+            _ => {}
+        }
+        *canceled = true;
+        return;
+    }
     if state.info.is_some() {
         if key == "key.keyboard.escape" {
             state.info = None;
@@ -5850,6 +6584,7 @@ pub(super) fn disconnect(game: &Game<'_>) {
         session: next,
         ..State::default()
     };
+    runtime::set_waypoint_background_transparent(false);
     runtime::initialize(game.native_data_dir(runtime::MOD_ID))
         .maps
         .reset(next);

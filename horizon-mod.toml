@@ -1,6 +1,6 @@
 id = "minimap_worldmap_waypoints_reworked"
 name = "Minimap, Worldmap and waypoints reworked"
-version = "0.7.0"
+version = "0.7.5"
 description = "Minimap, persistent world map, LOD terrain, waypoints and cache manager."
 authors = ["daniliammo", "Gurov08ruS"]
 license = "GPL-3.0-only"
@@ -13,7 +13,7 @@ capabilities = ["registries"]
 
 [native]
 game = "26.3"
-horizon = "0b14f8acfd97fa2c750e42795249dcc981178ca4"
+horizon = "0a875da91dbb0fdcb7ba8c42c11341aa229af51a"
 mixins = "e59da9094f0c2fdda6c627fe9eff22dec6a906f0"
 
 [[native.module]]
@@ -41,13 +41,6 @@ name="minimap_compat"
 source="src/compat.rs"
 
 [[native.mixin]]
-id = "map-key"
-kind = "HEAD"
-target = "horizon_client::game::native_hooks::input_key::Game::native_input_key"
-helper = "src/key.rs"
-bindings = [{name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self"}, {name = "key", ty = "&str", value = "key"}, {name = "action", ty = "mod_api::KeyAction", value = "action"}, {name = "modifiers", ty = "u32", value = "modifiers"}]
-
-[[native.mixin]]
 id = "map-packet"
 kind = "HEAD"
 target = "horizon_client::game::remote::Game::apply_packet"
@@ -71,16 +64,16 @@ bindings = [{name = "game", ty = "&crate::game::Game<'_>", value = "self"}, {nam
 [[native.mixin]]
 id = "map-gui-post"
 kind = "HEAD"
-target = "horizon_client::game::native_hooks::gui_render_post::Game::native_gui_render_post"
+target = "horizon_client::game::extras::Game::draw_extras"
 helper = "src/gui_post.rs"
-bindings = [{name = "game", ty = "&crate::game::Game<'_>", value = "self"}, {name = "batch", ty = "&mut horizon_client::hud::HudBatch", value = "batch"}, {name = "gui_hidden", ty = "bool", value = "gui_hidden"}, {name = "focused", ty = "bool", value = "focused"}]
+bindings = [{name = "game", ty = "&crate::game::Game<'_>", value = "self"}, {name = "batch", ty = "&mut horizon_client::hud::HudBatch", value = "batch"}]
 
 [[native.mixin]]
 id = "map-screen"
 kind = "HEAD"
 target = "horizon_client::game::native_hooks::base::Game::native_screen_render_post"
 helper = "src/screen.rs"
-bindings = [{name = "game", ty = "&crate::game::Game<'_>", value = "self"}, {name = "batch", ty = "&mut horizon_client::hud::HudBatch", value = "draw"}]
+bindings = [{name = "game", ty = "&crate::game::Game<'_>", value = "self"}, {name = "batch", ty = "&mut horizon_client::hud::HudBatch", value = "draw"}, {name = "screen", ty = "&mod_api::ScreenView<'_>", value = "screen"}]
 
 [[native.mixin]]
 id = "map-press"
@@ -118,20 +111,6 @@ helper = "src/screen_char.rs"
 bindings = [{name = "game", ty = "&crate::game::Game<'_>", value = "self"}, {name = "screen", ty = "&mod_api::ScreenView<'_>", value = "screen"}, {name = "c", ty = "char", value = "c"}, {name = "modifiers", ty = "u32", value = "modifiers"}, {name = "canceled", ty = "&mut bool", value = "canceled"}]
 
 [[native.mixin]]
-id = "map-disconnect"
-kind = "HEAD"
-target = "horizon_client::game::native_hooks::client_services::Game::native_client_disconnecting"
-helper = "src/disconnect.rs"
-bindings = [{name = "game", ty = "&crate::game::Game<'_>", value = "self"}]
-
-[[native.mixin]]
-id = "map-resources"
-kind = "HEAD"
-target = "horizon_client::game::native_hooks::base::Game::native_client_resources_reloaded"
-helper = "src/atlas.rs"
-bindings = []
-
-[[native.mixin]]
 id = "map-render-only"
 kind = "HEAD"
 cancellable = true
@@ -140,9 +119,17 @@ helper = "src/render.rs"
 bindings = [{name = "game", ty = "&mut crate::game::Game<'_>", value = "self"}]
 
 [[native.mixin]]
-id = "waypoints-no-blur"
+id = "map-effect-space"
 kind = "HEAD"
 cancellable = true
-target = "horizon_client::game::native_hooks::client_services::Game::native_menu_background"
-helper = "src/menu_background.rs"
-bindings = [{name = "game", ty = "&crate::game::Game<'_>", value = "self"}, {name = "radius", ty = "&mut Option<f32>", value = "radius"}]
+target = "horizon_client::game::extras::Game::effect_rows_height"
+helper = "src/effect_space.rs"
+bindings = [{name = "game", ty = "&crate::game::Game<'_>", value = "self"}]
+
+[[native.mixin]]
+id = "map-effect-icons"
+kind = "HEAD"
+cancellable = true
+target = "horizon_client::game::potions::Game::draw_effect_icons"
+helper = "src/effect_icons.rs"
+bindings = [{name = "game", ty = "&crate::game::Game<'_>", value = "self"}, {name = "batch", ty = "&mut horizon_client::hud::HudBatch", value = "batch"}]

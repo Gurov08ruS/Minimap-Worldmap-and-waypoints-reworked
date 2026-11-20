@@ -75,6 +75,67 @@ macro_rules! define_tests {
                 assert_eq!(std::fs::read(&path).unwrap(), bytes);
             }
             #[test]
+            fn catalog_pages_include_all_local_server_and_legacy_files() {
+                let dir = TestDir::new("catalog-pages");
+                let mut originals = std::collections::BTreeMap::new();
+                for index in 0..14 {
+                    let world = if index % 2 == 0 {
+                        format!("save:Новый мир ({index})")
+                    } else {
+                        format!("server:server-{index}.example")
+                    };
+                    let mut store = Store::open(&dir.0, &world).unwrap();
+                    store.put([1, 0, 0, 0, 0, 0], vec![index as u8]).unwrap();
+                    store.commit().unwrap();
+                    let path = world_path(&dir.0, &world);
+                    originals.insert(path.clone(), std::fs::read(path).unwrap());
+                }
+                let legacy = dir.0.join("00000000000000000000000000000000.mwwr");
+                std::fs::write(&legacy, b"old cache").unwrap();
+                originals.insert(legacy.clone(), std::fs::read(&legacy).unwrap());
+                let list = super::super::cache_manager::scan(&dir.0).unwrap();
+                assert_eq!(list.entries.len(), 15);
+                assert_eq!(
+                    list.entries
+                        .iter()
+                        .filter(|e| e.world.as_deref().is_some_and(|w| w.starts_with("save:")))
+                        .count(),
+                    7
+                );
+                assert_eq!(
+                    list.entries
+                        .iter()
+                        .filter(|e| e.world.as_deref().is_some_and(|w| w.starts_with("server:")))
+                        .count(),
+                    7
+                );
+                let mut scroll = super::super::ListScroll::default();
+                let mut seen = std::collections::BTreeSet::new();
+                let rows = 3;
+                let max = list.entries.len() - rows;
+                loop {
+                    seen.extend(
+                        list.entries
+                            .iter()
+                            .skip(scroll.offset(max))
+                            .take(rows)
+                            .map(|e| e.file.clone()),
+                    );
+                    if scroll.offset(max) == max {
+                        break;
+                    }
+                    scroll.page(true, rows, max);
+                }
+                assert_eq!(
+                    seen.len(),
+                    list.entries.len(),
+                    "every cache must be reachable with three visible rows"
+                );
+                for (path, before) in originals {
+                    assert_eq!(std::fs::read(path).unwrap(), before);
+                }
+            }
+            #[test]
             fn future_format_and_visual_revision_are_never_rewritten() {
                 for (schema, visual) in [(SCHEMA + 1, 0), (SCHEMA, VISUAL_REVISION + 1)] {
                     let dir = TestDir::new("future-manager");

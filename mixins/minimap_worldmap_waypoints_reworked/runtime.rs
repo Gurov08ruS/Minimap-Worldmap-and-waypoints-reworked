@@ -191,6 +191,601 @@ pub fn tr(
     }
 }
 
+/// Row-based lists retain smooth wheel deltas until a full row is reached.
+#[derive(Default)]
+pub struct ListScroll {
+    row: usize,
+    wheel: f64,
+}
+impl ListScroll {
+    pub fn offset(&self, max: usize) -> usize {
+        self.row.min(max)
+    }
+    pub fn jump(&mut self, row: usize, max: usize) {
+        self.row = row.min(max);
+        self.wheel = 0.;
+    }
+    pub fn page(&mut self, forwards: bool, rows: usize, max: usize) {
+        let row = self.offset(max);
+        self.jump(
+            if forwards {
+                row.saturating_add(rows)
+            } else {
+                row.saturating_sub(rows)
+            },
+            max,
+        );
+    }
+    pub fn scroll(&mut self, delta: f64, max: usize) {
+        if !delta.is_finite() {
+            return;
+        }
+        self.row = self.offset(max);
+        self.wheel -= delta.clamp(-(max as f64 + 1.), max as f64 + 1.);
+        let steps = (self.wheel.abs() + 1e-9).floor().copysign(self.wheel);
+        self.wheel -= steps;
+        self.row = if steps >= 0. {
+            self.row.saturating_add(steps as usize).min(max)
+        } else {
+            self.row.saturating_sub((-steps) as usize)
+        };
+        if (self.row == 0 && self.wheel < 0.) || (self.row == max && self.wheel > 0.) {
+            self.wheel = 0.;
+        }
+    }
+}
+
+/// Geometry shared by drawing, track clicks and thumb dragging.
+pub struct ListScrollbar {
+    pub thumb_top: f32,
+    pub thumb_height: f32,
+    pub max_row: usize,
+    top: f32,
+    travel: f32,
+}
+impl ListScrollbar {
+    pub fn new(top: f32, height: f32, visible: usize, count: usize, row: usize) -> Self {
+        let height = height.max(0.);
+        let max_row = count.saturating_sub(visible);
+        let thumb_height = if max_row == 0 {
+            height
+        } else {
+            (height * visible as f32 / count as f32)
+                .max(12.)
+                .min(height)
+        };
+        let travel = height - thumb_height;
+        let thumb_top = top + travel * row.min(max_row) as f32 / max_row.max(1) as f32;
+        Self {
+            thumb_top,
+            thumb_height,
+            max_row,
+            top,
+            travel,
+        }
+    }
+    pub fn row_at(&self, mouse_y: f32, grab: f32) -> usize {
+        if self.travel <= 0. || !mouse_y.is_finite() || !grab.is_finite() {
+            return 0;
+        }
+        let ratio = ((mouse_y - self.top - grab) / self.travel).clamp(0., 1.);
+        (ratio * self.max_row as f32).round() as usize
+    }
+}
+
+// Keep diagnostic identities in English for format detection and logs. Translate
+// at the UI boundary, so changing the game language also updates worker notices.
+const MESSAGES: &[(&str, [&str; 4])] = &[
+    (
+        "Settings worker stopped",
+        [
+            "Поток настроек остановлен",
+            "Le traitement des réglages est arrêté",
+            "El proceso de ajustes se ha detenido",
+            "Die Einstellungsverarbeitung wurde beendet",
+        ],
+    ),
+    (
+        "Settings file exceeds 16 MiB",
+        [
+            "Файл настроек превышает 16 МиБ",
+            "Le fichier des réglages dépasse 16 Mio",
+            "El archivo de ajustes supera los 16 MiB",
+            "Die Einstellungsdatei überschreitet 16 MiB",
+        ],
+    ),
+    (
+        "No settings directory",
+        [
+            "Папка настроек недоступна",
+            "Dossier des réglages indisponible",
+            "La carpeta de ajustes no está disponible",
+            "Einstellungsordner nicht verfügbar",
+        ],
+    ),
+    (
+        "Save",
+        ["Сохранение", "Enregistrement", "Guardado", "Speichern"],
+    ),
+    (
+        "Cache catalog worker failed",
+        [
+            "Не удалось загрузить список кешей",
+            "Impossible de charger la liste des caches",
+            "No se pudo cargar la lista de cachés",
+            "Die Cache-Liste konnte nicht geladen werden",
+        ],
+    ),
+    (
+        "Map sampling failed; sampling paused",
+        [
+            "Ошибка сбора данных карты; сбор приостановлен",
+            "Échec de la collecte de la carte ; collecte suspendue",
+            "Error al recopilar el mapa; recopilación en pausa",
+            "Kartenerfassung fehlgeschlagen; Erfassung angehalten",
+        ],
+    ),
+    (
+        "Map worker unavailable; sampling paused",
+        [
+            "Поток карты недоступен; сбор данных приостановлен",
+            "Traitement de la carte indisponible ; collecte suspendue",
+            "El proceso del mapa no está disponible; recopilación en pausa",
+            "Kartenverarbeitung nicht verfügbar; Erfassung angehalten",
+        ],
+    ),
+    (
+        "Cache write failed; sampling paused",
+        [
+            "Ошибка записи кеша; сбор данных приостановлен",
+            "Échec d’écriture du cache ; collecte suspendue",
+            "Error al escribir la caché; recopilación en pausa",
+            "Cache-Schreibfehler; Erfassung angehalten",
+        ],
+    ),
+    (
+        "Cannot open cache; sampling paused",
+        [
+            "Не удалось открыть кеш; сбор данных приостановлен",
+            "Impossible d’ouvrir le cache ; collecte suspendue",
+            "No se pudo abrir la caché; recopilación en pausa",
+            "Cache kann nicht geöffnet werden; Erfassung angehalten",
+        ],
+    ),
+    (
+        "Unknown world identity; temporary RAM map only",
+        [
+            "Мир не определён; карта временно хранится только в памяти",
+            "Monde inconnu ; carte temporaire en mémoire uniquement",
+            "Mundo desconocido; mapa temporal solo en memoria",
+            "Welt unbekannt; temporäre Karte nur im Arbeitsspeicher",
+        ],
+    ),
+    (
+        "Cache is used by another client; temporary RAM map only",
+        [
+            "Кеш занят другим клиентом; карта временно хранится только в памяти",
+            "Cache utilisé par un autre client ; carte temporaire en mémoire uniquement",
+            "Otro cliente usa la caché; mapa temporal solo en memoria",
+            "Cache von anderem Client verwendet; temporäre Karte nur im Arbeitsspeicher",
+        ],
+    ),
+    (
+        "Open this cache's world before rebuilding its legacy file",
+        [
+            "Для обновления старого файла откройте мир этого кеша",
+            "Ouvrez le monde de ce cache avant de reconstruire son ancien fichier",
+            "Abre el mundo de esta caché antes de reconstruir su archivo antiguo",
+            "Vor dem Neuaufbau der alten Datei die zugehörige Welt öffnen",
+        ],
+    ),
+    (
+        "Cache writer is paused; resolve the write error first",
+        [
+            "Запись кеша приостановлена; сначала устраните ошибку записи",
+            "Écriture du cache suspendue ; corrigez d’abord l’erreur d’écriture",
+            "La escritura de caché está en pausa; resuelve primero el error",
+            "Cache-Schreiben angehalten; zuerst den Schreibfehler beheben",
+        ],
+    ),
+    (
+        "Cache is in use by another client",
+        [
+            "Кеш занят другим клиентом",
+            "Cache utilisé par un autre client",
+            "Otro cliente está usando la caché",
+            "Cache wird von einem anderen Client verwendet",
+        ],
+    ),
+    (
+        "Persistent cache is unavailable",
+        [
+            "Сохранение кеша на диске недоступно",
+            "Cache persistant indisponible",
+            "La caché persistente no está disponible",
+            "Dauerhafter Cache nicht verfügbar",
+        ],
+    ),
+    (
+        "Unknown cache identity",
+        [
+            "Кеш не удалось определить",
+            "Identité du cache inconnue",
+            "Identidad de caché desconocida",
+            "Cache-Identität unbekannt",
+        ],
+    ),
+    (
+        "Cache worker is unavailable",
+        [
+            "Поток кеша недоступен",
+            "Traitement du cache indisponible",
+            "El proceso de caché no está disponible",
+            "Cache-Verarbeitung nicht verfügbar",
+        ],
+    ),
+    (
+        "Damaged cache record skipped",
+        [
+            "Повреждённая запись кеша пропущена",
+            "Entrée endommagée du cache ignorée",
+            "Se ha omitido un registro de caché dañado",
+            "Beschädigter Cache-Eintrag übersprungen",
+        ],
+    ),
+    (
+        "invalid world identity",
+        [
+            "Некорректный идентификатор мира",
+            "Identifiant du monde invalide",
+            "Identificador de mundo no válido",
+            "Ungültige Weltkennung",
+        ],
+    ),
+    (
+        "truncated container header",
+        [
+            "Заголовок кеша обрезан",
+            "En-tête du cache tronqué",
+            "La cabecera de caché está truncada",
+            "Cache-Kopf abgeschnitten",
+        ],
+    ),
+    (
+        "no recoverable container header",
+        [
+            "Заголовок кеша не поддаётся восстановлению",
+            "Aucun en-tête de cache récupérable",
+            "No hay una cabecera de caché recuperable",
+            "Kein wiederherstellbarer Cache-Kopf",
+        ],
+    ),
+    (
+        "unsupported container version",
+        [
+            "Неподдерживаемая версия формата кеша",
+            "Version du format de cache non prise en charge",
+            "Versión del formato de caché no compatible",
+            "Nicht unterstützte Cache-Formatversion",
+        ],
+    ),
+    (
+        "world identity mismatch",
+        [
+            "Кеш принадлежит другому миру",
+            "Le cache appartient à un autre monde",
+            "La caché pertenece a otro mundo",
+            "Cache gehört zu einer anderen Welt",
+        ],
+    ),
+    (
+        "no recoverable container root",
+        [
+            "Индекс кеша не поддаётся восстановлению",
+            "Aucun index de cache récupérable",
+            "No hay un índice de caché recuperable",
+            "Kein wiederherstellbarer Cache-Index",
+        ],
+    ),
+    (
+        "zero generation",
+        [
+            "Некорректное поколение кеша",
+            "Génération du cache invalide",
+            "Generación de caché no válida",
+            "Ungültige Cache-Generation",
+        ],
+    ),
+    (
+        "invalid index count",
+        [
+            "Некорректный размер индекса кеша",
+            "Nombre d’entrées du cache invalide",
+            "Número de entradas de caché no válido",
+            "Ungültige Anzahl von Cache-Einträgen",
+        ],
+    ),
+    (
+        "invalid index extent",
+        [
+            "Повреждены границы индекса кеша",
+            "Étendue de l’index du cache invalide",
+            "Extensión del índice de caché no válida",
+            "Ungültiger Bereich des Cache-Index",
+        ],
+    ),
+    (
+        "invalid index page",
+        [
+            "Повреждена страница индекса кеша",
+            "Page de l’index du cache invalide",
+            "Página del índice de caché no válida",
+            "Ungültige Cache-Indexseite",
+        ],
+    ),
+    (
+        "invalid index page size",
+        [
+            "Некорректный размер страницы индекса кеша",
+            "Taille de page d’index invalide",
+            "Tamaño de página de índice no válido",
+            "Ungültige Größe der Indexseite",
+        ],
+    ),
+    (
+        "unsorted index",
+        [
+            "Нарушен порядок индекса кеша",
+            "Index du cache désordonné",
+            "El índice de caché está desordenado",
+            "Cache-Index nicht sortiert",
+        ],
+    ),
+    (
+        "invalid record extent",
+        [
+            "Повреждены границы записи кеша",
+            "Étendue d’une entrée du cache invalide",
+            "Extensión de registro de caché no válida",
+            "Ungültiger Bereich des Cache-Eintrags",
+        ],
+    ),
+    (
+        "incomplete index",
+        [
+            "Индекс кеша неполный",
+            "Index du cache incomplet",
+            "El índice de caché está incompleto",
+            "Cache-Index unvollständig",
+        ],
+    ),
+    (
+        "overlapping extents",
+        [
+            "Области кеша пересекаются",
+            "Des régions du cache se chevauchent",
+            "Hay regiones de caché superpuestas",
+            "Cache-Bereiche überlappen sich",
+        ],
+    ),
+    (
+        "record checksum mismatch",
+        [
+            "Контрольная сумма записи кеша не совпадает",
+            "Somme de contrôle de l’entrée du cache incorrecte",
+            "La suma de comprobación del registro no coincide",
+            "Prüfsumme des Cache-Eintrags stimmt nicht überein",
+        ],
+    ),
+    (
+        "invalid record length",
+        [
+            "Некорректная длина записи кеша",
+            "Longueur d’entrée du cache invalide",
+            "Longitud de registro de caché no válida",
+            "Ungültige Länge des Cache-Eintrags",
+        ],
+    ),
+    (
+        "invalid terrain tile",
+        [
+            "Повреждён фрагмент карты",
+            "Tuile de terrain invalide",
+            "Fragmento de terreno no válido",
+            "Ungültige Geländekachel",
+        ],
+    ),
+    (
+        "invalid terrain record",
+        [
+            "Повреждена запись рельефа",
+            "Entrée de terrain invalide",
+            "Registro de terreno no válido",
+            "Ungültiger Geländeeintrag",
+        ],
+    ),
+    (
+        "invalid biome name",
+        [
+            "Некорректное название биома",
+            "Nom de biome invalide",
+            "Nombre de bioma no válido",
+            "Ungültiger Biomname",
+        ],
+    ),
+    (
+        "record version overflow",
+        [
+            "Превышен предел версий записи",
+            "Limite des versions d’entrée atteinte",
+            "Se ha alcanzado el límite de versiones de registro",
+            "Versionslimit des Eintrags erreicht",
+        ],
+    ),
+    (
+        "generation overflow",
+        [
+            "Превышен предел поколений кеша",
+            "Limite des générations du cache atteinte",
+            "Se ha alcanzado el límite de generaciones de caché",
+            "Generationslimit des Cache erreicht",
+        ],
+    ),
+    (
+        "visual generation overflow",
+        [
+            "Превышен предел версий изображений",
+            "Limite des versions d’images atteinte",
+            "Se ha alcanzado el límite de versiones de imágenes",
+            "Versionslimit der Bilder erreicht",
+        ],
+    ),
+    (
+        "allocation length overflow",
+        [
+            "Превышен допустимый размер кеша",
+            "Taille maximale du cache dépassée",
+            "Se ha superado el tamaño máximo de caché",
+            "Maximale Cache-Größe überschritten",
+        ],
+    ),
+    (
+        "file offset overflow",
+        [
+            "Превышен допустимый размер файла",
+            "Taille maximale du fichier dépassée",
+            "Se ha superado el tamaño máximo del archivo",
+            "Maximale Dateigröße überschritten",
+        ],
+    ),
+    (
+        "bad free-space view",
+        [
+            "Повреждена таблица свободного места кеша",
+            "Table d’espace libre du cache invalide",
+            "La tabla de espacio libre de caché no es válida",
+            "Freispeichertabelle des Cache beschädigt",
+        ],
+    ),
+    (
+        "writer needs recovery after an I/O failure",
+        [
+            "Кеш заблокирован после ошибки записи",
+            "Cache bloqué après un échec d’écriture",
+            "La caché está bloqueada tras un error de escritura",
+            "Cache nach Schreibfehler gesperrt",
+        ],
+    ),
+    (
+        "No space left on device",
+        [
+            "На диске недостаточно места",
+            "Espace disque insuffisant",
+            "No queda espacio en el disco",
+            "Nicht genügend Speicherplatz auf dem Datenträger",
+        ],
+    ),
+    (
+        "Permission denied",
+        [
+            "Нет прав доступа к файлу",
+            "Accès au fichier refusé",
+            "Acceso al archivo denegado",
+            "Dateizugriff verweigert",
+        ],
+    ),
+    (
+        "Access is denied.",
+        [
+            "Нет прав доступа к файлу",
+            "Accès au fichier refusé",
+            "Acceso al archivo denegado",
+            "Dateizugriff verweigert",
+        ],
+    ),
+    (
+        "Read-only file system",
+        [
+            "Файловая система доступна только для чтения",
+            "Système de fichiers en lecture seule",
+            "El sistema de archivos es de solo lectura",
+            "Dateisystem ist schreibgeschützt",
+        ],
+    ),
+    (
+        "No such file or directory",
+        [
+            "Файл или папка не найдены",
+            "Fichier ou dossier introuvable",
+            "No se encuentra el archivo o la carpeta",
+            "Datei oder Ordner nicht gefunden",
+        ],
+    ),
+    (
+        "The system cannot find the file specified.",
+        [
+            "Файл не найден",
+            "Fichier introuvable",
+            "No se encuentra el archivo",
+            "Datei nicht gefunden",
+        ],
+    ),
+    (
+        "Input/output error",
+        [
+            "Ошибка чтения или записи диска",
+            "Erreur de lecture ou d’écriture du disque",
+            "Error de lectura o escritura del disco",
+            "Fehler beim Lesen oder Schreiben des Datenträgers",
+        ],
+    ),
+    (
+        "failed to fill whole buffer",
+        [
+            "Файл кеша обрезан",
+            "Fichier de cache tronqué",
+            "El archivo de caché está truncado",
+            "Cache-Datei abgeschnitten",
+        ],
+    ),
+];
+
+pub fn message_for(language: Language, raw: &str) -> String {
+    if language == Language::English {
+        return raw.into();
+    }
+    let translate = |key: &str| {
+        MESSAGES
+            .iter()
+            .find(|(en, _)| *en == key)
+            .map(|(_, texts)| texts[language as usize - 1])
+    };
+    if let Some(text) = translate(raw) {
+        return text.into();
+    }
+    if let Some((prefix, detail)) = raw.split_once(": ")
+        && let Some(prefix) = translate(prefix)
+    {
+        return format!("{prefix}: {}", message_for(language, detail));
+    }
+    if let Some((detail, _)) = raw.rsplit_once(" (os error ")
+        && let Some(text) = translate(detail)
+    {
+        return text.into();
+    }
+    [
+        "Не удалось выполнить операцию",
+        "Impossible d’effectuer l’opération",
+        "No se pudo completar la operación",
+        "Der Vorgang konnte nicht abgeschlossen werden",
+    ][language as usize - 1]
+        .into()
+}
+
+pub fn localize_message(raw: &str) -> String {
+    message_for(language(), raw)
+}
+
 macro_rules! localized_format {
     ($en:literal, $ru:literal, $fr:literal, $es:literal, $de:literal $(, $arg:expr)* $(,)?) => {
         match language() {
@@ -1855,14 +2450,75 @@ fn valid_waypoint_world(world: &str) -> bool {
         .is_some_and(|id| !id.is_empty() && id.len() <= 1024 && !id.chars().any(char::is_control))
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScreenRequest {
     Map,
     Waypoints,
 }
 
+/// Match the SDK's registered bindings, including mouse mappings and modifiers.
+/// Layout keys never replace physical bindings, as on Horizon's own controls.
+pub fn bound_screen_request(
+    key: &str,
+    modifiers: u32,
+    map: Option<(&str, u32)>,
+    waypoints: Option<(&str, u32)>,
+) -> Option<ScreenRequest> {
+    [
+        (map, ScreenRequest::Map),
+        (waypoints, ScreenRequest::Waypoints),
+    ]
+    .into_iter()
+    .find_map(|(binding, request)| {
+        binding
+            .filter(|(bound, bits)| *bound == key && bits & 7 == modifiers & 7)
+            .map(|_| request)
+    })
+}
+
+/// Public SDK callbacks publish invalidations without retaining a borrowed Host.
+/// Native rendering consumes them before the next draw or sampling pass.
+pub struct ClientEvents(AtomicU8);
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct PendingClientEvents {
+    pub disconnected: bool,
+    pub resources_reloaded: bool,
+}
+impl ClientEvents {
+    pub const fn new() -> Self {
+        Self(AtomicU8::new(0))
+    }
+    pub fn disconnected(&self) {
+        self.0.fetch_or(1, Ordering::Release);
+    }
+    pub fn resources_reloaded(&self) {
+        self.0.fetch_or(2, Ordering::Release);
+    }
+    pub fn take(&self) -> PendingClientEvents {
+        let events = self.0.swap(0, Ordering::AcqRel);
+        PendingClientEvents {
+            disconnected: events & 1 != 0,
+            resources_reloaded: events & 2 != 0,
+        }
+    }
+}
+impl Default for ClientEvents {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+pub static CLIENT_EVENTS: ClientEvents = ClientEvents::new();
+
 static SCREEN_REQUEST: AtomicU8 = AtomicU8::new(0);
 static TEXT_INPUT: AtomicU8 = AtomicU8::new(0);
+static WAYPOINT_BACKGROUND: AtomicU8 = AtomicU8::new(0);
+
+pub fn set_waypoint_background_transparent(transparent: bool) {
+    WAYPOINT_BACKGROUND.store(u8::from(transparent), Ordering::Release);
+}
+pub fn waypoint_background_transparent() -> bool {
+    WAYPOINT_BACKGROUND.load(Ordering::Acquire) != 0
+}
 
 /// The key hooks only set a request; the client module, which owns the
 /// screen mode, consumes it on the next frame. This also keeps the key helper
@@ -2765,7 +3421,7 @@ super::minimap_settings_tests::define_tests!();
 // Shared in-memory terrain repository; retention is temporarily uncapped until the container.
 // No game objects cross the worker boundary.
 /// Checked single-file terrain storage, owned exclusively by the map worker.
-/// Physical unlink/rename and concurrent file readers are deliberately absent.
+/// Live writers own an exclusive lease; offline previews use shared leases.
 pub mod container {
     use std::{
         fs::{File, OpenOptions, TryLockError},
@@ -2779,9 +3435,16 @@ pub mod container {
         Io(io::Error),
     }
 
-    /// Owns exactly one descriptor; never clones it or lends it to readers.
-    /// This primitive only opens existing files. Creation and physical deletion
-    /// require the future directory/name coordinator and are deliberately absent.
+    impl std::fmt::Display for LeaseError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Self::Busy => f.write_str("Cache is in use by another client"),
+                Self::Io(error) => error.fmt(f),
+            }
+        }
+    }
+
+    /// Owns exactly one locked descriptor.
     #[derive(Debug)]
     pub struct ContainerLease {
         file: File,
@@ -3294,7 +3957,17 @@ pub mod container {
             if world.is_empty() || world.len() > 2048 {
                 return Err(LeaseError::Io(invalid("invalid world identity")));
             }
-            let mut lease = ContainerLease::open_existing(path)?;
+            Self::from_existing(ContainerLease::open_existing(path)?, world)
+        }
+        pub(super) fn open_preview(path: &Path, world: &str) -> Result<Self, LeaseError> {
+            let file = File::open(path).map_err(LeaseError::Io)?;
+            file.try_lock_shared().map_err(|error| match error {
+                TryLockError::WouldBlock => LeaseError::Busy,
+                TryLockError::Error(e) => LeaseError::Io(e),
+            })?;
+            Self::from_existing(ContainerLease { file }, world)
+        }
+        fn from_existing(mut lease: ContainerLease, world: &str) -> Result<Self, LeaseError> {
             if lease.file_len().map_err(LeaseError::Io)? < PREFIX {
                 return Err(LeaseError::Io(invalid("truncated container header")));
             }
@@ -3764,6 +4437,27 @@ pub mod cache_manager {
         tx: Mutex<Option<mpsc::SyncSender<Resolve>>>,
         worker: Mutex<Option<JoinHandle<()>>>,
     }
+    pub fn selected_path(directory: &Path, file: &str) -> io::Result<PathBuf> {
+        let name = Path::new(file);
+        if file.contains(['/', '\\', ':'])
+            || name.file_name().and_then(|name| name.to_str()) != Some(file)
+            || name.extension().is_none_or(|ext| ext != "mwwr")
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Invalid cache file",
+            ));
+        }
+        let path = directory.join(name);
+        if !fs::symlink_metadata(&path)?.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Invalid cache file",
+            ));
+        }
+        Ok(path)
+    }
+
     pub fn scan(directory: &Path) -> io::Result<Snapshot> {
         let files = match fs::read_dir(directory) {
             Ok(files) => files,
@@ -3781,7 +4475,9 @@ pub mod cache_manager {
                 break;
             }
             let path = file.path();
-            let name = file.file_name().to_string_lossy().into_owned();
+            let Ok(name) = file.file_name().into_string() else {
+                continue;
+            };
             let info = container::inspect(&path).unwrap_or_else(|_| container::FileInfo {
                 world: None,
                 bytes: file.metadata().map_or(0, |m| m.len()),
@@ -5253,6 +5949,97 @@ pub mod maps {
     type TileCursor = Option<((i32, i32), Option<Arc<Tile>>)>;
     type Key = (Dimension, Layer, i32, i32);
     const VISUAL_CHECKPOINT: RecordKey = [0, 7, 0, 0, 0, 0];
+    const LAST_POSITION: RecordKey = [0, 8, 0, 0, 0, 0];
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct LastPosition {
+        pub dimension: Dimension,
+        pub block: [i32; 3],
+    }
+
+    impl LastPosition {
+        fn encode(self) -> Vec<u8> {
+            [
+                self.dimension as i32,
+                self.block[0],
+                self.block[1],
+                self.block[2],
+            ]
+            .into_iter()
+            .flat_map(i32::to_le_bytes)
+            .collect()
+        }
+
+        fn decode(bytes: &[u8]) -> Option<Self> {
+            if bytes.len() != 16 {
+                return None;
+            }
+            let get = |i: usize| i32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap());
+            Some(Self {
+                dimension: Dimension::ALL
+                    .get(usize::try_from(get(0)).ok()?)
+                    .copied()
+                    .filter(|d| *d != Dimension::Player)?,
+                block: [get(1), get(2), get(3)],
+            })
+        }
+    }
+
+    pub struct Preview {
+        pub position: Option<LastPosition>,
+        pub dimensions: Vec<(Dimension, [f64; 2])>,
+        cache: Cache,
+    }
+
+    impl Preview {
+        pub fn open(
+            directory: &Path,
+            file: &str,
+            world: &str,
+        ) -> Result<Self, container::LeaseError> {
+            let path = super::cache_manager::selected_path(directory, file)
+                .map_err(container::LeaseError::Io)?;
+            let mut store = Store::open_preview(&path, world)?;
+            let position = store
+                .read(LAST_POSITION)
+                .ok()
+                .flatten()
+                .and_then(|bytes| LastPosition::decode(&bytes));
+            let mut first = BTreeMap::new();
+            for key in store.keys().filter(|key| matches!(key[1], 0 | 2)) {
+                if let Some(dimension) = record_dimension(key) {
+                    let size = 16_i64 << if key[1] == 2 { key[5].clamp(0, 22) } else { 0 };
+                    first.entry(dimension).or_insert([
+                        (i64::from(key[3]) * size + size / 2) as f64,
+                        (i64::from(key[4]) * size + size / 2) as f64,
+                    ]);
+                }
+            }
+            if let Some(at) = position {
+                first.insert(
+                    at.dimension,
+                    [f64::from(at.block[0]), f64::from(at.block[2])],
+                );
+            }
+            let dimension = position
+                .map(|at| at.dimension)
+                .or_else(|| first.keys().next().copied());
+            Ok(Self {
+                position,
+                dimensions: dimension
+                    .into_iter()
+                    .chain(first.keys().copied().filter(|d| Some(*d) != dimension))
+                    .map(|d| (d, first[&d]))
+                    .collect(),
+                cache: Cache::from_store(store, 32 * 1024 * 1024)?,
+            })
+        }
+
+        pub fn render(&self, view: View) -> Frame {
+            self.cache.render(view, 0)
+        }
+    }
+
     #[derive(Clone, PartialEq, Eq)]
     struct Overview {
         pixels: Vec<u8>,
@@ -7294,6 +8081,11 @@ pub mod maps {
         }
     }
     enum Job {
+        Delete {
+            file: String,
+            active_world: String,
+            reply: mpsc::SyncSender<Result<(), String>>,
+        },
         Rebuild {
             world: String,
             file: String,
@@ -7325,7 +8117,9 @@ pub mod maps {
         dimension: Dimension,
         limit: usize,
     }
+    type PositionSlot = Arc<Mutex<BTreeMap<u64, LastPosition>>>;
     pub struct Service {
+        position: PositionSlot,
         binding: Arc<Mutex<Option<Binding>>>,
         upgrade: Arc<Mutex<Option<String>>>,
         status: Arc<Mutex<Option<String>>>,
@@ -7353,6 +8147,8 @@ pub mod maps {
             Self::with_directory(None)
         }
         pub fn with_directory(directory: Option<std::path::PathBuf>) -> Self {
+            let position: PositionSlot = Arc::new(Mutex::new(BTreeMap::new()));
+            let latest_position = position.clone();
             let upgrade = Arc::new(Mutex::new(None));
             let upgrade_notice = upgrade.clone();
             let (tx, sampling) = mpsc::sync_channel::<Job>(8);
@@ -7459,9 +8255,25 @@ pub mod maps {
                     let mut paused = false;
                     let mut blocked_format=None;
                     let mut last_probe=None;
+                    let mut saved_position = None;
                     loop {
                         let busy=cache.visual_work()&&input.lock().unwrap_or_else(|e|e.into_inner()).is_some();
-                        let first = match rx.recv_timeout(Duration::from_millis(if busy {1} else {100})) {
+                        let received = rx.recv_timeout(Duration::from_millis(if busy {1} else {100}));
+                        if let Some(backing) = &cache.backing {
+                            let latest = latest_position.lock().unwrap_or_else(|e| e.into_inner()).get(&current).copied().map(|position| (current, position));
+                            if let Some((session, position)) = latest
+                                && session == current && latest != saved_position && !paused
+                            {
+                                match backing.borrow_mut().store.put(LAST_POSITION, position.encode()) {
+                                    Ok(()) => saved_position = latest,
+                                    Err(e) => {
+                                        paused = true;
+                                        *errors.lock().unwrap_or_else(|e|e.into_inner()) = Some(format!("Cache write failed; sampling paused: {e}"));
+                                    }
+                                }
+                            }
+                        }
+                        let first = match received {
                             Ok(job) => Some(job),
                             Err(mpsc::RecvTimeoutError::Timeout) => None,
                             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -7510,6 +8322,7 @@ pub mod maps {
                                     }
                                     }
                                 }
+                                latest_position.lock().unwrap_or_else(|e| e.into_inner()).retain(|session, _| *session >= next);
                                 current = next;
                                 configured = wanted.clone();
                                 atlas = None;
@@ -7560,6 +8373,23 @@ pub mod maps {
                         jobs.extend(rx.try_iter().take(7));
                         for job in jobs {
                             let job = match job {
+                                Job::Delete { file, active_world, reply } => {
+                                    let result = (|| {
+                                        let directory = directory.as_ref().ok_or("Persistent cache is unavailable")?;
+                                        let path = super::cache_manager::selected_path(directory, &file)
+                                            .map_err(|e| e.to_string())?;
+                                        if !active_world.is_empty() && container::world_path(directory, &active_world) == path {
+                                            return Err("Cache is in use by another client".into());
+                                        }
+                                        let lease = container::ContainerLease::open_existing(&path)
+                                            .map_err(|e| e.to_string())?;
+                                        let result = std::fs::remove_file(path).map_err(|e| e.to_string());
+                                        drop(lease);
+                                        result
+                                    })();
+                                    let _ = reply.try_send(result);
+                                    continue;
+                                }
                                 Job::Rebuild { world, file, reply } => {
                                     let is_active = configured.as_ref().is_some_and(|b| b.world == world);
                                     let correct_file = directory.as_ref().is_some_and(|d| container::world_path(d,&world).file_name().is_some_and(|n| n == file.as_str()));
@@ -7762,6 +8592,7 @@ pub mod maps {
                     Some("Map worker unavailable; sampling paused".into());
             }
             Self {
+                position,
                 tx: Mutex::new(Some(tx)),
                 worker: Mutex::new(worker),
                 sampler: Mutex::new(sampler),
@@ -7780,6 +8611,13 @@ pub mod maps {
                 paused,
             }
         }
+        pub fn remember_position(&self, session: u64, position: LastPosition) {
+            self.position
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(session, position);
+        }
+
         pub fn configure(&self, session: u64, world: &str, dimension: Dimension, limit_mib: u16) {
             let value = Binding {
                 session,
@@ -7802,6 +8640,7 @@ pub mod maps {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone()
+                .map(|message| super::localize_message(&message))
         }
         pub fn needs_upgrade(&self, world: &str) -> bool {
             self.upgrade
@@ -7810,6 +8649,23 @@ pub mod maps {
                 .as_deref()
                 == Some(world)
         }
+        pub fn delete_cache(
+            &self,
+            file: &str,
+            active_world: &str,
+        ) -> Result<mpsc::Receiver<Result<(), String>>, String> {
+            let (reply, rx) = mpsc::sync_channel(1);
+            let wake = self.wake.lock().unwrap_or_else(|e| e.into_inner());
+            let tx = wake.as_ref().ok_or("Cache worker is unavailable")?;
+            tx.try_send(Job::Delete {
+                file: file.into(),
+                active_world: active_world.into(),
+                reply,
+            })
+            .map_err(|_| "Cache worker is busy; try again".to_owned())?;
+            Ok(rx)
+        }
+
         pub fn rebuild_images(
             &self,
             world: &str,

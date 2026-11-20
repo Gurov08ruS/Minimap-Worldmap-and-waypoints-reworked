@@ -8,6 +8,109 @@ macro_rules! define_tests {
             use super::*;
             use std::sync::atomic::{AtomicU64, Ordering};
 
+            #[test]
+            fn public_sdk_bindings_keep_physical_keys_modifiers_and_unbinding() {
+                let map = Some(("key.keyboard.m", 2));
+                let waypoints = Some(("key.mouse.right", 0));
+                assert_eq!(bound_screen_request("key.keyboard.m", 2, map, waypoints), Some(ScreenRequest::Map));
+                assert_eq!(bound_screen_request("key.keyboard.m", 0, map, waypoints), None);
+                assert_eq!(bound_screen_request("key.keyboard.m", 2 | 16, map, waypoints), Some(ScreenRequest::Map));
+                assert_eq!(bound_screen_request("key.keyboard.n", 2, map, waypoints), None);
+                assert_eq!(bound_screen_request("key.mouse.right", 0, map, waypoints), Some(ScreenRequest::Waypoints));
+                assert_eq!(bound_screen_request("key.keyboard.m", 2, None, waypoints), None);
+                assert_eq!(bound_screen_request("key.mouse.right", 0, map, None), None);
+                assert_eq!(bound_screen_request("key.keyboard.m", 2, map, map), Some(ScreenRequest::Map));
+            }
+
+            #[test]
+            fn public_sdk_lifecycle_coalesces_both_invalidations_without_retaining_hosts() {
+                let events = std::sync::Arc::new(ClientEvents::new());
+                let other = events.clone();
+                std::thread::spawn(move || {
+                    other.resources_reloaded();
+                    other.disconnected();
+                    other.resources_reloaded();
+                }).join().unwrap();
+                assert_eq!(events.take(), PendingClientEvents { disconnected: true, resources_reloaded: true });
+                assert_eq!(events.take(), PendingClientEvents::default());
+                events.resources_reloaded();
+                assert_eq!(events.take(), PendingClientEvents { disconnected: false, resources_reloaded: true });
+            }
+
+            #[test]
+            fn cache_scrollbar_drag_keeps_grab_point_and_reaches_both_ends() {
+                let bar = ListScrollbar::new(42., 238., 5, 100, 37);
+                for grab in [0., 3., bar.thumb_height - 1.] {
+                    assert_eq!(bar.row_at(bar.thumb_top + grab, grab), 37);
+                    assert_eq!(bar.row_at(-100., grab), 0);
+                    assert_eq!(bar.row_at(1000., grab), 95);
+                }
+                let resized = ListScrollbar::new(42., 46., 1, 4, 95);
+                assert_eq!(resized.row_at(resized.thumb_top + 2., 2.), 3);
+                for count in [0, 3, 5] {
+                    let bar = ListScrollbar::new(42., 238., 5, count, 37);
+                    assert_eq!(bar.thumb_height, 238.);
+                    assert_eq!(bar.thumb_top, 42.);
+                    assert_eq!(bar.row_at(1000., 0.), 0);
+                }
+            }
+
+            #[test]
+            fn smooth_list_scrolling_accumulates_sub_row_events_and_clamps() {
+                let mut scroll = ListScroll::default();
+                for _ in 0..9 { scroll.scroll(-0.1, 11); }
+                assert_eq!(scroll.offset(11), 0);
+                scroll.scroll(-0.1, 11);
+                assert_eq!(scroll.offset(11), 1);
+                for _ in 0..10 { scroll.scroll(0.1, 11); }
+                assert_eq!(scroll.offset(11), 0);
+                scroll.scroll(1., 11);
+                scroll.scroll(-0.5, 11);
+                assert_eq!(scroll.offset(11), 0, "outward wheel motion must not accumulate at the edge");
+                scroll.scroll(-0.5, 11);
+                assert_eq!(scroll.offset(11), 1);
+                scroll.scroll(f64::NEG_INFINITY, 11);
+                scroll.scroll(f64::NAN, 11);
+                assert_eq!(scroll.offset(11), 1);
+                scroll.scroll(-f64::MAX, 11);
+                assert_eq!(scroll.offset(11), 11);
+                scroll.scroll(f64::MAX, 11);
+                assert_eq!(scroll.offset(11), 0);
+                scroll.page(true, 3, 11);
+                scroll.page(true, 3, 11);
+                assert_eq!(scroll.offset(11), 6);
+                assert_eq!(scroll.offset(2), 2, "a refreshed or resized list clamps its view");
+                scroll.page(false, 3, 2);
+                assert_eq!(scroll.offset(2), 0);
+                scroll.jump(usize::MAX, 11);
+                assert_eq!(scroll.offset(11), 11);
+                scroll.scroll(-1., 0);
+                assert_eq!(scroll.offset(0), 0);
+            }
+
+            #[test]
+            fn worker_diagnostics_translate_all_supported_languages_without_losing_error_identity() {
+                let mut keys = std::collections::BTreeSet::new();
+                for (english, translations) in MESSAGES {
+                    assert!(keys.insert(*english), "duplicate message: {english}");
+                    assert_eq!(message_for(Language::English, english), *english);
+                    for (language, expected) in [Language::Russian, Language::French, Language::Spanish, Language::German].into_iter().zip(translations) {
+                        assert!(!expected.is_empty());
+                        assert_ne!(expected, english);
+                        assert_eq!(message_for(language, english), *expected);
+                    }
+                }
+                let raw = "Cannot open cache; sampling paused: unsupported container version";
+                for language in [Language::Russian, Language::French, Language::Spanish, Language::German] {
+                    let message = message_for(language, raw);
+                    assert!(!message.contains("unsupported"));
+                    assert!(!message.contains("Cannot open"));
+                    assert!(!message_for(language, "Permission denied (os error 13)").contains("Permission"));
+                    assert!(!message_for(language, "unknown platform diagnostic").contains("platform"));
+                }
+                assert_eq!(message_for(Language::English, raw), raw, "stored diagnostics remain stable for format detection");
+            }
+
             fn read_profile(path: &Path) -> io::Result<(Settings, Vec<Waypoint>)> {
                 read_profile_migration(path).map(|(settings, points, _)| (settings, points))
             }

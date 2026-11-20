@@ -1,15 +1,15 @@
 {
-  "horizon_revision": "0b14f8acfd97fa2c750e42795249dcc981178ca4",
+  "horizon_revision": "0a875da91dbb0fdcb7ba8c42c11341aa229af51a",
   "source_sha256": {
-    "crates/horizon-client-render/src/lod.rs": "c99dc2114019f0f0ddb4e096277d9f495809f6dfbfa73230b722d762f0ea481e",
-    "crates/horizon-client/src/game.rs": "202ccd237af04cb917fbfad811b3de2cb4c466c14d4a515ecb25b7322bafd906",
-    "crates/horizon-client/src/game/native_hooks/base.rs": "53d33c088e9eba7b235f83f4909f767987134e825e92bad9b93b6c633c086489",
-    "crates/horizon-client/src/game/native_hooks/client_services.rs": "59162e1cde13c9f5ebff73a4f362900cbedf83127565df918bf4281db85b5fbb",
+    "crates/horizon-client-render/src/lod.rs": "2bc473c97b5652a1ce7305e0ac0605c14f538831d7a031fec3eb586f7e5b8896",
+    "crates/horizon-client/src/game.rs": "229be0c24910dda7c41176bc626d877062ce6e48dbedfda25c1bdec22909686e",
+    "crates/horizon-client/src/game/native_hooks/base.rs": "474aba738795f5a7dba47c87a0acb4d887e6d72a58571e2634b0ea871554680b",
     "crates/horizon-client/src/game/native_hooks/gui_render_post.rs": "f494f2a3006d24accab291f3b676f9c92a6c94a328faa401713a8229b7690f7a",
-    "crates/horizon-client/src/game/native_hooks/input_key.rs": "abcebfc24b27af523ddce528f253c0c67f2ed1a8ba63fbab6afd6059f10ba655",
     "crates/horizon-client/src/game/native_hooks/render_frame_pre.rs": "1cc3249385b7666bc72df39f6ad4e40e2cfd256db07a7e1b2b1f2a6d09d9c08e",
     "crates/horizon-client/src/game/native_hooks/render_gui_post.rs": "7fc72e25d73e462a1781ab824754e2dc8fc585001407fc5a593e6f2a48e5d10b",
-    "crates/horizon-client/src/game/network/remote/mod.rs": "c8ae92e4469c32f81236fff55f421dedb700956cf860ca7829af446e3a5744fe"
+    "crates/horizon-client/src/game/network/remote/mod.rs": "e9e555a353dc787e271df37a951dd03dbd9098056aa1fddd6cde7e3cc0d5bad3",
+    "crates/horizon-client/src/game/interface/extras.rs": "eb0ca00dd278856404e3aace4e381c74f2ab6d124c9df6822d699e278d5d5167",
+    "crates/horizon-client/src/game/items/potions.rs": "ff56adc254c891aa41918bbd30f26a956a02cb162c724fb4fa63766ab79e897a"
   },
   "horizon_repository": "https://github.com/horizon-rust/horizon",
   "horizon_mixins_repository": "https://github.com/horizon-rust/horizon-mixins",
@@ -18,5 +18,5 @@
   "sdk_package_format": 6,
   "game": "26.3",
   "mixin_schema": 6,
-  "nightly_version": "nightly-2026-11-18-0b14f8a"
+  "nightly_version": "nightly-2026-11-20-0a875da"
 }

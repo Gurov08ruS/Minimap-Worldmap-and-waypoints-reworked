@@ -1,5 +1,156 @@
 # Validation
 
+## 0.7.5 — offline cache manager
+
+Linux, signed SDK `0a875da`, Rust 1.99.1 and launcher 0.2.88.
+The isolated native build `native-0a875da-1cf8a3401a94` compiled all 13 audited
+injections against the pinned export. The original Horizon checkout stayed
+unchanged. Formatting, workspace Clippy with warnings denied and 125 runtime
+tests pass. Three performance cases remain ignored.
+
+The offline regression verifies last-position persistence, saved terrain
+rendering, byte-for-byte preservation during preview and deletion safety.
+The test exercises a second cache, a locked preview, the active-world guard,
+and path traversal rejection. Live GUI, macOS and Windows execution remain
+unverified.
+
+Archive: `target/minimap_worldmap_waypoints_reworked-0.7.5.hmod`,
+386,101 bytes, SHA-256 `6cf3e0b6cec8d947ef1c0abaa72c77221bbd16e6bfd088ceb994a2b73218c1b4`.
+
+## 0.7.4 — partial public SDK migration
+
+Linux / Rust 1.99.1 / launcher 0.2.88, signed SDK and committed source export
+`0a875da91dbb0fdcb7ba8c42c11341aa229af51a`, Mixins schema 6.
+
+- `cargo fmt --all -- --check`, Clippy with warnings denied, workspace tests
+  and whitespace checks pass. Native entrypoint/adapter formatting was also applied.
+- **124 runtime cases pass** standalone and inside the API SDK; three deliberate
+  performance cases remain ignored. New regressions cover binding matching and
+  cross-thread disconnect/reload notification coalescing.
+- `tools/test_template.py`, `tools/horizon.py check/test --horizon ../horizon`
+  and `tools/test_stage.py --horizon ../horizon` pass. Package validation checks
+  that the four retired injections and their helpers stay out of the archive.
+- Real native compilation: `native-0a875da-11b0ad1eebe0`, initial build 36 seconds.
+  All **13 remaining injections** match the plan; payloads match the archive and
+  only planned AST changes occur. The original Horizon checkout is unchanged.
+- Public SDK callbacks now handle bindings, language, disconnect, resource reload
+  and waypoint background blur. No retained host/engine references cross the
+  notification boundary. Existing native frontend functionality remains included.
+- No live GUI, macOS/Windows execution or remote CI run was performed. Compilation
+  and runtime unit tests do not establish visual/input correctness in a live game.
+- This is a partial migration with exact-build compatibility. Outstanding frontend
+  conversions and missing upstream contracts are documented in SDK-MIGRATION.md;
+  compatibility with a later Nightly is not claimed.
+
+Archive: `target/minimap_worldmap_waypoints_reworked-0.7.4.hmod`, 381,069 bytes,
+SHA-256 `a5ad187922213424c4629c1d14715dac8f59009b5567e5095fe27bdcd71add5c`.
+
+## 0.7.3 — Nightly 2026-11-20 SDK port
+
+Linux / Rust 1.99.1 / launcher 0.2.88. Published Nightly and signed SDK:
+`0a875da91dbb0fdcb7ba8c42c11341aa229af51a`, Minecraft 26.3, package format 6,
+Mixins `e59da90` / schema 6. SDK and game indexes were verified through the
+launcher's signed local-mirror route; only committed pinned sources were exported.
+
+- Formatting, Clippy with warnings denied and workspace tests pass.
+- All **122 runtime cases** pass both standalone and inside the new API SDK;
+  three intentionally ignored performance cases remain ignored.
+- `tools/test_template.py`, `tools/horizon.py check/test` and `tools/test_stage.py`
+  pass. All **17 injections** match the plan; compiled payloads match the archive,
+  only planned AST changes occur and original Horizon checkout contents/status
+  remain unchanged.
+- Native result: `native-0a875da-83c7c74d495b`; initial native compilation took 53 seconds.
+- Cache navigation, all five languages, HUD layers and effect-icon fixes from
+  0.7.2 remain included. No live GUI, macOS or Windows run was performed for this
+  port; the updated GitHub workflow has not been executed remotely.
+- The SDK still requires an exact game build for `[native.*]` adapters. This
+  validates this Nightly only, not automatic compatibility with future builds.
+
+Archive: `target/minimap_worldmap_waypoints_reworked-0.7.3.hmod`, 380,862 bytes,
+SHA-256 `2bbdb4f403486e2c1a02f54927a6068487072e0dc66f39ed9fe75d1ecbd2e69d`.
+
+
+## 0.7.2 HUD layers, effects and cache scrollbar — 2026-11-20
+
+Linux, Rust 1.99.1, signed Nightly SDK `5ef7734`, Mixins schema 6.
+
+- Workspace formatting, clippy with warnings denied, tests and diff whitespace checks pass.
+  Runtime: 122 passed, three deliberately ignored; source-audit test also passes.
+- The same 122 runtime cases pass inside the native SDK crate. The scrollbar
+  regression covers preserving different grab points, both ends of the track,
+  resizing/clamped offsets and empty/non-overflowing lists.
+- `tools/test_template.py`, `tools/horizon.py check/test` and `tools/test_stage.py`
+  pass. All 17 injections match the plan; compiled source payloads match the
+  archive; only planned AST changes occur; pinned SDK source hashes are unchanged.
+- Native build: `native-5ef7734-09eea5451d84`, built in the disposable target
+  instance. Player installations and resources were not modified.
+- World waypoint drawing now enters `draw_extras` before corner overlays.
+  Top-right map placement uses an effect-independent corner origin; the same
+  map/footer height offsets effect icons and reserves room before other panels.
+- Live game rendering, macOS/Windows execution and GitHub CI were not verified
+  for these changes.
+
+Archive: `target/minimap_worldmap_waypoints_reworked-0.7.2.hmod`, 380,863 bytes,
+SHA-256 `aa22b5484e3d767bb5c51417e2acf194c31ecef6cd629fc0472f1818e6ba249f`.
+
+## 0.7.2 cache-list and localization fix — 2026-11-20
+
+Linux, Rust 1.99.1, launcher 0.2.86, signed SDK `5ef7734`, Mixins schema 6.
+
+- Workspace formatting, Clippy with warnings denied, workspace tests and
+  `python3 tools/test_template.py` pass.
+- **121 runtime cases pass** in both the standalone library and the exact SDK
+  mod crate; three intentionally ignored performance cases remain ignored.
+- Regression coverage includes fractional smooth-wheel accumulation, boundary
+  handling, non-finite input, paging and catalog resize; all 15 mixed local,
+  server and legacy fixtures are reachable with three visible rows. Discovery
+  leaves every fixture file byte-for-byte unchanged.
+- Diagnostic translations cover all five supported languages, nested cache
+  errors and OS error suffixes without changing the stored diagnostic identity.
+- `tools/horizon.py check`, `tools/test_stage.py` and `tools/horizon.py test` pass:
+  all 15 injections match the plan, payloads match the installed archive, only
+  planned AST changes occur and the original Horizon checkout remains unchanged.
+- Native build: `native-5ef7734-84eb520536a9` (initial compilation: 87 seconds).
+- `examples/sdk_fixture.rs` prepares 14 cache-list entries only inside the
+  disposable target instance. Live GUI validation was not completed: managed
+  launch requires Launcher Play, and this isolated launcher home has no signed-in
+  Microsoft account. Player accounts and resources were left unchanged.
+- macOS/Windows execution and GitHub CI remain unverified for this fix.
+
+Archive: `target/minimap_worldmap_waypoints_reworked-0.7.2.hmod`, 378,645 bytes,
+SHA-256 `ca93da3af9f45c8bb9702720444a6b6d39244dd0b2ba6d690dbb771ddeafdd12`.
+
+
+## 0.7.1 SDK port — 2026-11-20
+
+Target: published Nightly `2026-11-19 · 5ef7734fdd854add5efd6817178be3c988d8d050`,
+Minecraft 26.3, Rust 1.99.1, package format 6, Mixins `e59da90` / schema 6.
+
+- Standalone workspace: fmt, clippy with warnings denied, and tests pass
+  (118 runtime cases, three intentionally ignored cases, plus the audit tests).
+- The same 118 runtime cases pass against the new build's fetched API SDK.
+- `python3 tools/test_template.py`: deterministic source archive, exact payloads,
+  five language catalogs and isolated install/legacy-backup fixture pass.
+- Full installed `.hmod` native build passes with launcher 0.2.86, using the
+  signed SDK's local-mirror route (all three SDK archive SHA-256 values verified).
+  Result: `native-5ef7734-8434ff4c9a53`; initial compilation took 93 seconds.
+- `python3 tools/horizon.py check`, `python3 tools/test_stage.py` and
+  `python3 tools/horizon.py test` pass against the pinned committed source export.
+  All 15 Mixins injections match the plan; source payloads match the archive and
+  only planned AST changes occur. The original Horizon checkout is unchanged.
+- Clean-project `cargo horizon-mod hooks minimap` fetches and verifies the new
+  API SDK from the official signed archives through the local mirror route.
+- No live game, macOS or Windows execution has been performed for this port.
+
+The API-test tooling now checks both the SDK index commit and its completed-build
+stamp before reusing generated SDK sources, instead of retaining the previous
+pin's API. SDK changes are fetched by the official package tool.
+
+Archive: `target/minimap_worldmap_waypoints_reworked-0.7.1.hmod`, 371,178 bytes,
+SHA-256 `6db009a832bdd13d790f6fd5345ddab631c85dee4d40669d4956e6bdfd2d2130`.
+CI was updated for launcher 0.2.87 but has not been executed on GitHub for this port.
+
+
 ## 0.7.0 SDK migration — 2026-11-18
 
 Local Linux / Rust 1.99.1, signed SDK `0b14f8a`, Mixins `e59da90`, launcher

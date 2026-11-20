@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! Two Cyrillic markers for the disposable SDK-test world; never a player directory.
+//! Cyrillic markers and cache-list pages for the disposable SDK-test instance.
 use minimap_worldmap_waypoints_reworked as rt;
 use std::{fs, path::PathBuf};
 fn main() {
@@ -18,6 +18,16 @@ fn main() {
         directory.starts_with(target),
         "fixture must stay inside target/"
     );
+    for index in 0..14 {
+        let world = if index % 2 == 0 {
+            format!("save:Локальный мир ({index})")
+        } else {
+            format!("server:fixture-{index}.example")
+        };
+        let mut store = rt::container::Store::open(&directory.join("cache"), &world)
+            .expect("isolated cache fixture");
+        store.commit().unwrap();
+    }
     let controller = rt::Controller::open(directory.clone());
     for (x, name, color) in [(92, "База", 0x5aa9ff), (96, "Бункер", 0x5eaaff)] {
         controller.add_waypoint(rt::Waypoint {
@@ -50,5 +60,5 @@ fn main() {
         )
         .unwrap();
     }
-    println!("Prepared База/Бункер in the isolated SDK-test world");
+    println!("Prepared База/Бункер and 14 cache-list fixtures in the isolated SDK instance");
 }

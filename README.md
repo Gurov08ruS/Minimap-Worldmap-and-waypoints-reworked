@@ -1,14 +1,65 @@
 # Minimap, Worldmap and waypoints reworked
 
 A native Horizon mod by daniliammo, continued as [Gurov08ruS](https://github.com/Gurov08ruS).
-Version **0.7.0** uses Horizon's signed native SDK and the modern
+Version **0.7.5** uses Horizon's signed native SDK and the modern
 flat **`.hmod`** format. It includes the cache manager, LOD colour fixes and
 configurable two-letter waypoint markers. Earlier **0.6.1** packages use the legacy `.hnmod` format for the older game.
-Use the new `.hmod` release with the current launcher. See [CHANGELOG.md](CHANGELOG.md).
+Use the current `.hmod` source package with the current launcher. See [CHANGELOG.md](CHANGELOG.md).
 
 <p align="center">
   <img src="assets/icon.png" width="128" alt="Minimap, Worldmap and waypoints reworked mod icon">
 </p>
+
+## New in 0.7.5
+
+Open **Map caches** from Horizon's main menu. Select a cache and choose **View**
+to pan and zoom its saved surface and distant terrain, with tabs for saved
+dimensions. A grey marker shows the player's last recorded position, including
+the coordinates and dimension. Older caches get a marker after playing that
+world with this version.
+
+Choose **Delete** and confirm to remove the selected terrain cache. The current
+world's cache and files in use are protected. Worlds and waypoints are stored
+separately. Both actions are available in the existing in-world cache manager
+for other caches.
+
+## New in 0.7.4
+
+Begins a feature-preserving migration to public SDK interfaces: key handling,
+client language, disconnect/resource-reload notifications and waypoint background
+blur now use public hooks and services. Four native injections were removed
+(13 remain). Existing maps, LOD, caches, waypoints and HUD behaviour are retained.
+
+This is **not yet an API-only mod**: remaining native adapters still require
+Nightly **2026-11-20 · `0a875da`**. Removing the revision pin would misrepresent
+compatibility. [SDK-MIGRATION.md](SDK-MIGRATION.md) records the implemented
+boundary, remaining frontend work and concrete upstream API requirements for
+removing it without losing features.
+
+## New in 0.7.3
+
+Targets the signed SDK for Nightly **2026-11-20 · `0a875da`** with launcher
+**0.2.88**. This replaces the 19 November build requirement and preserves the
+cache-manager, localization, HUD-layer and effect-icon fixes from 0.7.2.
+
+## New in 0.7.2
+
+3D waypoint markers draw below the minimap. The top-right minimap stays fixed
+when potion effects appear or disappear; effect icons sit below the map and its
+coordinate lines. Other corner panels stack below both.
+
+The cache manager supports smooth mouse wheels and touchpads, a draggable
+scrollbar that stays visible and preserves the grab point, previous/next page
+buttons, arrow keys, Page Up/Down and Home/End.
+Its range counter shows where you are in the complete list, including local
+worlds, servers and legacy files. Rows identify local worlds and servers in the
+game language. Waypoint and chunk-information lists also retain fractional wheel
+movements instead of losing them.
+
+Cache operations, compatibility/read/write errors and memory/distance units
+follow English, Russian, French, Spanish or German, including the supported
+regional variants. Worker diagnostics are translated when displayed while their
+stable internal identities remain available for format detection.
 
 ## New in 0.7.0
 
@@ -84,16 +135,16 @@ The full changes since 0.6.0 are listed in [CHANGELOG.md](CHANGELOG.md).
 
 ## Install
 
-Requires Horizon Nightly **2026-11-18 · `0b14f8a`**, Minecraft **26.3** and a
-launcher with the signed-SDK native route (tested with **0.2.78**).
+Requires Horizon Nightly **2026-11-20 · `0a875da`**, Minecraft **26.3** and a
+launcher with the signed-SDK native route (**0.2.88** recommended).
 
-Download the `.hmod` from [release 0.7.0](https://github.com/Gurov08ruS/Minimap-Worldmap-and-waypoints-reworked/releases/tag/v0.7.0), or build the same source package:
+Build the current `.hmod` source package:
 
 ```bash
 python3 tools/package.py
 ```
 
-Import `target/minimap_worldmap_waypoints_reworked-0.7.0.hmod` in the launcher,
+Import `target/minimap_worldmap_waypoints_reworked-0.7.5.hmod` in the launcher,
 enable it for the chosen instance and build that instance's native mods. The
 launcher obtains the matching signed SDK and compiles the mod and its function
 copies; it does not rebuild Horizon. A `.hnmod` cannot be converted by renaming
@@ -195,7 +246,7 @@ language in its language settings. Saved waypoint names are preserved as entered
   **Show on map** to open its dimension and center the map on it without
   teleporting.
 - Waypoints are saved with the preferences (newest 64 per world/server). In the
-  3D world they appear above the HUD as coloured first-letter markers (or a
+  3D world they appear below the minimap and corner panels as coloured first-letter markers (or a
   skull for deaths), through walls and only in their own dimension. The marker
   label is configurable: **3D marker** chooses *letter + distance* (default),
   *letter only*, or *name + distance*. **3D labels only on hover** (default on)
@@ -392,14 +443,22 @@ renderer. The legacy small-image path still uses the shared native RGBA slot.
 ## Compatibility
 
 - Minecraft Java Edition **26.3**.
-- Signed Horizon SDK / Nightly **2026-11-18**, commit
-  `0b14f8acfd97fa2c750e42795249dcc981178ca4`.
+- Signed Horizon SDK / Nightly **2026-11-20**, commit
+  `0a875da91dbb0fdcb7ba8c42c11341aa229af51a`.
 - SDK Rust **1.99.1**, package format **6**; Horizon Mixins
   `e59da9094f0c2fdda6c627fe9eff22dec6a906f0`, plan schema **6**.
 
 The pins and source hashes are in [compatibility.json](compatibility.json).
-Other game revisions require a deliberate port. The shared runtime and game
-adapters use portable APIs; the registration path decoder is gated for Unix and
+The signed SDK is already the build route: the launcher compiles the mod and
+Mixins function copies against the prebuilt game. It does not rebuild Horizon.
+This mod uses `[native.module]` and `[native.mixin]` to access loaded chunk/LOD
+snapshots and the full-screen map render path. Horizon therefore requires an
+exact game commit; API surface compatibility (`uses.json` / `fits`) cannot make
+these internal adapters portable across builds. Other game revisions require a
+validated port, even when the public API changes only additively. See Horizon's
+[SDK compatibility rules](https://github.com/horizon-rust/horizon/blob/0a875da91dbb0fdcb7ba8c42c11341aa229af51a/docs/modding/src/how-to/native-mods/14-checking-a-mod-against-a-build.md).
+
+The shared runtime and game adapters use portable APIs; the registration path decoder is gated for Unix and
 Windows, preserving non-Unicode paths. Linux was exercised with the installed
 Nightly; macOS/Windows execution and combinations with other mods remain
 unverified. See [VALIDATION.md](VALIDATION.md).

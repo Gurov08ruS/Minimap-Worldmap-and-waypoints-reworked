@@ -38,7 +38,9 @@ def executable(explicit, variable, candidates, command):
 
 
 def launcher(explicit=None):
-    return executable(explicit, 'HORIZON_LAUNCHER', [ROOT / 'target/modern-launcher/squashfs-root/usr/bin/horizon-launcher',
+    return executable(explicit, 'HORIZON_LAUNCHER', [ROOT / 'target/launcher-0.2.88/horizon-launcher',
+        ROOT / 'target/installed-launcher/squashfs-root/usr/bin/horizon-launcher',
+        ROOT / 'target/modern-launcher/squashfs-root/usr/bin/horizon-launcher',
         ROOT / 'target/ci/launcher/squashfs-root/usr/bin/horizon-launcher'], 'horizon-launcher')
 
 
@@ -71,15 +73,15 @@ def sdk_environment(args):
     return home, game, env
 
 
-def run(command, env=None, log=None):
+def run(command, env=None, log=None, cwd=ROOT):
     if log:
         with Path(log).open('w') as output:
-            result = subprocess.run([str(x) for x in command], cwd=ROOT, env=env, stdout=output, stderr=subprocess.STDOUT)
+            result = subprocess.run([str(x) for x in command], cwd=cwd, env=env, stdout=output, stderr=subprocess.STDOUT)
         if result.returncode:
             print(Path(log).read_text()[-6000:], file=sys.stderr)
             raise ValueError(f'command failed ({result.returncode}); see {log}')
     else:
-        subprocess.run([str(x) for x in command], cwd=ROOT, env=env, check=True)
+        subprocess.run([str(x) for x in command], cwd=cwd, env=env, check=True)
 
 
 def checkout_snapshot(path):
@@ -207,15 +209,27 @@ def main():
         run(['cargo', 'test', '--workspace', '--locked', '--offline'], log=ROOT / 'target/sdk-runtime-tests.log')
         # The same runtime and test macros also compile inside the native SDK crate.
         sdk = Path(record['project']) / '.horizon/sdk'
-        if not sdk.exists():
-            template_sdk = ROOT / 'target/modern-port/.horizon/sdk'
-            if template_sdk.is_dir():
-                shutil.copytree(template_sdk, sdk, copy_function=copy_link)
-            else:
-                run([mod_tool(), 'new', str(ROOT / 'target/sdk-bootstrap'), '--template', 'native', '--horizon', PIN], log=ROOT / 'target/sdk-bootstrap.log')
-                shutil.copytree(ROOT / 'target/sdk-bootstrap/.horizon/sdk', sdk, copy_function=copy_link)
+        def matches_pin(folder):
+            identity = folder / 'sdk.json'
+            return (identity.is_file() and json.loads(identity.read_text())['build']['commit'] == PIN
+                    and (folder / 'build').is_file() and (folder / 'build').read_text().strip() == PIN
+                    and (folder / 'api/crates/horizon-mod-api/Cargo.toml').is_file())
+
+        if not matches_pin(sdk):
+            bootstrap = ROOT / 'target' / f'sdk-bootstrap-{PIN[:7]}'
+            template_sdk = bootstrap / '.horizon/sdk'
+            if not matches_pin(template_sdk):
+                if not (bootstrap / 'horizon-mod.toml').exists():
+                    run([mod_tool(), 'new', str(bootstrap), '--template', 'native', '--horizon', PIN], log=ROOT / 'target/sdk-bootstrap.log')
+                # `new` writes the template; an SDK query verifies and fetches it.
+                run([mod_tool(), 'hooks', 'minimap'], cwd=bootstrap, log=ROOT / 'target/sdk-bootstrap-fetch.log')
+            if not matches_pin(template_sdk):
+                raise ValueError('fetched API SDK does not match the pinned Horizon build')
+            if sdk.exists():
+                shutil.rmtree(sdk)
+            shutil.copytree(template_sdk, sdk, copy_function=copy_link)
         run(['cargo', 'test', '--manifest-path', str(Path(record['project']) / 'Cargo.toml'), '--lib'],
-            dict(os.environ, CARGO_TARGET_DIR=str(ROOT / 'target/sdk-api-tests')), ROOT / 'target/sdk-api-tests.log')
+            dict(os.environ, RUSTUP_TOOLCHAIN=COMPAT['sdk_rust'], CARGO_TARGET_DIR=str(ROOT / 'target/sdk-api-tests')), ROOT / 'target/sdk-api-tests.log')
         record['sdk_crate_tests'] = True
     print(json.dumps(record, indent=2))
 

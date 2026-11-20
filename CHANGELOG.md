@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.7.5 — 2026-11-20, offline cache viewer
+
+- Open Map caches from the main menu and preview saved terrain with pan, zoom and dimension tabs.
+- Persist the last observed player position in the terrain container and mark it in grey in the offline viewer.
+- Delete the selected idle cache after confirmation. Previewing uses a read-only lease and leaves the file intact.
+
+## 0.7.4 — 2026-11-20, public SDK migration
+
+- Move map/waypoint bindings, mouse-mapping consumption and client language to public SDK services.
+- Move disconnect, resource reload and waypoint background blur to public hooks.
+- Remove four native injections and two now-unused source-file hash constraints.
+- Keep all map features and the honest exact-build requirement for the 13 remaining injections.
+- Document the remaining adapter work and proposed upstream API contracts in SDK-MIGRATION.md.
+
+## 0.7.3 — 2026-11-20, Nightly SDK update
+
+- Target Nightly `2026-11-20 · 0a875da` and its exact signed SDK.
+- Update committed source hashes and validate the current cache, localization,
+  minimap/HUD-layer and effect-icon adapters against the new build.
+- Use launcher 0.2.88 locally and in CI. Native adapters continue to require
+  an exact Horizon revision under the SDK compatibility contract.
+
+## 0.7.2 — 2026-11-20, cache navigation and localization
+
+- Draw 3D waypoint markers below the minimap and other corner overlays.
+- Keep the top-right minimap fixed when effects change; draw effect icons below
+  the map and its coordinate footer, reserving both before other corner panels.
+- Keep the cache scrollbar visible, highlight it on hover/drag and preserve the
+  grab point while dragging its thumb.
+- Accumulate smooth wheel events in cache, waypoint and information lists.
+- Add cache pages, keyboard navigation, a draggable scrollbar and a range counter.
+- Identify local-world and server caches explicitly, retaining all discovered files.
+- Localize cache diagnostics and display units for all five supported languages.
+- Cover mixed local/server/legacy catalogs and three-row pagination with regression tests.
+
+## 0.7.1 — 2026-11-20, current Nightly SDK
+
+- Target the signed SDK for Nightly `2026-11-19 · 5ef7734` (Minecraft 26.3).
+- Keep exact-build compatibility for the Mixins adapters, as required by Horizon.
+- Verify the API SDK's commit and completed-fetch stamp before reusing it in tests;
+  fetch a matching SDK through the official tool after a pin change.
+- Update CI to launcher 0.2.87 and derive the archived Nightly tag from the pin.
+
 ## 0.7.0 — 2026-11-18, native SDK migration
 
 - Port to the signed native SDK for Nightly `0b14f8a` / Rust 1.99.1 and the flat

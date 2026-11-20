@@ -39,6 +39,51 @@ macro_rules! define_tests {
                 let keys=reopened.backing.as_ref().unwrap().borrow().store.query(1,2,0,[0,0,256,256],8);assert_eq!(keys,vec![lod_record(d,key)]);
             }
             #[test]
+            fn offline_preview_reads_last_position_and_terrain_and_blocks_deletion_until_closed() {
+                let dir = CacheDir::new("offline-preview");
+                let world = "save:offline";
+                let other = "server:keep";
+                let dimension = Dimension::Nether;
+                let at = LastPosition { dimension, block: [-2, 72, 4] };
+                let service = Service::with_directory(Some(dir.0.clone()));
+                service.reset(1);
+                service.configure(1, world, dimension, 16);
+                service.remember_position(1, at);
+                let path = container::world_path(&dir.0, world);
+                let file = path.file_name().unwrap().to_str().unwrap();
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while !path.exists() {
+                    assert!(Instant::now() < deadline);
+                    thread::sleep(Duration::from_millis(5));
+                }
+                service.shutdown();
+                {
+                    let mut cache = Cache::open(&dir.0, world, 16 * 1024 * 1024).unwrap();
+                    save_chunk(&mut cache, dimension, Layer::Surface, [-1, 0], saved_tile());
+                    cache.flush().unwrap();
+                }
+                drop(Store::open(&dir.0, other).unwrap());
+                let before = std::fs::read(&path).unwrap();
+                let preview = Preview::open(&dir.0, file, world).unwrap();
+                assert_eq!(preview.position, Some(at));
+                assert_eq!(preview.dimensions, vec![(dimension, [-2., 4.])]);
+                let mut v = view(dimension);
+                v.center = [-2., 4.];
+                assert!(preview.render(v).known > 0);
+                let service = Service::with_directory(Some(dir.0.clone()));
+                let delete = |file: &str, active: &str| service.delete_cache(file, active)
+                    .unwrap().recv_timeout(Duration::from_secs(5)).unwrap();
+                assert!(delete(file, "").is_err());
+                drop(preview);
+                assert_eq!(std::fs::read(&path).unwrap(), before);
+                assert!(delete(file, world).is_err());
+                assert!(delete("../outside.mwwr", "").is_err());
+                delete(file, "").unwrap();
+                assert!(!path.exists());
+                assert!(container::world_path(&dir.0, other).exists());
+                service.shutdown();
+            }
+            #[test]
             fn manager_rebuild_preserves_canonical_records_and_resumes_on_reopen() {
                 let dir=CacheDir::new("manager-rebuild");let world="save:manager";let d=Dimension::Overworld;let v=view(d);
                 {let mut cache=Cache::open(&dir.0,world,16*1024*1024).unwrap();save_chunk(&mut cache,d,Layer::Surface,[0,0],saved_tile());finish_overviews(&mut cache,&v);cache.flush().unwrap();}
