@@ -150,12 +150,17 @@ macro_rules! define_tests {
                     store.put([1, 0, 0, 0, 0, 0], vec![index as u8]).unwrap();
                     store.commit().unwrap();
                     let path = world_path(&dir.0, &world);
+                    drop(store);
                     originals.insert(path.clone(), std::fs::read(path).unwrap());
                 }
                 let legacy = dir.0.join("00000000000000000000000000000000.mwwr");
                 std::fs::write(&legacy, b"old cache").unwrap();
                 originals.insert(legacy.clone(), std::fs::read(&legacy).unwrap());
+                let active =
+                    ContainerLease::open_existing(&world_path(&dir.0, "server:server-1.example"))
+                        .unwrap();
                 let list = super::super::cache_manager::scan(&dir.0).unwrap();
+                drop(active);
                 assert_eq!(list.entries.len(), 15);
                 assert_eq!(
                     list.entries
@@ -698,14 +703,34 @@ macro_rules! define_tests {
                 drop(owner); // Simulate an abrupt owner death, without unlock/flush.
                 reader.join().unwrap();
                 let recovered = ContainerLease::open_existing(&path).unwrap();
-                assert_eq!(std::fs::read(&path).unwrap(), b"unchanged sentinel");
                 drop(recovered);
+                assert_eq!(std::fs::read(&path).unwrap(), b"unchanged sentinel");
                 assert!(matches!(
                     ContainerLease::open_existing(&dir.join("missing")),
                     Err(LeaseError::Io(_))
                 ));
                 assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
                 std::fs::remove_dir_all(dir).unwrap();
+            }
+
+            #[cfg(windows)]
+            #[test]
+            fn payload_lease_conflicts_with_legacy_whole_file_locks() {
+                let dir = TestDir::new("legacy-whole-file-lock");
+                let path = world_path(&dir.0, "save:legacy");
+                let store = Store::open(&dir.0, "save:legacy").unwrap();
+                let legacy = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&path)
+                    .unwrap();
+                assert!(matches!(legacy.try_lock(), Err(TryLockError::WouldBlock)));
+                drop(store);
+                legacy.try_lock().unwrap();
+                assert!(matches!(
+                    ContainerLease::open_existing(&path),
+                    Err(LeaseError::Busy)
+                ));
             }
         }
     };

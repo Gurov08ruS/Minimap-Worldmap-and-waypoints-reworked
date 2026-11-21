@@ -177,8 +177,10 @@ The full changes since 0.6.0 are listed in [CHANGELOG.md](CHANGELOG.md).
 
 ## Install
 
-Requires Horizon Nightly **2026-11-20 · `0a875da`**, Minecraft **26.3** and a
-launcher with the signed-SDK native route (**0.2.88** recommended).
+This port requires Horizon Nightly **2026-11-21 · `8f83e5c`**, Minecraft
+**26.3** and a launcher with the signed-SDK native route.
+Select **简体中文 (中国)** in Horizon's language options to use the maps,
+waypoint manager, cache screens and mod settings in Simplified Chinese.
 
 Build the current `.hmod` source package:
 
@@ -213,11 +215,10 @@ see [SIGNING.md](SIGNING.md). Legacy 0.6.1 artifacts remain available unchanged.
 
 ## Language
 
-The interface follows the game language: Russian (`ru_*`), French (`fr_*`),
-Spanish (`es_*`) and German (`de_*`) use their respective translations, including regional variants.
-All English variants (`en_*`, including Canadian, British, US and Australian
-English) share the English translation. Other languages fall back to English. Change the game
-language in its language settings. Saved waypoint names are preserved as entered.
+The interface follows the game language. English (`en_*`), Russian (`ru_*`),
+French (`fr_*`), Spanish (`es_*`), German (`de_*`) and Simplified Chinese
+(`zh_cn` or `zh-Hans`) are supported. Other languages fall back to English.
+Saved waypoint names are preserved as entered.
 
 ## Controls
 
@@ -485,8 +486,8 @@ renderer. The legacy small-image path still uses the shared native RGBA slot.
 ## Compatibility
 
 - Minecraft Java Edition **26.3**.
-- Signed Horizon SDK / Nightly **2026-11-20**, commit
-  `0a875da91dbb0fdcb7ba8c42c11341aa229af51a`.
+- Signed Horizon SDK / Nightly **2026-11-21**, commit
+  `8f83e5c85ae3b9a117f742e8d91170c5c9080a06`.
 - SDK Rust **1.99.1**, package format **6**; Horizon Mixins
   `e59da9094f0c2fdda6c627fe9eff22dec6a906f0`, plan schema **6**.
 
@@ -498,7 +499,7 @@ snapshots and the full-screen map render path. Horizon therefore requires an
 exact game commit; API surface compatibility (`uses.json` / `fits`) cannot make
 these internal adapters portable across builds. Other game revisions require a
 validated port, even when the public API changes only additively. See Horizon's
-[SDK compatibility rules](https://github.com/horizon-rust/horizon/blob/0a875da91dbb0fdcb7ba8c42c11341aa229af51a/docs/modding/src/how-to/native-mods/14-checking-a-mod-against-a-build.md).
+[SDK compatibility rules](https://github.com/horizon-rust/horizon/blob/8f83e5c85ae3b9a117f742e8d91170c5c9080a06/docs/modding/src/how-to/native-mods/14-checking-a-mod-against-a-build.md).
 
 The shared runtime and game adapters use portable APIs; the registration path decoder is gated for Unix and
 Windows, preserving non-Unicode paths. Linux was exercised with the installed
