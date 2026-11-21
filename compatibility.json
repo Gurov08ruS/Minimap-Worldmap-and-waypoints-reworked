@@ -1,13 +1,13 @@
 {
-  "horizon_revision": "0a875da91dbb0fdcb7ba8c42c11341aa229af51a",
+  "horizon_revision": "8f83e5c85ae3b9a117f742e8d91170c5c9080a06",
   "source_sha256": {
-    "crates/horizon-client-render/src/lod.rs": "2bc473c97b5652a1ce7305e0ac0605c14f538831d7a031fec3eb586f7e5b8896",
-    "crates/horizon-client/src/game.rs": "229be0c24910dda7c41176bc626d877062ce6e48dbedfda25c1bdec22909686e",
-    "crates/horizon-client/src/game/native_hooks/base.rs": "474aba738795f5a7dba47c87a0acb4d887e6d72a58571e2634b0ea871554680b",
+    "crates/horizon-client-render/src/lod.rs": "423cb0c1d192f452e18ca4de2fa73b0fa12809492dfc5a65ea3850ae444e4603",
+    "crates/horizon-client/src/game.rs": "4b5c835c32a0ca3e7f355bc76b72f248e09de578614379415b466f616764a5b5",
+    "crates/horizon-client/src/game/native_hooks/base.rs": "0b42247af9ccca63dabecbe6fcad9d42f0b56d4a7bce1f32539b8a7554c91c91",
     "crates/horizon-client/src/game/native_hooks/gui_render_post.rs": "f494f2a3006d24accab291f3b676f9c92a6c94a328faa401713a8229b7690f7a",
     "crates/horizon-client/src/game/native_hooks/render_frame_pre.rs": "1cc3249385b7666bc72df39f6ad4e40e2cfd256db07a7e1b2b1f2a6d09d9c08e",
     "crates/horizon-client/src/game/native_hooks/render_gui_post.rs": "7fc72e25d73e462a1781ab824754e2dc8fc585001407fc5a593e6f2a48e5d10b",
-    "crates/horizon-client/src/game/network/remote/mod.rs": "e9e555a353dc787e271df37a951dd03dbd9098056aa1fddd6cde7e3cc0d5bad3",
+    "crates/horizon-client/src/game/network/remote/mod.rs": "1b76a08f2d710c3ab93c590aef4da0e8b1d47634ee340180d5a364fb2a64d60f",
     "crates/horizon-client/src/game/interface/extras.rs": "eb0ca00dd278856404e3aace4e381c74f2ab6d124c9df6822d699e278d5d5167",
     "crates/horizon-client/src/game/items/potions.rs": "ff56adc254c891aa41918bbd30f26a956a02cb162c724fb4fa63766ab79e897a",
     "crates/horizon-client/src/game/interface/pad_menu.rs": "b886b3cbd970bd9e235253e307529e5596cfa768e246b902543800c1f0777c5b",
@@ -21,5 +21,5 @@
   "sdk_package_format": 6,
   "game": "26.3",
   "mixin_schema": 6,
-  "nightly_version": "nightly-2026-11-20-0a875da"
+  "nightly_version": "nightly-2026-11-21-8f83e5c"
 }

@@ -1,5 +1,22 @@
 # Validation
 
+## 0.7.9 — Horizon `8f83e5c` and Simplified Chinese
+
+Windows, signed Horizon SDK `8f83e5c`, Rust 1.99.1 and Vulkan. The launcher
+built and selected `native-8f83e5c-fd6027b71af4`. The packaged source, all
+17 planned injections and the original SDK source hashes passed the audit.
+Formatting, Clippy and the package template passed. The standalone and native
+SDK suites each passed 133 runtime tests with three manual benchmarks ignored.
+
+The main instance reached the title screen and opened the Chinese mod settings.
+In a separate single-player world on the same build, the minimap followed the
+player, the world map zoomed and panned, and the Chinese waypoint `森林营地`
+displayed on the map and reloaded after restarting the client. The cache
+manager listed compatible caches while the current world held its write lease.
+
+Archive `target/minimap_worldmap_waypoints_reworked-0.7.9.hmod` (409,444 bytes),
+SHA-256 `ce97dc2b9a910d44a803993673abd1d413aad214658587fd8634492c5ab91cb8`.
+
 ## 0.7.9 — progressive map loading and colour icons
 
 Linux, signed SDK `0a875da`, Rust 1.99.1 and launcher 0.2.88.

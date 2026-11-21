@@ -140,11 +140,13 @@ pub enum Language {
     French,
     Spanish,
     German,
+    SimplifiedChinese,
 }
 
 impl Language {
     pub fn from_code(code: &str) -> Self {
-        let prefix = code.split(['_', '-']).next().unwrap_or_default();
+        let mut subtags = code.split(['_', '-']);
+        let prefix = subtags.next().unwrap_or_default();
         if prefix.eq_ignore_ascii_case("ru") {
             Self::Russian
         } else if prefix.eq_ignore_ascii_case("fr") {
@@ -153,6 +155,12 @@ impl Language {
             Self::Spanish
         } else if prefix.eq_ignore_ascii_case("de") {
             Self::German
+        } else if prefix.eq_ignore_ascii_case("zh")
+            && subtags.next().is_some_and(|tag| {
+                tag.eq_ignore_ascii_case("cn") || tag.eq_ignore_ascii_case("hans")
+            })
+        {
+            Self::SimplifiedChinese
         } else {
             Self::English
         }
@@ -171,6 +179,7 @@ pub fn language() -> Language {
         2 => Language::French,
         3 => Language::Spanish,
         4 => Language::German,
+        5 => Language::SimplifiedChinese,
         _ => Language::English,
     }
 }
@@ -181,6 +190,7 @@ pub fn tr(
     french: &'static str,
     spanish: &'static str,
     german: &'static str,
+    simplified_chinese: &'static str,
 ) -> &'static str {
     match language() {
         Language::English => english,
@@ -188,6 +198,7 @@ pub fn tr(
         Language::French => french,
         Language::Spanish => spanish,
         Language::German => german,
+        Language::SimplifiedChinese => simplified_chinese,
     }
 }
 
@@ -275,7 +286,7 @@ impl ListScrollbar {
 
 // Keep diagnostic identities in English for format detection and logs. Translate
 // at the UI boundary, so changing the game language also updates worker notices.
-const MESSAGES: &[(&str, [&str; 4])] = &[
+const MESSAGES: &[(&str, [&str; 5])] = &[
     (
         "Settings worker stopped",
         [
@@ -283,6 +294,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Le traitement des réglages est arrêté",
             "El proceso de ajustes se ha detenido",
             "Die Einstellungsverarbeitung wurde beendet",
+            "设置处理已停止",
         ],
     ),
     (
@@ -292,6 +304,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Le fichier des réglages dépasse 16 Mio",
             "El archivo de ajustes supera los 16 MiB",
             "Die Einstellungsdatei überschreitet 16 MiB",
+            "设置文件超过 16 MiB",
         ],
     ),
     (
@@ -301,11 +314,18 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Dossier des réglages indisponible",
             "La carpeta de ajustes no está disponible",
             "Einstellungsordner nicht verfügbar",
+            "设置目录不可用",
         ],
     ),
     (
         "Save",
-        ["Сохранение", "Enregistrement", "Guardado", "Speichern"],
+        [
+            "Сохранение",
+            "Enregistrement",
+            "Guardado",
+            "Speichern",
+            "保存",
+        ],
     ),
     (
         "Cache catalog worker failed",
@@ -314,6 +334,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Impossible de charger la liste des caches",
             "No se pudo cargar la lista de cachés",
             "Die Cache-Liste konnte nicht geladen werden",
+            "加载缓存列表失败",
         ],
     ),
     (
@@ -323,6 +344,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Échec de la collecte de la carte ; collecte suspendue",
             "Error al recopilar el mapa; recopilación en pausa",
             "Kartenerfassung fehlgeschlagen; Erfassung angehalten",
+            "地图采样失败，已暂停",
         ],
     ),
     (
@@ -332,6 +354,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Traitement de la carte indisponible ; collecte suspendue",
             "El proceso del mapa no está disponible; recopilación en pausa",
             "Kartenverarbeitung nicht verfügbar; Erfassung angehalten",
+            "地图处理不可用，采样已暂停",
         ],
     ),
     (
@@ -341,6 +364,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Échec d’écriture du cache ; collecte suspendue",
             "Error al escribir la caché; recopilación en pausa",
             "Cache-Schreibfehler; Erfassung angehalten",
+            "写入缓存失败，采样已暂停",
         ],
     ),
     (
@@ -350,6 +374,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Impossible d’ouvrir le cache ; collecte suspendue",
             "No se pudo abrir la caché; recopilación en pausa",
             "Cache kann nicht geöffnet werden; Erfassung angehalten",
+            "无法打开缓存，采样已暂停",
         ],
     ),
     (
@@ -359,6 +384,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Monde inconnu ; carte temporaire en mémoire uniquement",
             "Mundo desconocido; mapa temporal solo en memoria",
             "Welt unbekannt; temporäre Karte nur im Arbeitsspeicher",
+            "无法识别世界，仅使用临时内存地图",
         ],
     ),
     (
@@ -368,6 +394,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Cache utilisé par un autre client ; carte temporaire en mémoire uniquement",
             "Otro cliente usa la caché; mapa temporal solo en memoria",
             "Cache von anderem Client verwendet; temporäre Karte nur im Arbeitsspeicher",
+            "缓存正被另一客户端使用，仅使用临时内存地图",
         ],
     ),
     (
@@ -377,6 +404,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Ouvrez le monde de ce cache avant de reconstruire son ancien fichier",
             "Abre el mundo de esta caché antes de reconstruir su archivo antiguo",
             "Vor dem Neuaufbau der alten Datei die zugehörige Welt öffnen",
+            "请先进入对应世界，再重建旧版缓存",
         ],
     ),
     (
@@ -386,6 +414,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Écriture du cache suspendue ; corrigez d’abord l’erreur d’écriture",
             "La escritura de caché está en pausa; resuelve primero el error",
             "Cache-Schreiben angehalten; zuerst den Schreibfehler beheben",
+            "缓存写入已暂停，请先解决写入错误",
         ],
     ),
     (
@@ -395,6 +424,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Le cache sélectionné a changé ; actualisez la liste",
             "La caché seleccionada ha cambiado; actualiza la lista",
             "Ausgewählter Cache hat sich geändert; Liste aktualisieren",
+            "选中的缓存已变化，请刷新列表",
         ],
     ),
     (
@@ -404,6 +434,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Le dossier des caches a changé ; actualisez la liste",
             "La carpeta de cachés ha cambiado; actualiza la lista",
             "Cache-Ordner hat sich geändert; Liste aktualisieren",
+            "缓存目录已变化，请刷新列表",
         ],
     ),
     (
@@ -413,6 +444,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Cache utilisé par un autre client",
             "Otro cliente está usando la caché",
             "Cache wird von einem anderen Client verwendet",
+            "缓存正被另一客户端使用",
         ],
     ),
     (
@@ -422,6 +454,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Cache persistant indisponible",
             "La caché persistente no está disponible",
             "Dauerhafter Cache nicht verfügbar",
+            "持久缓存不可用",
         ],
     ),
     (
@@ -431,6 +464,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Identité du cache inconnue",
             "Identidad de caché desconocida",
             "Cache-Identität unbekannt",
+            "无法识别缓存",
         ],
     ),
     (
@@ -440,6 +474,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Traitement du cache indisponible",
             "El proceso de caché no está disponible",
             "Cache-Verarbeitung nicht verfügbar",
+            "缓存处理不可用",
         ],
     ),
     (
@@ -449,6 +484,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Entrée endommagée du cache ignorée",
             "Se ha omitido un registro de caché dañado",
             "Beschädigter Cache-Eintrag übersprungen",
+            "已跳过损坏的缓存记录",
         ],
     ),
     (
@@ -458,6 +494,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Identifiant du monde invalide",
             "Identificador de mundo no válido",
             "Ungültige Weltkennung",
+            "无效的世界标识",
         ],
     ),
     (
@@ -467,6 +504,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "En-tête du cache tronqué",
             "La cabecera de caché está truncada",
             "Cache-Kopf abgeschnitten",
+            "缓存文件头不完整",
         ],
     ),
     (
@@ -476,6 +514,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Aucun en-tête de cache récupérable",
             "No hay una cabecera de caché recuperable",
             "Kein wiederherstellbarer Cache-Kopf",
+            "没有可恢复的缓存文件头",
         ],
     ),
     (
@@ -485,6 +524,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Version du format de cache non prise en charge",
             "Versión del formato de caché no compatible",
             "Nicht unterstützte Cache-Formatversion",
+            "不支持的缓存格式版本",
         ],
     ),
     (
@@ -494,6 +534,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Le cache appartient à un autre monde",
             "La caché pertenece a otro mundo",
             "Cache gehört zu einer anderen Welt",
+            "世界标识不匹配",
         ],
     ),
     (
@@ -503,6 +544,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Aucun index de cache récupérable",
             "No hay un índice de caché recuperable",
             "Kein wiederherstellbarer Cache-Index",
+            "没有可恢复的缓存索引",
         ],
     ),
     (
@@ -512,6 +554,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Génération du cache invalide",
             "Generación de caché no válida",
             "Ungültige Cache-Generation",
+            "无效的缓存代次",
         ],
     ),
     (
@@ -521,6 +564,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Nombre d’entrées du cache invalide",
             "Número de entradas de caché no válido",
             "Ungültige Anzahl von Cache-Einträgen",
+            "索引条目数量无效",
         ],
     ),
     (
@@ -530,6 +574,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Étendue de l’index du cache invalide",
             "Extensión del índice de caché no válida",
             "Ungültiger Bereich des Cache-Index",
+            "索引范围无效",
         ],
     ),
     (
@@ -539,6 +584,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Page de l’index du cache invalide",
             "Página del índice de caché no válida",
             "Ungültige Cache-Indexseite",
+            "索引页无效",
         ],
     ),
     (
@@ -548,6 +594,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Taille de page d’index invalide",
             "Tamaño de página de índice no válido",
             "Ungültige Größe der Indexseite",
+            "索引页大小无效",
         ],
     ),
     (
@@ -557,6 +604,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Index du cache désordonné",
             "El índice de caché está desordenado",
             "Cache-Index nicht sortiert",
+            "索引顺序无效",
         ],
     ),
     (
@@ -566,6 +614,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Étendue d’une entrée du cache invalide",
             "Extensión de registro de caché no válida",
             "Ungültiger Bereich des Cache-Eintrags",
+            "记录范围无效",
         ],
     ),
     (
@@ -575,6 +624,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Index du cache incomplet",
             "El índice de caché está incompleto",
             "Cache-Index unvollständig",
+            "索引不完整",
         ],
     ),
     (
@@ -584,6 +634,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Des régions du cache se chevauchent",
             "Hay regiones de caché superpuestas",
             "Cache-Bereiche überlappen sich",
+            "记录范围重叠",
         ],
     ),
     (
@@ -593,6 +644,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Somme de contrôle de l’entrée du cache incorrecte",
             "La suma de comprobación del registro no coincide",
             "Prüfsumme des Cache-Eintrags stimmt nicht überein",
+            "记录校验和不匹配",
         ],
     ),
     (
@@ -602,6 +654,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Longueur d’entrée du cache invalide",
             "Longitud de registro de caché no válida",
             "Ungültige Länge des Cache-Eintrags",
+            "记录长度无效",
         ],
     ),
     (
@@ -611,6 +664,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Tuile de terrain invalide",
             "Fragmento de terreno no válido",
             "Ungültige Geländekachel",
+            "地形图块无效",
         ],
     ),
     (
@@ -620,6 +674,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Entrée de terrain invalide",
             "Registro de terreno no válido",
             "Ungültiger Geländeeintrag",
+            "地形记录无效",
         ],
     ),
     (
@@ -629,6 +684,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Nom de biome invalide",
             "Nombre de bioma no válido",
             "Ungültiger Biomname",
+            "生物群系名称无效",
         ],
     ),
     (
@@ -638,6 +694,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Limite des versions d’entrée atteinte",
             "Se ha alcanzado el límite de versiones de registro",
             "Versionslimit des Eintrags erreicht",
+            "记录版本溢出",
         ],
     ),
     (
@@ -647,6 +704,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Limite des générations du cache atteinte",
             "Se ha alcanzado el límite de generaciones de caché",
             "Generationslimit des Cache erreicht",
+            "缓存代次溢出",
         ],
     ),
     (
@@ -656,6 +714,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Limite des versions d’images atteinte",
             "Se ha alcanzado el límite de versiones de imágenes",
             "Versionslimit der Bilder erreicht",
+            "图像代次溢出",
         ],
     ),
     (
@@ -665,6 +724,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Taille maximale du cache dépassée",
             "Se ha superado el tamaño máximo de caché",
             "Maximale Cache-Größe überschritten",
+            "分配长度溢出",
         ],
     ),
     (
@@ -674,6 +734,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Taille maximale du fichier dépassée",
             "Se ha superado el tamaño máximo del archivo",
             "Maximale Dateigröße überschritten",
+            "文件偏移量溢出",
         ],
     ),
     (
@@ -683,6 +744,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Table d’espace libre du cache invalide",
             "La tabla de espacio libre de caché no es válida",
             "Freispeichertabelle des Cache beschädigt",
+            "空闲空间索引无效",
         ],
     ),
     (
@@ -692,6 +754,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Cache bloqué après un échec d’écriture",
             "La caché está bloqueada tras un error de escritura",
             "Cache nach Schreibfehler gesperrt",
+            "写入发生输入输出错误，需要恢复",
         ],
     ),
     (
@@ -701,6 +764,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Espace disque insuffisant",
             "No queda espacio en el disco",
             "Nicht genügend Speicherplatz auf dem Datenträger",
+            "磁盘空间不足",
         ],
     ),
     (
@@ -710,6 +774,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Accès au fichier refusé",
             "Acceso al archivo denegado",
             "Dateizugriff verweigert",
+            "权限不足",
         ],
     ),
     (
@@ -719,6 +784,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Accès au fichier refusé",
             "Acceso al archivo denegado",
             "Dateizugriff verweigert",
+            "访问被拒绝",
         ],
     ),
     (
@@ -728,6 +794,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Système de fichiers en lecture seule",
             "El sistema de archivos es de solo lectura",
             "Dateisystem ist schreibgeschützt",
+            "文件系统为只读",
         ],
     ),
     (
@@ -737,6 +804,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Fichier ou dossier introuvable",
             "No se encuentra el archivo o la carpeta",
             "Datei oder Ordner nicht gefunden",
+            "文件或目录不存在",
         ],
     ),
     (
@@ -746,6 +814,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Fichier introuvable",
             "No se encuentra el archivo",
             "Datei nicht gefunden",
+            "找不到指定文件",
         ],
     ),
     (
@@ -755,6 +824,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Erreur de lecture ou d’écriture du disque",
             "Error de lectura o escritura del disco",
             "Fehler beim Lesen oder Schreiben des Datenträgers",
+            "输入输出错误",
         ],
     ),
     (
@@ -764,6 +834,7 @@ const MESSAGES: &[(&str, [&str; 4])] = &[
             "Fichier de cache tronqué",
             "El archivo de caché está truncado",
             "Cache-Datei abgeschnitten",
+            "缓存文件不完整",
         ],
     ),
 ];
@@ -796,6 +867,7 @@ pub fn message_for(language: Language, raw: &str) -> String {
         "Impossible d’effectuer l’opération",
         "No se pudo completar la operación",
         "Der Vorgang konnte nicht abgeschlossen werden",
+        "无法完成操作",
     ][language as usize - 1]
         .into()
 }
@@ -805,12 +877,13 @@ pub fn localize_message(raw: &str) -> String {
 }
 
 macro_rules! localized_format {
-    ($en:literal, $ru:literal, $fr:literal, $es:literal, $de:literal $(, $arg:expr)* $(,)?) => {
+    ($en:literal, $ru:literal, $fr:literal, $es:literal, $de:literal, $zh:literal $(, $arg:expr)* $(,)?) => {
         match language() {
             Language::Russian => format!($ru $(, $arg)*),
             Language::French => format!($fr $(, $arg)*),
             Language::Spanish => format!($es $(, $arg)*),
             Language::German => format!($de $(, $arg)*),
+            Language::SimplifiedChinese => format!($zh $(, $arg)*),
             Language::English => format!($en $(, $arg)*),
         }
     };
@@ -835,16 +908,24 @@ impl Dimension {
     }
     pub fn label(self) -> &'static str {
         match self {
-            Self::Player => tr("Player", "Игрок", "Joueur", "Jugador", "Spieler"),
+            Self::Player => tr(
+                "Player",
+                "Игрок",
+                "Joueur",
+                "Jugador",
+                "Spieler",
+                "跟随玩家",
+            ),
             Self::Overworld => tr(
                 "Overworld",
                 "Верхний мир",
                 "Surface",
                 "Mundo normal",
                 "Oberwelt",
+                "主世界",
             ),
-            Self::Nether => tr("Nether", "Незер", "Nether", "Nether", "Nether"),
-            Self::End => tr("End", "Энд", "End", "End", "Ende"),
+            Self::Nether => tr("Nether", "Незер", "Nether", "Nether", "Nether", "下界"),
+            Self::End => tr("End", "Энд", "End", "End", "Ende", "末地"),
         }
     }
     pub fn from_id(id: &str) -> Self {
@@ -917,6 +998,7 @@ pub mod minimap {
                     "En haut à gauche",
                     "Arriba a la izquierda",
                     "Oben links",
+                    "左上角",
                 ),
                 Self::TopRight => tr(
                     "Top right",
@@ -924,6 +1006,7 @@ pub mod minimap {
                     "En haut à droite",
                     "Arriba a la derecha",
                     "Oben rechts",
+                    "右上角",
                 ),
                 Self::BottomLeft => tr(
                     "Bottom left",
@@ -931,6 +1014,7 @@ pub mod minimap {
                     "En bas à gauche",
                     "Abajo a la izquierda",
                     "Unten links",
+                    "左下角",
                 ),
                 Self::BottomRight => tr(
                     "Bottom right",
@@ -938,6 +1022,7 @@ pub mod minimap {
                     "En bas à droite",
                     "Abajo a la derecha",
                     "Unten rechts",
+                    "右下角",
                 ),
             }
         }
@@ -981,6 +1066,7 @@ pub mod minimap {
                     "Lettre + distance",
                     "Letra + distancia",
                     "Buchstabe + Entfernung",
+                    "首字 + 距离",
                 ),
                 Self::Letter => tr(
                     "Letter only",
@@ -988,6 +1074,7 @@ pub mod minimap {
                     "Lettre seule",
                     "Solo letra",
                     "Nur Buchstabe",
+                    "仅首字",
                 ),
                 Self::NameDistance => tr(
                     "Name + distance",
@@ -995,6 +1082,7 @@ pub mod minimap {
                     "Nom + distance",
                     "Nombre + distancia",
                     "Name + Entfernung",
+                    "名称 + 距离",
                 ),
             }
         }
@@ -1028,8 +1116,15 @@ pub mod minimap {
 
         pub fn label(self) -> &'static str {
             match self {
-                Self::Compass => tr("Compass", "Компас", "Boussole", "Brújula", "Kompass"),
-                Self::Axes => tr("Axes", "Оси", "Axes", "Ejes", "Achsen"),
+                Self::Compass => tr(
+                    "Compass",
+                    "Компас",
+                    "Boussole",
+                    "Brújula",
+                    "Kompass",
+                    "方位",
+                ),
+                Self::Axes => tr("Axes", "Оси", "Axes", "Ejes", "Achsen", "坐标轴"),
             }
         }
     }
@@ -1066,6 +1161,7 @@ pub mod minimap {
                     "Une lettre",
                     "Una letra",
                     "Ein Buchstabe",
+                    "一个字",
                 ),
                 Self::SimilarColors => tr(
                     "Two for similar colours",
@@ -1073,6 +1169,7 @@ pub mod minimap {
                     "Deux si couleurs proches",
                     "Dos con colores similares",
                     "Zwei bei ähnlichen Farben",
+                    "相近颜色用两个字",
                 ),
                 Self::AnyColors => tr(
                     "Two regardless of colour",
@@ -1080,6 +1177,7 @@ pub mod minimap {
                     "Deux quelle que soit la couleur",
                     "Dos sin importar el color",
                     "Zwei unabhängig von der Farbe",
+                    "始终用两个字",
                 ),
             }
         }
@@ -1420,9 +1518,9 @@ pub mod minimap {
         pub fn labels(self) -> Vec<String> {
             let on = |v| {
                 if v {
-                    tr("On", "Вкл", "Activé", "Activado", "Ein")
+                    tr("On", "Вкл", "Activé", "Activado", "Ein", "开")
                 } else {
-                    tr("Off", "Выкл", "Désactivé", "Desactivado", "Aus")
+                    tr("Off", "Выкл", "Désactivé", "Desactivado", "Aus", "关")
                 }
             };
             vec![
@@ -1432,6 +1530,7 @@ pub mod minimap {
                     "Minicarte : {}",
                     "Minimapa: {}",
                     "Minikarte: {}",
+                    "小地图: {}",
                     on(self.enabled)
                 ),
                 localized_format!(
@@ -1440,6 +1539,7 @@ pub mod minimap {
                     "Position : {}",
                     "Posición: {}",
                     "Position: {}",
+                    "位置: {}",
                     self.corner.label()
                 ),
                 localized_format!(
@@ -1448,6 +1548,7 @@ pub mod minimap {
                     "Taille : {} px d’interface",
                     "Tamaño: {} px de interfaz",
                     "Größe: {} GUI-Pixel",
+                    "大小: {} 界面像素",
                     self.size_px
                 ),
                 localized_format!(
@@ -1456,10 +1557,11 @@ pub mod minimap {
                     "Forme : {}",
                     "Forma: {}",
                     "Form: {}",
+                    "形状: {}",
                     if self.round {
-                        tr("Circle", "Круг", "Cercle", "Círculo", "Kreis")
+                        tr("Circle", "Круг", "Cercle", "Círculo", "Kreis", "圆形")
                     } else {
-                        tr("Square", "Квадрат", "Carré", "Cuadrado", "Quadrat")
+                        tr("Square", "Квадрат", "Carré", "Cuadrado", "Quadrat", "方形")
                     }
                 ),
                 localized_format!(
@@ -1468,6 +1570,7 @@ pub mod minimap {
                     "Échelle : {} blocs/pixel",
                     "Escala: {} bloques/píxel",
                     "Maßstab: {} Blöcke/Pixel",
+                    "比例: {} 方块/像素",
                     self.blocks_per_pixel
                 ),
                 localized_format!(
@@ -1476,6 +1579,7 @@ pub mod minimap {
                     "Rotation : {}",
                     "Rotación: {}",
                     "Drehung: {}",
+                    "旋转: {}",
                     on(self.rotate_with_player)
                 ),
                 tr(
@@ -1484,6 +1588,7 @@ pub mod minimap {
                     "Réinitialiser les réglages de la carte",
                     "Restablecer ajustes del mapa",
                     "Karteneinstellungen zurücksetzen",
+                    "重置地图设置",
                 )
                 .into(),
                 localized_format!(
@@ -1492,6 +1597,7 @@ pub mod minimap {
                     "Dimension de la minicarte : {}",
                     "Dimensión del minimapa: {}",
                     "Minikarten-Dimension: {}",
+                    "小地图维度: {}",
                     self.mini_dimension.label()
                 ),
                 localized_format!(
@@ -1500,6 +1606,7 @@ pub mod minimap {
                     "Dimension de la carte du monde : {}",
                     "Dimensión del mapa del mundo: {}",
                     "Weltkarten-Dimension: {}",
+                    "大地图维度: {}",
                     self.world_dimension.label()
                 ),
                 localized_format!(
@@ -1508,6 +1615,7 @@ pub mod minimap {
                     "Coordonnées de la Surface : {}",
                     "Coordenadas del mundo normal: {}",
                     "Oberwelt-Koordinaten: {}",
+                    "主世界坐标: {}",
                     on(self.overworld_coordinates)
                 ),
                 localized_format!(
@@ -1516,6 +1624,7 @@ pub mod minimap {
                     "Coordonnées du Nether : {}",
                     "Coordenadas del Nether: {}",
                     "Nether-Koordinaten: {}",
+                    "下界坐标: {}",
                     on(self.nether_coordinates)
                 ),
                 localized_format!(
@@ -1524,6 +1633,7 @@ pub mod minimap {
                     "Repères de mort : {}",
                     "Marcadores de muerte: {}",
                     "Todes-Wegpunkte: {}",
+                    "死亡路径点: {}",
                     on(self.death_waypoints)
                 ),
                 localized_format!(
@@ -1532,6 +1642,7 @@ pub mod minimap {
                     "Supprimer les repères de mort à l’approche : {}",
                     "Eliminar marcadores de muerte al acercarse: {}",
                     "Todes-Wegpunkte bei Annäherung entfernen: {}",
+                    "到达后删除死亡路径点: {}",
                     on(self.death_waypoint_auto_remove)
                 ),
                 localized_format!(
@@ -1540,6 +1651,7 @@ pub mod minimap {
                     "Afficher les repères dans le monde 3D : {}",
                     "Mostrar marcadores en el mundo 3D: {}",
                     "Wegpunkte in der 3D-Welt zeigen: {}",
+                    "在 3D 世界中显示路径点: {}",
                     on(self.world_waypoints)
                 ),
                 localized_format!(
@@ -1548,6 +1660,7 @@ pub mod minimap {
                     "Marqueur 3D : {}",
                     "Marcador 3D: {}",
                     "3D-Markierung: {}",
+                    "3D 标记: {}",
                     self.world_waypoint_style.label()
                 ),
                 localized_format!(
@@ -1556,6 +1669,7 @@ pub mod minimap {
                     "Lettres de direction : {}",
                     "Letras de dirección: {}",
                     "Richtungsbuchstaben: {}",
+                    "方向标记: {}",
                     on(self.directions)
                 ),
                 localized_format!(
@@ -1564,6 +1678,7 @@ pub mod minimap {
                     "Style de direction : {}",
                     "Estilo de dirección: {}",
                     "Richtungsstil: {}",
+                    "方向样式: {}",
                     self.direction_style.label()
                 ),
                 localized_format!(
@@ -1572,6 +1687,7 @@ pub mod minimap {
                     "Étiquettes 3D au survol uniquement : {}",
                     "Etiquetas 3D solo al apuntar: {}",
                     "3D-Beschriftungen nur beim Zielen: {}",
+                    "3D 标签仅在悬停时显示: {}",
                     on(self.labels_on_hover)
                 ),
             ]
@@ -2639,7 +2755,15 @@ impl Waypoint {
             .collect();
         let name = name.trim();
         if name.is_empty() {
-            tr("Waypoint", "Вейпоинт", "Repère", "Marcador", "Wegpunkt").into()
+            tr(
+                "Waypoint",
+                "Вейпоинт",
+                "Repère",
+                "Marcador",
+                "Wegpunkt",
+                "路径点",
+            )
+            .into()
         } else {
             name.to_owned()
         }
@@ -2943,6 +3067,7 @@ impl Controller {
             "RAM carte : {} Mio…",
             "RAM del mapa: {} MiB…",
             "Karten-RAM: {} MiB…",
+            "地图内存: {} MiB…",
             state.settings.cache_ram_mib
         ));
         labels.push(
@@ -2952,6 +3077,7 @@ impl Controller {
                 "Gestion du cache… (en jeu)",
                 "Gestor de caché… (en el mundo)",
                 "Cache-Verwaltung… (im Spiel)",
+                "管理地图缓存…（世界内）",
             )
             .into(),
         );
@@ -2961,6 +3087,7 @@ impl Controller {
             "Initiales des repères : {}",
             "Iniciales de marcadores: {}",
             "Wegpunktinitialen: {}",
+            "路径点缩写: {}",
             state.settings.waypoint_letters.label()
         ));
         if self.maps.status().is_some() {
@@ -2971,6 +3098,7 @@ impl Controller {
                     "Cache indisponible : voir la carte",
                     "Caché no disponible: consulta el mapa",
                     "Karten-Cache nicht verfügbar: siehe Karte",
+                    "地图缓存不可用，请查看地图状态",
                 )
                 .into(),
             );
@@ -2984,6 +3112,7 @@ impl Controller {
                     "Échec de l’enregistrement des réglages : voir le journal du client",
                     "Error al guardar los ajustes: consulta el registro del cliente",
                     "Einstellungen konnten nicht gespeichert werden: siehe Client-Protokoll",
+                    "保存设置失败，请查看客户端日志",
                 )
                 .into(),
             );
@@ -3132,7 +3261,7 @@ impl Controller {
         }
         let name = death_waypoint_name(
             &state.waypoints,
-            tr("Death", "Смерть", "Mort", "Muerte", "Tod"),
+            tr("Death", "Смерть", "Mort", "Muerte", "Tod", "死亡"),
         );
         let added = push_waypoint(
             &mut state.waypoints,
@@ -3548,6 +3677,76 @@ pub mod container {
         }
     }
 
+    #[cfg(windows)]
+    fn lock_container(file: &File, shared: bool) -> Result<(), LeaseError> {
+        use std::os::windows::io::{AsRawHandle, RawHandle};
+
+        #[repr(C)]
+        struct Overlapped {
+            internal: usize,
+            internal_high: usize,
+            offset: u32,
+            offset_high: u32,
+            event: RawHandle,
+        }
+        unsafe extern "system" {
+            fn LockFileEx(
+                file: RawHandle,
+                flags: u32,
+                reserved: u32,
+                length: u32,
+                length_high: u32,
+                overlapped: *mut Overlapped,
+            ) -> i32;
+        }
+        const FAIL_IMMEDIATELY: u32 = 1;
+        const EXCLUSIVE: u32 = 2;
+        const LOCK_VIOLATION: i32 = 33;
+
+        // Leave the two checksummed catalog headers readable during an exclusive
+        // lease. The payload range still overlaps older whole-file locks.
+        let mut range = Overlapped {
+            internal: 0,
+            internal_high: 0,
+            offset: PREFIX as u32,
+            offset_high: (PREFIX >> 32) as u32,
+            event: std::ptr::null_mut(),
+        };
+        let length = u64::MAX - PREFIX;
+        let flags = FAIL_IMMEDIATELY | if shared { 0 } else { EXCLUSIVE };
+        // File uses a synchronous handle and the fail-immediately flag keeps the
+        // request from borrowing the stack descriptor after this call returns.
+        let ok = unsafe {
+            LockFileEx(
+                file.as_raw_handle(),
+                flags,
+                0,
+                length as u32,
+                (length >> 32) as u32,
+                &mut range,
+            )
+        };
+        if ok != 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(LOCK_VIOLATION) {
+            Err(LeaseError::Busy)
+        } else {
+            Err(LeaseError::Io(error))
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn lock_container(file: &File, shared: bool) -> Result<(), LeaseError> {
+        if shared {
+            file.try_lock_shared()
+        } else {
+            file.try_lock()
+        }
+        .map_err(lock_result)
+    }
+
     /// Stored beside the cache directory so renaming/replacing that directory
     /// doesn't produce a second lock inode. Never remove or rename this file.
     struct NamespaceGate {
@@ -3719,12 +3918,7 @@ pub mod container {
                 .write(!shared)
                 .open(path)
                 .map_err(LeaseError::Io)?;
-            if shared {
-                file.try_lock_shared()
-            } else {
-                file.try_lock()
-            }
-            .map_err(lock_result)?;
+            lock_container(&file, shared)?;
             Ok(Self { file })
         }
 
@@ -3733,6 +3927,7 @@ pub mod container {
         }
     }
 
+    #[cfg(not(windows))]
     impl Drop for ContainerLease {
         fn drop(&mut self) {
             // All I/O is synchronous under this owner and has finished now.
@@ -4221,7 +4416,7 @@ pub mod container {
                         .create_new(true)
                         .open(&path)
                         .map_err(LeaseError::Io)?;
-                    file.try_lock().map_err(lock_result)?;
+                    lock_container(&file, false)?;
                     ContainerLease { file }
                 }
                 Err(e) => return Err(e),

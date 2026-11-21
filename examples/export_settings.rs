@@ -6,7 +6,7 @@ fn line(language: &str, key: &str, value: &str) {
     println!("{language}\t{key}\t{value}");
 }
 fn main() {
-    for language in ["en_us", "ru_ru", "fr_fr", "es_es", "de_de"] {
+    for language in ["en_us", "ru_ru", "fr_fr", "es_es", "de_de", "zh_cn"] {
         rt::set_language(language);
         let base = rt::minimap::Settings::default();
         for (key, button) in rt::SDK_SETTING_ROWS {
@@ -17,6 +17,7 @@ fn main() {
                     "Initiales des repères",
                     "Iniciales de marcadores",
                     "Wegpunktinitialen",
+                    "路径点缩写",
                 )
                 .to_owned()
             } else {
@@ -43,6 +44,7 @@ fn main() {
                     "RAM carte (Mio)",
                     "RAM del mapa (MiB)",
                     "Karten-RAM (MiB)",
+                    "地图内存（MiB）",
                 ),
             ),
             (
@@ -53,6 +55,7 @@ fn main() {
                     "Cache (en jeu)",
                     "Caché (en el mundo)",
                     "Cache (im Spiel)",
+                    "地图缓存（世界内）",
                 ),
             ),
             (
@@ -63,6 +66,7 @@ fn main() {
                     "Gérer…",
                     "Administrar…",
                     "Verwalten…",
+                    "管理…",
                 ),
             ),
             (
@@ -73,6 +77,7 @@ fn main() {
                     "Préférences",
                     "Preferencias",
                     "Einstellungen",
+                    "偏好设置",
                 ),
             ),
             (
@@ -83,6 +88,7 @@ fn main() {
                     "Réinitialiser…",
                     "Restablecer…",
                     "Zurücksetzen…",
+                    "重置…",
                 ),
             ),
             (
@@ -93,6 +99,7 @@ fn main() {
                     "Ouvrir la carte du monde",
                     "Abrir mapa del mundo",
                     "Weltkarte öffnen",
+                    "打开大地图",
                 ),
             ),
             (
@@ -103,6 +110,7 @@ fn main() {
                     "Repères",
                     "Marcadores",
                     "Wegpunkte",
+                    "路径点",
                 ),
             ),
         ] {

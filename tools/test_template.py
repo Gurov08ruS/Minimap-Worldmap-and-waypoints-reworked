@@ -31,19 +31,22 @@ def main():
             assert archive.read(name) == source.read_bytes(), name
         cargo = tomllib.loads(archive.read('Cargo.toml').decode())
         assert cargo['dependencies']['horizon-mod-api']['path'] == '.horizon/sdk/api/crates/horizon-mod-api'
-        for language in ['en_us', 'ru_ru', 'fr_fr', 'es_es', 'de_de']:
+        for language in ['en_us', 'ru_ru', 'fr_fr', 'es_es', 'de_de', 'zh_cn']:
             strings = json.loads(archive.read(f"assets/{manifest['id']}/lang/{language}.json"))
             assert strings and all(key and value for key, value in strings.items())
     subprocess.run([str(horizon.mod_tool()), 'check', first['file'], '--json'], check=True)
     # Settings/control labels are generated from the same state cycles as the SDK registrar.
-    result = subprocess.check_output(['cargo', 'run', '--locked', '--offline', '--quiet', '--example', 'export_settings'], cwd=package.ROOT, text=True)
+    result = subprocess.check_output(
+        ['cargo', 'run', '--locked', '--offline', '--quiet', '--example', 'export_settings'],
+        cwd=package.ROOT, encoding='utf-8',
+    )
     labels = {}
     for line in result.splitlines():
         language, key, value = line.split('\t')
         labels.setdefault(language, {})[key] = value
     for language, expected in labels.items():
         file = package.ROOT / 'native/assets' / manifest['id'] / 'lang' / (language + '.json')
-        assert json.loads(file.read_text()) == expected, f'regenerate SDK labels: {language}'
+        assert json.loads(file.read_text(encoding='utf-8')) == expected, f'regenerate SDK labels: {language}'
     with tempfile.TemporaryDirectory(prefix='sdk-installer-', dir=package.ROOT / 'target') as scratch:
         home = Path(scratch)
         (home / 'horizon-mods.txt').write_text('mod.other:true\nkey.other.open:key.keyboard.p\n')

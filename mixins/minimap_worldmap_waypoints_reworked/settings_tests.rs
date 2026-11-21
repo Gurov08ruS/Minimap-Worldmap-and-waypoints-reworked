@@ -89,19 +89,35 @@ macro_rules! define_tests {
             }
 
             #[test]
+            fn simplified_chinese_follows_the_game_locale() {
+                for code in ["zh_cn", "zh-CN", "zh-Hans", "zh-Hans-CN"] {
+                    assert_eq!(Language::from_code(code), Language::SimplifiedChinese);
+                }
+                assert_eq!(Language::from_code("zh_tw"), Language::English);
+                assert_eq!(Language::from_code("fr_ca"), Language::French);
+            }
+
+            #[test]
             fn worker_diagnostics_translate_all_supported_languages_without_losing_error_identity() {
                 let mut keys = std::collections::BTreeSet::new();
+                let translated = [
+                    Language::Russian,
+                    Language::French,
+                    Language::Spanish,
+                    Language::German,
+                    Language::SimplifiedChinese,
+                ];
                 for (english, translations) in MESSAGES {
                     assert!(keys.insert(*english), "duplicate message: {english}");
                     assert_eq!(message_for(Language::English, english), *english);
-                    for (language, expected) in [Language::Russian, Language::French, Language::Spanish, Language::German].into_iter().zip(translations) {
+                    for (language, expected) in translated.into_iter().zip(translations) {
                         assert!(!expected.is_empty());
                         assert_ne!(expected, english);
                         assert_eq!(message_for(language, english), *expected);
                     }
                 }
                 let raw = "Cannot open cache; sampling paused: unsupported container version";
-                for language in [Language::Russian, Language::French, Language::Spanish, Language::German] {
+                for language in translated {
                     let message = message_for(language, raw);
                     assert!(!message.contains("unsupported"));
                     assert!(!message.contains("Cannot open"));
@@ -718,7 +734,8 @@ macro_rules! define_tests {
                     "Ошибка",
                     "Échec",
                     "Error",
-                    "Fehler"
+                    "Fehler",
+                    "失败"
                 )));
                 assert_eq!(fs::read(&directory).unwrap(), b"not a directory");
                 fs::remove_file(directory).unwrap();

@@ -182,14 +182,15 @@ macro_rules! define_tests {
             #[test]
             fn manager_rebuild_refuses_busy_missing_and_mismatched_files() {
                 let dir=CacheDir::new("manager-busy");let world="save:busy";
-                let held=Store::open(&dir.0,world).unwrap();let path=container::world_path(&dir.0,world);
+                drop(Store::open(&dir.0,world).unwrap());let path=container::world_path(&dir.0,world);
                 let before=std::fs::read(&path).unwrap();let file=path.file_name().unwrap().to_str().unwrap();
+                let held=Store::open(&dir.0,world).unwrap();
                 let service=Service::with_directory(Some(dir.0.clone()));
                 assert!(service.rebuild_images(world,file).unwrap().recv_timeout(Duration::from_secs(5)).unwrap().is_err());
                 assert!(service.rebuild_images(world,"other.mwwr").unwrap().recv_timeout(Duration::from_secs(5)).unwrap().is_err());
                 let missing=container::world_path(&dir.0,"save:missing");
                 assert!(service.rebuild_images("save:missing",missing.file_name().unwrap().to_str().unwrap()).unwrap().recv_timeout(Duration::from_secs(5)).unwrap().is_err());
-                assert!(!missing.exists());assert_eq!(std::fs::read(&path).unwrap(),before);drop(held);service.shutdown();
+                assert!(!missing.exists());drop(held);assert_eq!(std::fs::read(&path).unwrap(),before);service.shutdown();
             }
             #[test]
             fn prepared_pages_survive_payload_eviction_without_losing_world_coverage() {

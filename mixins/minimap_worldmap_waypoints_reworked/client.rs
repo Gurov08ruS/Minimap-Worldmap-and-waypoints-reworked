@@ -5,12 +5,13 @@ use super::minimap_compat::MapAccess;
 use runtime::{Language, language, tr};
 
 macro_rules! localized_format {
-    ($en:literal, $ru:literal, $fr:literal, $es:literal, $de:literal $(, $arg:expr)* $(,)?) => {
+    ($en:literal, $ru:literal, $fr:literal, $es:literal, $de:literal, $zh:literal $(, $arg:expr)* $(,)?) => {
         match language() {
             Language::Russian => format!($ru $(, $arg)*),
             Language::French => format!($fr $(, $arg)*),
             Language::Spanish => format!($es $(, $arg)*),
             Language::German => format!($de $(, $arg)*),
+            Language::SimplifiedChinese => format!($zh $(, $arg)*),
             Language::English => format!($en $(, $arg)*),
         }
     };
@@ -867,6 +868,7 @@ fn portal_label(kind: Portal) -> &'static str {
             "Portail du Nether",
             "Portal del Nether",
             "Netherportal",
+            "下界传送门",
         ),
         Portal::End => tr(
             "End portal",
@@ -874,6 +876,7 @@ fn portal_label(kind: Portal) -> &'static str {
             "Portail de l’End",
             "Portal del End",
             "Endportal",
+            "末地传送门",
         ),
         Portal::Gateway => tr(
             "End gateway",
@@ -881,6 +884,7 @@ fn portal_label(kind: Portal) -> &'static str {
             "Passerelle de l’End",
             "Puerta de enlace del End",
             "Endtransitportal",
+            "末地折跃门",
         ),
     }
 }
@@ -1273,6 +1277,7 @@ fn portal_target_text(target: PortalTarget) -> String {
             "Surface : point d’apparition",
             "Mundo normal: punto de aparición",
             "Oberwelt: Spawnpunkt",
+            "主世界：出生点",
         )
         .into(),
         PortalTarget::Outer => tr(
@@ -1281,6 +1286,7 @@ fn portal_target_text(target: PortalTarget) -> String {
             "End : îles extérieures",
             "End: islas exteriores",
             "Ende: äußere Inseln",
+            "末地：外围岛屿",
         )
         .into(),
         PortalTarget::Unknown => tr(
@@ -1289,6 +1295,7 @@ fn portal_target_text(target: PortalTarget) -> String {
             "destination inconnue",
             "destino desconocido",
             "Unbekanntes Ziel",
+            "未知目的地",
         )
         .into(),
     }
@@ -1304,6 +1311,7 @@ fn menu_title(menu: Menu) -> String {
                     " (fond {})",
                     " (fondo {})",
                     " (Grund {})",
+                    "（底部 {}）",
                     fluid.bottom
                 )
             });
@@ -1343,7 +1351,8 @@ fn menu_subtitle(
                     "назначение неизвестно",
                     "destination inconnue",
                     "destino desconocido",
-                    "Unbekanntes Ziel"
+                    "Unbekanntes Ziel",
+                    "未知目的地"
                 )
                 .to_owned(),
                 portal_target_text
@@ -1361,6 +1370,7 @@ fn waypoint_menu(can_teleport: bool) -> Vec<(&'static str, MenuAction)> {
                 "Modifier le repère",
                 "Editar marcador",
                 "Wegpunkt bearbeiten",
+                "编辑路径点",
             ),
             MenuAction::EditWaypoint,
         ),
@@ -1371,6 +1381,7 @@ fn waypoint_menu(can_teleport: bool) -> Vec<(&'static str, MenuAction)> {
                 "Supprimer le repère",
                 "Eliminar marcador",
                 "Wegpunkt löschen",
+                "删除路径点",
             ),
             MenuAction::DeleteWaypoint,
         ),
@@ -1383,6 +1394,7 @@ fn waypoint_menu(can_teleport: bool) -> Vec<(&'static str, MenuAction)> {
                 "Se téléporter au repère",
                 "Teletransporte al marcador",
                 "Zum Wegpunkt teleportieren",
+                "传送到路径点",
             ),
             MenuAction::TeleportWaypoint,
         ));
@@ -1397,6 +1409,7 @@ fn move_view_label() -> &'static str {
         "Centrer la vue sur…",
         "Centrar vista en…",
         "Ansicht verschieben…",
+        "移动视图到…",
     )
 }
 
@@ -1407,6 +1420,7 @@ fn create_waypoint_label() -> &'static str {
         "Créer un repère",
         "Crear marcador",
         "Wegpunkt erstellen",
+        "创建路径点",
     )
 }
 
@@ -1426,6 +1440,7 @@ fn menu_items(
                     "Masquer dans le monde 3D",
                     "Ocultar en el mundo 3D",
                     "In 3D-Welt ausblenden",
+                    "在 3D 世界中隐藏",
                 )
             } else {
                 tr(
@@ -1434,6 +1449,7 @@ fn menu_items(
                     "Afficher dans le monde 3D",
                     "Mostrar en el mundo 3D",
                     "In 3D-Welt zeigen",
+                    "在 3D 世界中显示",
                 )
             },
             MenuAction::Toggle3D,
@@ -1448,6 +1464,7 @@ fn menu_items(
                 "Informations sur le chunk et la région",
                 "Información del chunk y la región",
                 "Chunk- und Regionsinformationen",
+                "区块和区域信息",
             ),
             MenuAction::Information,
         ),
@@ -1458,6 +1475,7 @@ fn menu_items(
                 "Copier les coordonnées",
                 "Copiar coordenadas",
                 "Koordinaten kopieren",
+                "复制坐标",
             ),
             MenuAction::Copy,
         ),
@@ -1468,6 +1486,7 @@ fn menu_items(
                 "Créer un repère",
                 "Crear marcador",
                 "Wegpunkt erstellen",
+                "创建路径点",
             ),
             MenuAction::Waypoint,
         ),
@@ -1480,6 +1499,7 @@ fn menu_items(
                 "Copier les coordonnées de destination",
                 "Copiar coordenadas del destino",
                 "Zielkoordinaten kopieren",
+                "复制目的地坐标",
             ),
             MenuAction::CopyDestination,
         ));
@@ -1494,6 +1514,7 @@ fn menu_items(
                         "Se téléporter au portail",
                         "Teletransportarse al portal",
                         "Zum Portal teleportieren",
+                        "传送到传送门",
                     ),
                     MenuAction::TeleportDestination,
                 ));
@@ -1506,6 +1527,7 @@ fn menu_items(
                     "Se téléporter ici",
                     "Teletransportarse aquí",
                     "Hierher teleportieren",
+                    "传送到这里",
                 ),
                 MenuAction::Teleport,
             ));
@@ -1613,6 +1635,7 @@ fn default_waypoint_name(state: &State) -> String {
         "Repère {}",
         "Marcador {}",
         "Wegpunkt {}",
+        "路径点 {}",
         state.waypoints.len() + 1
     )
 }
@@ -1640,6 +1663,7 @@ fn perform_menu(game: &Game<'_>, state: &mut State, menu: Menu, action: MenuActi
                     "Coordonnées copiées",
                     "Coordenadas copiadas",
                     "Koordinaten kopiert",
+                    "已复制坐标",
                 )
                 .into(),
                 Instant::now(),
@@ -1672,6 +1696,7 @@ fn perform_menu(game: &Game<'_>, state: &mut State, menu: Menu, action: MenuActi
                         "Coordonnées de destination copiées",
                         "Coordenadas del destino copiadas",
                         "Zielkoordinaten kopiert",
+                        "已复制目的地坐标",
                     )
                     .into(),
                     Instant::now(),
@@ -1740,6 +1765,7 @@ fn perform_menu(game: &Game<'_>, state: &mut State, menu: Menu, action: MenuActi
                         "Repère supprimé",
                         "Marcador eliminado",
                         "Wegpunkt gelöscht",
+                        "已删除路径点",
                     )
                     .into(),
                     Instant::now(),
@@ -1855,6 +1881,7 @@ fn draw_notice(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             "Cache carte : {}",
             "Caché: {}",
             "Karten-Cache: {}",
+            "地图缓存: {}",
             error
         );
         game.native_fill(
@@ -2202,6 +2229,7 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             "Repères",
             "Marcadores",
             "Wegpunkte",
+            "路径点",
         ),
         [12.0, 8.0],
         0xffffff,
@@ -2221,6 +2249,7 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             "Créer ici",
             "Crear aquí",
             "Hier erstellen",
+            "在此创建",
         ),
         mouse,
         true,
@@ -2230,7 +2259,7 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         batch,
         ButtonIcon::Back,
         back,
-        tr("Back", "Назад", "Retour", "Volver", "Zurück"),
+        tr("Back", "Назад", "Retour", "Volver", "Zurück", "返回"),
         mouse,
         true,
     );
@@ -2244,6 +2273,7 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
                 "Aucun repère. Faites un clic droit sur la carte ou choisissez « Créer ici ».",
                 "Aún no hay marcadores. Haz clic derecho en el mapa o elige «Crear aquí».",
                 "Noch keine Wegpunkte. Rechtsklick auf die Karte oder „Hier erstellen“ wählen.",
+                "暂无路径点。右键点击地图，或选择“在此创建”。",
             ),
             [16.0, 50.0],
             0xaaaaaa,
@@ -2297,7 +2327,7 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             }
             if inside(mouse, [biome_x, row[1] + 2.0, right - biome_x, 17.0]) {
                 let label = biome.map_or_else(
-                    || tr("Biome: —", "биом: —", "Biome : —", "Bioma: —", "Biom: —").to_owned(),
+                    || tr("Biome: —", "биом: —", "Biome : —", "Bioma: —", "Biom: —", "生物群系：—").to_owned(),
                     localized_biome,
                 );
                 biome_tooltip = Some(label);
@@ -2328,7 +2358,7 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         if inside(mouse, toggle) {
             game.native_fill(batch, toggle, 0xff3a4a5c);
         }
-        let label = tr("3D", "3D", "3D", "3D", "3D");
+        let label = tr("3D", "3D", "3D", "3D", "3D", "3D");
         paint_button_icon(
             game,
             batch,
@@ -2357,7 +2387,7 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         batch,
         ButtonIcon::Edit,
         rename,
-        tr("Edit", "Изменить", "Modifier", "Editar", "Bearbeiten"),
+        tr("Edit", "Изменить", "Modifier", "Editar", "Bearbeiten", "编辑"),
         mouse,
         selected.is_some(),
     );
@@ -2366,7 +2396,7 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         batch,
         ButtonIcon::Delete,
         delete,
-        tr("Delete", "Удалить", "Supprimer", "Eliminar", "Löschen"),
+        tr("Delete", "Удалить", "Supprimer", "Eliminar", "Löschen", "删除"),
         mouse,
         selected.is_some(),
     );
@@ -2381,6 +2411,7 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             "Voir sur la carte",
             "Ver en el mapa",
             "Auf Karte zeigen",
+            "在地图上显示",
         ),
         mouse,
         selected.is_some(),
@@ -2391,6 +2422,7 @@ fn draw_waypoints_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         "Sélectionnez un repère pour voir sa couleur, son nom, son biome et ses coordonnées",
         "Selecciona un marcador para ver su color, nombre, bioma y coordenadas",
         "Wegpunkt auswählen, um Farbe, Namen, Biom und Koordinaten anzuzeigen",
+        "选择路径点可查看颜色、名称、生物群系和坐标",
     );
     game.map_text(batch, hint, [12.0, bottom + 24.0], 0x888f98, true);
     draw_notice(game, batch, state);
@@ -2465,6 +2497,7 @@ fn draw_name_panel(game: &Game<'_>, batch: &mut HudBatch, form: &NameForm) {
                 "Modifier le repère",
                 "Editar marcador",
                 "Wegpunkt bearbeiten",
+                "编辑路径点",
             )
         } else {
             tr(
@@ -2473,6 +2506,7 @@ fn draw_name_panel(game: &Game<'_>, batch: &mut HudBatch, form: &NameForm) {
                 "Nom du repère",
                 "Nombre del marcador",
                 "Wegpunktname",
+                "路径点名称",
             )
         },
         [rect[0] + 10.0, rect[1] + 8.0],
@@ -2490,7 +2524,7 @@ fn draw_name_panel(game: &Game<'_>, batch: &mut HudBatch, form: &NameForm) {
     );
     game.map_text(
         batch,
-        tr("Colour", "Цвет", "Couleur", "Color", "Farbe"),
+        tr("Colour", "Цвет", "Couleur", "Color", "Farbe", "颜色"),
         [rect[0] + 10.0, rect[1] + 49.0],
         0xaaaaaa,
         false,
@@ -2518,7 +2552,7 @@ fn draw_name_panel(game: &Game<'_>, batch: &mut HudBatch, form: &NameForm) {
         batch,
         ButtonIcon::Save,
         save,
-        tr("Save", "Сохранить", "Enregistrer", "Guardar", "Speichern"),
+        tr("Save", "Сохранить", "Enregistrer", "Guardar", "Speichern", "保存"),
         mouse,
         true,
     );
@@ -2527,7 +2561,7 @@ fn draw_name_panel(game: &Game<'_>, batch: &mut HudBatch, form: &NameForm) {
         batch,
         ButtonIcon::Cancel,
         cancel,
-        tr("Cancel", "Отмена", "Annuler", "Cancelar", "Abbrechen"),
+        tr("Cancel", "Отмена", "Annuler", "Cancelar", "Abbrechen", "取消"),
         mouse,
         true,
     );
@@ -2539,6 +2573,7 @@ fn draw_name_panel(game: &Game<'_>, batch: &mut HudBatch, form: &NameForm) {
             "Entrée — enregistrer, Échap — annuler",
             "Intro — guardar, Esc — cancelar",
             "Eingabe — speichern, Esc — abbrechen",
+            "回车保存，Esc 取消",
         ),
         [rect[0] + 10.0, rect[1] + 86.0],
         0x888f98,
@@ -2842,6 +2877,7 @@ fn draw_border(
                     "Bordure du monde",
                     "Borde del mundo",
                     "Weltgrenze",
+                    "世界边界",
                 )
                 .to_owned(),
                 segments,
@@ -2883,6 +2919,7 @@ fn draw_border(
                 "Rendu des chunks : {} chunks",
                 "Render de chunks: {} chunks",
                 "Chunk-Sichtweite: {} Chunks",
+                "区块渲染距离：{} 区块",
                 chunk_radius
             ),
             chunk_segments,
@@ -2900,6 +2937,7 @@ fn draw_border(
                     "Rendu réel (LOD) : {} chunks",
                     "Render real (LOD): {} chunks",
                     "Tatsächliche Sichtweite (LOD): {} Chunks",
+                    "实际渲染距离（LOD）：{} 区块",
                     full_radius
                 ),
                 lod_segments,
@@ -3146,9 +3184,9 @@ fn draw_world_waypoints(
                             "{}  {} {}",
                             waypoint.name,
                             distance,
-                            tr("m", "м", "m", "m", "m")
+                            tr("m", "м", "m", "m", "m", "米")
                         )),
-                        _ => Some(format!("{distance} {}", tr("m", "м", "m", "m", "m"))),
+                        _ => Some(format!("{distance} {}", tr("m", "м", "m", "m", "m", "米"))),
                     }
                 }
             }
@@ -4183,14 +4221,14 @@ const DIRECTION_STEPS: [(f64, f64); 8] = [
 fn direction_label(style: runtime::minimap::DirectionStyle, index: usize) -> &'static str {
     match style {
         runtime::minimap::DirectionStyle::Compass => match index {
-            0 => tr("N", "С", "N", "N", "N"),
-            1 => tr("NE", "СВ", "NE", "NE", "NO"),
-            2 => tr("E", "В", "E", "E", "O"),
-            3 => tr("SE", "ЮВ", "SE", "SE", "SO"),
-            4 => tr("S", "Ю", "S", "S", "S"),
-            5 => tr("SW", "ЮЗ", "SO", "SO", "SW"),
-            6 => tr("W", "З", "O", "O", "W"),
-            7 => tr("NW", "СЗ", "NO", "NO", "NW"),
+            0 => tr("N", "С", "N", "N", "N", "北"),
+            1 => tr("NE", "СВ", "NE", "NE", "NO", "东北"),
+            2 => tr("E", "В", "E", "E", "O", "东"),
+            3 => tr("SE", "ЮВ", "SE", "SE", "SO", "东南"),
+            4 => tr("S", "Ю", "S", "S", "S", "南"),
+            5 => tr("SW", "ЮЗ", "SO", "SO", "SW", "西南"),
+            6 => tr("W", "З", "O", "O", "W", "西"),
+            7 => tr("NW", "СЗ", "NO", "NO", "NW", "西北"),
             _ => "",
         },
         runtime::minimap::DirectionStyle::Axes => match index {
@@ -4701,6 +4739,7 @@ fn draw(
             "Aucune donnée",
             "Sin datos",
             "Keine Daten",
+            "无数据",
         )
     } else {
         tr(
@@ -4709,6 +4748,7 @@ fn draw(
             "Préparation de la carte…",
             "Preparando mapa…",
             "Karte wird vorbereitet…",
+            "正在准备地图…",
         )
     };
     game.map_text(
@@ -4762,6 +4802,7 @@ fn information_lines(game: &Game<'_>, state: &State, menu: Menu, width: f32) -> 
             "Chunk client détaillé (en cache)",
             "Chunk detallado del cliente (caché)",
             "Detaillierter Client-Chunk (Cache)",
+            "客户端详细区块（已缓存）",
         )
     } else if lod.is_some() {
         tr(
@@ -4770,6 +4811,7 @@ fn information_lines(game: &Game<'_>, state: &State, menu: Menu, width: f32) -> 
             "LOD — données approximatives",
             "LOD — datos aproximados",
             "LOD — ungefähre Daten",
+            "LOD（近似数据）",
         )
     } else {
         tr(
@@ -4778,6 +4820,7 @@ fn information_lines(game: &Game<'_>, state: &State, menu: Menu, width: f32) -> 
             "Aucune donnée pour cette couche",
             "Sin datos para esta capa",
             "Keine Daten für diese Ebene",
+            "此图层无数据",
         )
     };
     let layer_text = match layer {
@@ -4787,6 +4830,7 @@ fn information_lines(game: &Game<'_>, state: &State, menu: Menu, width: f32) -> 
             "Surface",
             "Superficie",
             "Oberfläche",
+            "地表",
         )
         .to_owned(),
         Layer::Below(y) => localized_format!(
@@ -4794,7 +4838,8 @@ fn information_lines(game: &Game<'_>, state: &State, menu: Menu, width: f32) -> 
             "Ниже Y {y}",
             "Sous Y {y}",
             "Por debajo de Y {y}",
-            "Unter Y {y}"
+            "Unter Y {y}",
+            "Y {y} 以下"
         ),
     };
     let normal = 0xffe1e7ed;
@@ -4811,8 +4856,8 @@ fn information_lines(game: &Game<'_>, state: &State, menu: Menu, width: f32) -> 
     ];
     if let (Some(y), Some(fluid)) = (menu.height, menu.fluid) {
         let kind = match fluid.kind {
-            FluidKind::Water => tr("Water", "Вода", "Eau", "Agua", "Wasser"),
-            FluidKind::Lava => tr("Lava", "Лава", "Lave", "Lava", "Lava"),
+            FluidKind::Water => tr("Water", "Вода", "Eau", "Agua", "Wasser", "水"),
+            FluidKind::Lava => tr("Lava", "Лава", "Lave", "Lava", "Lava", "熔岩"),
         };
         lines.push((
             localized_format!(
@@ -4821,6 +4866,7 @@ fn information_lines(game: &Game<'_>, state: &State, menu: Menu, width: f32) -> 
                 "{} : surface Y {y}, fond Y {}",
                 "{}: superficie Y {y}, fondo Y {}",
                 "{}: Oberfläche Y {y}, Grund Y {}",
+                "{}：表面 Y {y}，底部 Y {}",
                 kind,
                 fluid.bottom
             ),
@@ -4835,6 +4881,7 @@ fn information_lines(game: &Game<'_>, state: &State, menu: Menu, width: f32) -> 
                 "Chunk : {} / {}",
                 "Chunk: {} / {}",
                 "Chunk: {} / {}",
+                "区块：{} / {}",
                 chunk[0],
                 chunk[1]
             ),
@@ -4869,6 +4916,7 @@ fn information_lines(game: &Game<'_>, state: &State, menu: Menu, width: f32) -> 
                 "Qualité LOD : niveau {level} (1 échantillon pour {stride}×{stride} blocs)",
                 "Calidad LOD: nivel {level} (1 muestra por {stride}×{stride} bloques)",
                 "LOD-Qualität: Stufe {level} (1 Abtastwert je {stride}×{stride} Blöcke)",
+                "LOD 精度：{level} 级（每 {stride}×{stride} 方块采样一次）",
             ),
             yellow,
         ));
@@ -4890,7 +4938,7 @@ fn information_lines(game: &Game<'_>, state: &State, menu: Menu, width: f32) -> 
             .as_ref()
             .map(|id| localized_biome(id))
             .unwrap_or_else(|| {
-                tr("Biome: —", "биом: —", "Biome : —", "Bioma: —", "Biom: —").into()
+                tr("Biome: —", "биом: —", "Biome : —", "Bioma: —", "Biom: —", "生物群系：—").into()
             });
         lines.push((format!("LOD: Y ≈{} | {biome}", sample.height), yellow));
     }
@@ -4905,6 +4953,7 @@ fn information_lines(game: &Game<'_>, state: &State, menu: Menu, width: f32) -> 
                     "Région : {} / {} (32×32 chunks)",
                     "Región: {} / {} (32×32 chunks)",
                     "Region: {} / {} (32×32 Chunks)",
+                    "区域：{} / {}（32×32 区块）",
                     region[0],
                     region[1]
                 ),
@@ -4923,9 +4972,9 @@ fn information_lines(game: &Game<'_>, state: &State, menu: Menu, width: f32) -> 
         }
         if l > 0 {
             let area = if is_region {
-                tr("Region", "Регион", "Région", "Región", "Region")
+                tr("Region", "Регион", "Région", "Región", "Region", "区域")
             } else {
-                tr("Chunk", "Чанк", "Chunk", "Chunk", "Chunk")
+                tr("Chunk", "Чанк", "Chunk", "Chunk", "Chunk", "区块")
             };
             let status = if d > 0 {
                 tr(
@@ -4934,6 +4983,7 @@ fn information_lines(game: &Game<'_>, state: &State, menu: Menu, width: f32) -> 
                     "couverture mixte : détaillée + LOD",
                     "cobertura mixta: detallada + LOD",
                     "gemischte Abdeckung: detailliert + LOD",
+                    "混合覆盖：详细区块 + LOD",
                 )
             } else {
                 tr(
@@ -4942,6 +4992,7 @@ fn information_lines(game: &Game<'_>, state: &State, menu: Menu, width: f32) -> 
                     "couverture LOD — approximative",
                     "cobertura LOD — aproximada",
                     "LOD-Abdeckung — ungefähr",
+                    "LOD 覆盖（近似）",
                 )
             };
             lines.push((format!("{area}: {status}"), yellow));
@@ -4953,6 +5004,7 @@ fn information_lines(game: &Game<'_>, state: &State, menu: Menu, width: f32) -> 
                         "Le LOD de surface ne décrit pas cette couche souterraine",
                         "El LOD de superficie no describe esta capa subterránea",
                         "Oberflächen-LOD beschreibt diese unterirdische Ebene nicht",
+                        "地表 LOD 无法显示此地下图层",
                     )
                     .to_owned(),
                     yellow,
@@ -4966,7 +5018,8 @@ fn information_lines(game: &Game<'_>, state: &State, menu: Menu, width: f32) -> 
                     "Подробных чанков в кэше: {d}; LOD-тайлов: {l}",
                     "Chunks détaillés en cache : {d} ; tuiles LOD : {l}",
                     "Chunks detallados en caché: {d}; teselas LOD: {l}",
-                    "Detaillierte Chunks im Cache: {d}; LOD-Kacheln: {l}"
+                    "Detaillierte Chunks im Cache: {d}; LOD-Kacheln: {l}",
+                    "已缓存详细区块：{d}，LOD 覆盖单元：{l}"
                 ),
                 normal,
             ));
@@ -4979,6 +5032,7 @@ fn information_lines(game: &Game<'_>, state: &State, menu: Menu, width: f32) -> 
             "L’historique des visites n’est pas encore enregistré",
             "El historial de visitas aún no se registra",
             "Der Besuchsverlauf wird noch nicht aufgezeichnet",
+            "暂未记录访问历史",
         )
         .to_owned(),
         0xff9faebd,
@@ -5018,6 +5072,7 @@ fn draw_information(game: &Game<'_>, batch: &mut HudBatch, state: &State, menu: 
             "Chunk / région",
             "Chunk / región",
             "Chunk / Region",
+            "区块 / 区域",
         ),
         [rect[0] + 10.0, rect[1] + 8.0],
         0xffffff,
@@ -5055,7 +5110,7 @@ fn draw_information(game: &Game<'_>, batch: &mut HudBatch, state: &State, menu: 
             72.0,
             18.0,
         ],
-        tr("Close", "Закрыть", "Fermer", "Cerrar", "Schließen"),
+        tr("Close", "Закрыть", "Fermer", "Cerrar", "Schließen", "关闭"),
         game.cursor(),
         true,
     );
@@ -5124,6 +5179,7 @@ fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         "Curseur : —",
         "Cursor: —",
         "Mauszeiger: —",
+        "光标：—",
     )
     .to_owned();
     let mut nether = tr(
@@ -5132,6 +5188,7 @@ fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         "Nether : —",
         "Nether: —",
         "Nether: —",
+        "下界：—",
     )
     .to_owned();
     let mut biome = None;
@@ -5177,6 +5234,7 @@ fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
                         " (fond {})",
                         " (fondo {})",
                         " (Grund {})",
+                        "（底部 {}）",
                         bottom
                     )
                 });
@@ -5250,7 +5308,7 @@ fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         [footer[0] + 6.0, footer[1] + 18.0],
     );
     let mut label = biome.as_deref().map_or_else(
-        || tr("Biome: —", "биом: —", "Biome : —", "Bioma: —", "Biom: —").to_owned(),
+        || tr("Biome: —", "биом: —", "Biome : —", "Bioma: —", "Biom: —", "生物群系：—").to_owned(),
         localized_biome,
     );
     if lod_warning {
@@ -5260,6 +5318,7 @@ fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             " | LOD — approximatif",
             " | LOD — aproximado",
             " | LOD — ungefähr",
+            " | LOD（近似）",
         ));
     }
     game.map_text(
@@ -5291,6 +5350,7 @@ fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
                     "Actualiser cache…",
                     "Actualizar caché…",
                     "Cache aktualisieren…",
+                    "更新缓存…",
                 )
             } else {
                 tr(
@@ -5299,6 +5359,7 @@ fn draw_map_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
                     "Caches…",
                     "Cachés…",
                     "Karten-Caches…",
+                    "地图缓存…",
                 )
             },
             mouse,
@@ -5352,6 +5413,7 @@ fn cache_status(status: &runtime::container::Compatibility) -> &'static str {
             "Compatible",
             "Compatible",
             "Kompatibel",
+            "兼容",
         ),
         RebuildImages => tr(
             "Update available: rebuild map images",
@@ -5359,6 +5421,7 @@ fn cache_status(status: &runtime::container::Compatibility) -> &'static str {
             "Mise à jour : reconstruire les images",
             "Actualización: reconstruir imágenes",
             "Update: Kartenbilder neu aufbauen",
+            "可更新地图图像",
         ),
         Older(_) => tr(
             "Old format: conversion is not available yet",
@@ -5366,6 +5429,7 @@ fn cache_status(status: &runtime::container::Compatibility) -> &'static str {
             "Ancien format : conversion indisponible",
             "Formato antiguo: conversión no disponible",
             "Altes Format: Konvertierung noch nicht verfügbar",
+            "旧版格式，暂不支持转换",
         ),
         Newer(_) => tr(
             "Requires a newer mod version",
@@ -5373,6 +5437,7 @@ fn cache_status(status: &runtime::container::Compatibility) -> &'static str {
             "Version plus récente du mod requise",
             "Requiere una versión más reciente del mod",
             "Neuere Mod-Version erforderlich",
+            "需要更新的模组版本",
         ),
         Damaged => tr(
             "Header unreadable; file preserved",
@@ -5380,6 +5445,7 @@ fn cache_status(status: &runtime::container::Compatibility) -> &'static str {
             "En-tête illisible ; fichier conservé",
             "Cabecera ilegible; archivo conservado",
             "Header unlesbar; Datei erhalten",
+            "无法读取文件头，文件已保留",
         ),
     }
 }
@@ -5391,9 +5457,10 @@ fn cache_kind(world: Option<&str>) -> &'static str {
             "Monde local",
             "Mundo local",
             "Lokale Welt",
+            "本地世界",
         ),
         Some(world) if world.starts_with("server:") => {
-            tr("Server", "Сервер", "Serveur", "Servidor", "Server")
+            tr("Server", "Сервер", "Serveur", "Servidor", "Server", "服务器")
         }
         _ => tr(
             "Unknown world",
@@ -5401,6 +5468,7 @@ fn cache_kind(world: Option<&str>) -> &'static str {
             "Monde inconnu",
             "Mundo desconocido",
             "Unbekannte Welt",
+            "未知世界",
         ),
     }
 }
@@ -5488,6 +5556,7 @@ fn cache_title() -> &'static str {
         "Caches des cartes",
         "Cachés de mapas",
         "Karten-Caches",
+        "地图缓存",
     )
 }
 
@@ -5539,6 +5608,7 @@ fn cache_layer_label(layer: Layer) -> String {
             "Surface",
             "Superficie",
             "Oberfläche",
+            "地表",
         )
         .into(),
         Layer::Below(y) => localized_format!(
@@ -5546,7 +5616,8 @@ fn cache_layer_label(layer: Layer) -> String {
             "Ниже Y {y}",
             "Sous Y {y}",
             "Por debajo de Y {y}",
-            "Unter Y {y}"
+            "Unter Y {y}",
+            "Y {y} 以下"
         ),
     }
 }
@@ -5704,6 +5775,7 @@ fn draw_preview(game: &Game<'_>, batch: &mut HudBatch, preview: &mut CachePrevie
                         "Aucun terrain enregistré",
                         "No hay terreno guardado",
                         "Kein Gelände gespeichert",
+                        "没有已保存的地形",
                     )
                     .into(),
                 );
@@ -5718,6 +5790,7 @@ fn draw_preview(game: &Game<'_>, batch: &mut HudBatch, preview: &mut CachePrevie
                     "Gestion du cache arrêtée",
                     "Gestor detenido",
                     "Cache-Verarbeitung beendet",
+                    "缓存处理已停止",
                 )
                 .into(),
             );
@@ -5821,7 +5894,7 @@ fn draw_preview(game: &Game<'_>, batch: &mut HudBatch, preview: &mut CachePrevie
         batch,
         ButtonIcon::Back,
         tab(batch.width, 0),
-        tr("Back", "Назад", "Retour", "Atrás", "Zurück"),
+        tr("Back", "Назад", "Retour", "Atrás", "Zurück", "返回"),
         mouse,
         true,
     );
@@ -5866,6 +5939,7 @@ fn draw_preview(game: &Game<'_>, batch: &mut HudBatch, preview: &mut CachePrevie
             "Chargement de la carte…",
             "Cargando mapa…",
             "Karte wird geladen…",
+            "正在加载地图…",
         )
         .into()
     } else if let Some(at) = preview.position {
@@ -5877,7 +5951,8 @@ fn draw_preview(game: &Game<'_>, batch: &mut HudBatch, preview: &mut CachePrevie
                 "Последняя позиция",
                 "Dernière position",
                 "Última posición",
-                "Letzte Position"
+                "Letzte Position",
+                "上次位置"
             ),
             at.block[0],
             at.block[1],
@@ -6021,6 +6096,7 @@ fn draw_coordinate_panel(game: &Game<'_>, batch: &mut HudBatch, text: &str, inva
             "Saisissez des X Z valides",
             "Introduce X Z válidas",
             "Gültige X Z eingeben",
+            "请输入有效的 X 和 Z 坐标",
         )
     } else {
         tr(
@@ -6029,6 +6105,7 @@ fn draw_coordinate_panel(game: &Game<'_>, batch: &mut HudBatch, text: &str, inva
             "Saisissez X et Z, p. ex. -120 64",
             "Introduce X y Z, p. ej. -120 64",
             "X und Z eingeben, z. B. -120 64",
+            "输入 X 和 Z，例如 -120 64",
         )
     };
     game.map_text(
@@ -6053,7 +6130,7 @@ fn draw_coordinate_panel(game: &Game<'_>, batch: &mut HudBatch, text: &str, inva
         batch,
         ButtonIcon::Cancel,
         cancel,
-        tr("Cancel", "Отмена", "Annuler", "Cancelar", "Abbrechen"),
+        tr("Cancel", "Отмена", "Annuler", "Cancelar", "Abbrechen", "取消"),
         game.cursor(),
         true,
     );
@@ -6130,6 +6207,7 @@ fn finish_preview_form(game: &Game<'_>, preview: &mut CachePreview, save: bool) 
                             "Repère enregistré",
                             "Marcador guardado",
                             "Wegpunkt gespeichert",
+                            "已保存路径点",
                         )
                     } else {
                         tr(
@@ -6138,6 +6216,7 @@ fn finish_preview_form(game: &Game<'_>, preview: &mut CachePreview, save: bool) 
                             "Repère inchangé",
                             "Marcador sin cambios",
                             "Wegpunkt unverändert",
+                            "路径点未更改",
                         )
                     }
                     .into(),
@@ -6213,6 +6292,7 @@ fn perform_preview_menu(
                 "Repère {}",
                 "Marcador {}",
                 "Wegpunkt {}",
+                "路径点 {}",
                 preview.waypoints.len() + 1
             );
             preview.form = Some(PreviewForm::Waypoint(NameForm {
@@ -6432,6 +6512,7 @@ fn update_cache_ui(game: &Game<'_>, state: &mut State) {
                         "Cache supprimé",
                         "Caché eliminada",
                         "Cache gelöscht",
+                        "已删除缓存",
                     )
                     .into(),
                     Ok(()) => tr(
@@ -6440,6 +6521,7 @@ fn update_cache_ui(game: &Game<'_>, state: &mut State) {
                         "Reconstruction planifiée à la prochaine consultation",
                         "Reconstrucción programada al consultar la caché",
                         "Neuaufbau beim Anzeigen geplant",
+                        "已安排重建，查看此缓存时会更新图像",
                     )
                     .into(),
                     Err(error) => runtime::localize_message(&error),
@@ -6456,6 +6538,7 @@ fn update_cache_ui(game: &Game<'_>, state: &mut State) {
                         "Gestion du cache arrêtée",
                         "Gestor detenido",
                         "Cache-Verarbeitung beendet",
+                        "缓存处理已停止",
                     )
                     .into(),
                 );
@@ -6516,6 +6599,7 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             "Caches des cartes",
             "Cachés de mapas",
             "Karten-Caches",
+            "地图缓存",
         ),
         (batch.width - 166.).max(1.),
     );
@@ -6531,6 +6615,7 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
             "Actualiser",
             "Actualizar",
             "Aktualisieren",
+            "刷新",
         ),
         game.cursor(),
         !snapshot.loading && state.caches.operation.is_none(),
@@ -6619,9 +6704,9 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
                     .as_ref()
                     .is_some_and(|w| w.starts_with("server:"))
                 {
-                    tr("S", "С", "S", "S", "S")
+                    tr("S", "С", "S", "S", "S", "南")
                 } else {
-                    tr("W", "М", "M", "M", "W")
+                    tr("W", "М", "M", "M", "W", "西")
                 },
                 [row[0] + 18., row[1] + 18.],
                 0xffffff,
@@ -6636,6 +6721,7 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
                 "{:.2} MiB · {} · {}",
                 "{:.2} МиБ · {} · {}",
                 "{:.2} Mio · {} · {}",
+                "{:.2} MiB · {} · {}",
                 "{:.2} MiB · {} · {}",
                 "{:.2} MiB · {} · {}",
                 entry.bytes as f64 / 1048576.,
@@ -6673,6 +6759,7 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
                 "Aucun cache",
                 "No hay cachés",
                 "Keine Karten-Caches",
+                "没有地图缓存文件",
             ),
             [12., 46.],
             0xbac4d0,
@@ -6720,6 +6807,7 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
                 "Confirmer",
                 "Confirmar",
                 "Bestätigen",
+                "确认重建",
             )
         } else {
             tr(
@@ -6728,6 +6816,7 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
                 "Reconstruire",
                 "Reconstruir",
                 "Neu aufbauen",
+                "重建图像",
             )
         },
         game.cursor(),
@@ -6736,7 +6825,7 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
     for (index, label, enabled) in [
         (
             1,
-            tr("View", "Просмотр", "Voir", "Ver", "Ansehen"),
+            tr("View", "Просмотр", "Voir", "Ver", "Ansehen", "查看"),
             can_rebuild && !busy && selected.is_some_and(|entry| !is_active_cache(state, entry)),
         ),
         (
@@ -6748,16 +6837,17 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
                     "Confirmer",
                     "Confirmar",
                     "Bestätigen",
+                    "确认",
                 )
             } else {
-                tr("Delete", "Удалить", "Supprimer", "Eliminar", "Löschen")
+                tr("Delete", "Удалить", "Supprimer", "Eliminar", "Löschen", "删除")
             },
             !busy
                 && selected.is_some_and(|entry| {
                     entry.deletion.is_some() && !is_active_cache(state, entry)
                 }),
         ),
-        (3, tr("Back", "Назад", "Retour", "Atrás", "Zurück"), true),
+        (3, tr("Back", "Назад", "Retour", "Atrás", "Zurück", "返回"), true),
     ] {
         let rect = cache_footer(batch.width, batch.height, index);
         let label = cache_text(game, label, rect[2] - 4.);
@@ -6789,6 +6879,7 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
                 "En cours…",
                 "Procesando…",
                 "Verarbeitung…",
+                "处理中…",
             )
         } else if state.caches.confirm_delete.is_some() {
             tr(
@@ -6797,6 +6888,7 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
                 "Supprimer définitivement le cache sélectionné ?",
                 "¿Eliminar definitivamente la caché seleccionada?",
                 "Ausgewählten Karten-Cache endgültig löschen?",
+                "永久删除选中的地形缓存？",
             )
         } else if state.caches.confirm.is_some() {
             tr(
@@ -6805,6 +6897,7 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
                 "Seules les images changent, le terrain est conservé",
                 "Solo se reconstruyen imágenes; se conserva el terreno",
                 "Nur Bilder werden neu aufgebaut; Gelände bleibt erhalten",
+                "仅重建地图图像，保留已保存的地形",
             )
         } else {
             tr(
@@ -6813,6 +6906,7 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
                 "Molette / ‹ › : parcourir. Sélectionnez un cache à reconstruire",
                 "Rueda / ‹ › para navegar. Selecciona una caché para reconstruir imágenes",
                 "Mausrad / ‹ › zum Blättern. Cache zum Neuaufbau der Bilder auswählen",
+                "用滚轮或 ‹ › 翻页。选择缓存可重建图像",
             )
         });
     let message = cache_text(game, message, batch.width - 24.);
@@ -6823,6 +6917,7 @@ fn draw_cache_screen(game: &Game<'_>, batch: &mut HudBatch, state: &State) {
         "Caches : {}–{} / {}{}",
         "Cachés: {}–{} / {}{}",
         "Caches: {}–{} / {}{}",
+        "缓存：{}–{} / {}{}",
         if snapshot.entries.is_empty() {
             0
         } else {
@@ -7415,6 +7510,7 @@ fn waypoint_press(
                 "Repère supprimé",
                 "Marcador eliminado",
                 "Wegpunkt gelöscht",
+                "已删除路径点",
             )
             .into(),
             Instant::now(),
@@ -7475,6 +7571,7 @@ fn save_name(game: &Game<'_>, state: &mut State) {
                 "Repère modifié",
                 "Marcador actualizado",
                 "Wegpunkt aktualisiert",
+                "已更新路径点",
             )
             .into(),
             Instant::now(),
@@ -7501,6 +7598,7 @@ fn save_name(game: &Game<'_>, state: &mut State) {
                     "Repère enregistré",
                     "Marcador guardado",
                     "Wegpunkt gespeichert",
+                    "已保存路径点",
                 )
             } else {
                 tr(
@@ -7509,6 +7607,7 @@ fn save_name(game: &Game<'_>, state: &mut State) {
                     "Repère inchangé : doublon, limite atteinte ou monde indisponible",
                     "Marcador sin cambios: duplicado, límite alcanzado o mundo no disponible",
                     "Wegpunkt unverändert: Duplikat, Grenze erreicht oder Welt nicht verfügbar",
+                    "路径点未更改，可能已存在、已达上限或世界不可用",
                 )
             }
             .into(),

@@ -114,7 +114,7 @@ fn main() {
             if entry.file_type().unwrap().is_dir() {
                 verify_other_sources(original, stage, &path, changed);
             } else if path.extension().is_some_and(|v| v == "rs")
-                && !changed.contains(&path.to_str().unwrap())
+                && !changed.iter().any(|file| Path::new(file) == path)
             {
                 assert_eq!(
                     fs::read(original.join(&path)).unwrap(),
